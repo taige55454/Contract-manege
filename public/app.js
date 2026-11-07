@@ -443,7 +443,13 @@ async function openDetailModal(id) {
 
 function closeDetailModal() {
   document.getElementById('detail_modal').classList.add('hidden');
-  document.getElementById('preview_container').innerHTML = '';
+  const preview = document.getElementById('preview_container');
+  // 主动卸载 iframe 内的 PDF 渲染器句柄，释放内存
+  const iframe = preview.querySelector('iframe');
+  if (iframe) {
+    iframe.src = 'about:blank';
+  }
+  preview.innerHTML = '';
 }
 
 async function uploadAttachmentInDetail(id, fileInput) {
