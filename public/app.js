@@ -1,64 +1,53 @@
 /**
- * 合同与采购立项全生命周期管理系统 - 前端核心逻辑 (Ultimate Edition)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (100% 匹配 index.html)
  * 特性：
- * 1. 合同台账 + 采购立项台账双模块无缝切换与跨表联动自动回填
- * 2. 分段式可视化编号构建器（支持自由穿插自定义段、实时合成预览、零空洞顺延提示）
- * 3. 多机局域网协同：窗口激活与后台定时静默同步（带弹窗/提交防重入锁，绝不打断输入）
- * 4. 预览弹窗关闭时立即销毁 iframe/img 节点，确保浏览器长期使用 0 内存泄漏
+ * 1. 夹心式 4 段自定义分段编号器（[灰底前缀] + [穿插段] + [灰底日期段] + [零空洞流水号] + [灰底后缀]）
+ * 2. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan)
+ * 3. 智能日期输入解析（支持 2026.3.18、简写 3.18、以及 Excel 序列号如 46099 自动转 YYYY-MM-DD）
+ * 4. 顺序可逆双向关联 + 三大资料库在线预览 + 多机协同静默同步（不打断表单输入）
  */
 
-let currentModule = 'contracts'; // 'contracts' | 'procurement'
-let allContracts = [];
-let allProcurements = [];
+let currentTab = 'contract'; // 'contract' | 'procurement'
+let contractsCache = [];
+let procurementsCache = [];
 
-let contractNoRule = { prefix: 'HT-', date_format: 'YYYYMM', seq_digits: 3, suffix: '' };
-let procNoRule = { prefix: 'LX', date_format: 'YYYYMMDD', seq_digits: 3, suffix: '' };
+let defaultOurEntity = '毕节自营公司';
+let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
+let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
-let contractPreviewParts = { prefix: 'HT-', mid_custom: '', date_part: '', seq_part: '001', suffix: '', full_no: '' };
-let procPreviewParts = { prefix: 'LX', mid_custom: '', date_part: '', seq_part: '001', suffix: '', full_no: '' };
-
-let currentDetailContract = null;
-let currentDetailProcurement = null;
-
-// 防重入状态锁
-let isSubmittingForm = false;
-let isUploadingDetail = false;
+let isFreeContractNoMode = false;
+let isFreeProcNoMode = false;
+let isSubmitting = false;
 let isSilentSyncing = false;
 
-const TOKEN_STORAGE_KEY = 'contract_sys_lan_token';
+const LAN_TOKEN_KEY = 'cm_lan_session_token';
 
-// ==================== 1. 统一请求封装与防 XSS 工具 ====================
-function getAccessToken() {
-  return localStorage.getItem(TOKEN_STORAGE_KEY) || '';
+// ==================== 1. 鉴权请求封装与通用工具 ====================
+function getLanToken() {
+  return localStorage.getItem(LAN_TOKEN_KEY) || '';
 }
 
-function setAccessToken(token) {
-  if (token) {
-    localStorage.setItem(TOKEN_STORAGE_KEY, token);
-  } else {
-    localStorage.removeItem(TOKEN_STORAGE_KEY);
-  }
+function setLanToken(token) {
+  if (token) localStorage.setItem(LAN_TOKEN_KEY, token);
+  else localStorage.removeItem(LAN_TOKEN_KEY);
 }
 
 function withTokenUrl(url) {
-  const token = getAccessToken();
-  if (!token) return url;
-  const sep = url.includes('?') ? '&' : '?';
-  return `${url}${sep}token=${encodeURIComponent(token)}`;
+  const tk = getLanToken();
+  if (!tk) return url;
+  return url + (url.includes('?') ? '&' : '?') + `token=${encodeURIComponent(tk)}`;
 }
 
 async function apiFetch(url, options = {}) {
   const headers = options.headers ? { ...options.headers } : {};
-  const token = getAccessToken();
-  if (token) {
-    headers['x-access-token'] = token;
+  const tk = getLanToken();
+  if (tk) headers['x-lan-token'] = tk;
+  const res = await fetch(url, { ...options, headers });
+  if (res.status === 401) {
+    document.getElementById('lan_auth_overlay')?.classList.remove('hidden');
+    throw new Error('需要验证内网访问口令');
   }
-  const resp = await fetch(url, { ...options, headers });
-  if (resp.status === 401) {
-    showLanAuthOverlay();
-    throw new Error('需要验证局域网访问口令');
-  }
-  return resp;
+  return res;
 }
 
 function escapeHtml(str) {
@@ -70,92 +59,282 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-function formatMoney(num) {
-  const n = Number(num || 0);
+function formatMoney(val) {
+  const n = Number(val || 0);
   return '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-function formatFileSize(bytes) {
-  const b = Number(bytes || 0);
-  if (b < 1024) return b + ' B';
-  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + ' KB';
-  return (b / (1024 * 1024)).toFixed(2) + ' MB';
+// 智能日期解析（支持 2026.3.18 / 3.18 / Excel 序列号 46099）
+function parseSmartDateString(raw) {
+  const str = String(raw || '').trim();
+  if (!str) return '';
+  if (/^\d{5}$/.test(str)) {
+    const serial = parseInt(str, 10);
+    if (serial >= 20000 && serial <= 80000) {
+      const d = new Date((serial - 25569) * 86400 * 1000);
+      if (!isNaN(d.getTime())) {
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+      }
+    }
+  }
+  if (/^\d{8}$/.test(str)) {
+    return `${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}`;
+  }
+  const full = str.match(/^(\d{4})[-./年](\d{1,2})[-./月](\d{1,2})日?$/);
+  if (full) {
+    return `${full[1]}-${String(parseInt(full[2], 10)).padStart(2, '0')}-${String(parseInt(full[3], 10)).padStart(2, '0')}`;
+  }
+  const short = str.match(/^(\d{1,2})[-./月](\d{1,2})日?$/);
+  if (short) {
+    const yyyy = new Date().getFullYear();
+    return `${yyyy}-${String(parseInt(short[1], 10)).padStart(2, '0')}-${String(parseInt(short[2], 10)).padStart(2, '0')}`;
+  }
+  return str;
 }
 
-function showToast(msg, type = 'success') {
-  const container = document.getElementById('toast_container');
-  if (!container) return;
-  const el = document.createElement('div');
-  el.className = `toast-item toast-${type}`;
-  el.textContent = msg;
-  container.appendChild(el);
-  setTimeout(() => {
-    el.classList.add('fade-out');
-    setTimeout(() => el.remove(), 300);
-  }, type === 'error' ? 4500 : 3200);
+function normalizeDateInputElem(el) {
+  if (!el) return '';
+  el.value = parseSmartDateString(el.value);
+  return el.value;
 }
 
-// ==================== 2. 顶部模块切换与年份筛选初始化 ====================
-function initYearSelects() {
-  const curYear = new Date().getFullYear();
-  const cYearSel = document.getElementById('filter_year');
-  const pYearSel = document.getElementById('proc_filter_year');
-  for (let y = curYear + 1; y >= curYear - 8; y--) {
-    if (cYearSel) cYearSel.insertAdjacentHTML('beforeend', `<option value="${y}">${y}年</option>`);
-    if (pYearSel) pYearSel.insertAdjacentHTML('beforeend', `<option value="${y}">${y}年</option>`);
+function pickDateToInput(pickerEl, targetInputId, isSignDate) {
+  const target = document.getElementById(targetInputId);
+  if (target && pickerEl.value) {
+    target.value = pickerEl.value;
+    if (isSignDate) onSignDateBlur(target);
   }
 }
 
-async function switchModule(mod) {
-  currentModule = mod === 'procurement' ? 'procurement' : 'contracts';
-  document.getElementById('tab_btn_contracts')?.classList.toggle('active', currentModule === 'contracts');
-  document.getElementById('tab_btn_procurement')?.classList.toggle('active', currentModule === 'procurement');
+function renderDueChip(dateStr) {
+  if (!dateStr) return '<span style="color:#9ca3af;">-</span>';
+  const today = new Date().toISOString().slice(0, 10);
+  const diffDays = Math.ceil((new Date(dateStr) - new Date(today)) / (86400 * 1000));
+  if (diffDays < 0) {
+    return `<span class="due-chip" style="background:#fee2e2;color:#991b1b;">${escapeHtml(dateStr)} (已超期)</span>`;
+  }
+  if (diffDays <= 30) {
+    return `<span class="due-chip" style="background:#fef3c7;color:#92400e;">${escapeHtml(dateStr)} (${diffDays}天到期)</span>`;
+  }
+  return `<span>${escapeHtml(dateStr)}</span>`;
+}
 
-  document.getElementById('module_contracts_view')?.classList.toggle('hidden', currentModule !== 'contracts');
-  document.getElementById('module_procurement_view')?.classList.toggle('hidden', currentModule !== 'procurement');
+// ==================== 2. 顶部双模块切换与初始化 ====================
+function initYearDropdowns() {
+  const curYear = new Date().getFullYear();
+  const cYear = document.getElementById('filter_year');
+  const pYear = document.getElementById('proc_filter_year');
+  for (let y = curYear + 1; y >= curYear - 8; y--) {
+    if (cYear) cYear.insertAdjacentHTML('beforeend', `<option value="${y}">${y}年</option>`);
+    if (pYear) pYear.insertAdjacentHTML('beforeend', `<option value="${y}">${y}年</option>`);
+  }
+}
 
-  if (currentModule === 'procurement') {
-    await loadProcNoRule();
+async function switchModuleTab(tab) {
+  currentTab = tab === 'procurement' ? 'procurement' : 'contract';
+
+  document.getElementById('tab_btn_contract')?.classList.toggle('active', currentTab === 'contract');
+  document.getElementById('tab_btn_procurement')?.classList.toggle('active', currentTab === 'procurement');
+
+  document.getElementById('header_group_contract')?.classList.toggle('hidden', currentTab !== 'contract');
+  document.getElementById('header_group_procurement')?.classList.toggle('hidden', currentTab !== 'procurement');
+
+  document.getElementById('view_contract')?.classList.toggle('hidden', currentTab !== 'contract');
+  document.getElementById('view_procurement')?.classList.toggle('hidden', currentTab !== 'procurement');
+
+  if (currentTab === 'procurement') {
+    await loadProcNoRuleSettings();
     await loadProcurements();
   } else {
-    await loadContractNoRule();
+    await loadContractNoRuleSettings();
     await loadContracts();
   }
 }
 
-// ==================== 3. 编号规则设置与“分段式编号构建器” ====================
-async function loadContractNoRule() {
+// ==================== 3. 内网协同安全锁与默认主体设置 ====================
+async function checkLanAuthStatus() {
   try {
-    const resp = await apiFetch('/api/settings/contract-no-rule');
-    const json = await resp.json();
+    const res = await fetch('/api/lan-auth/status', {
+      headers: getLanToken() ? { 'x-lan-token': getLanToken() } : {}
+    });
+    const json = await res.json();
+    if (json.is_localhost) {
+      document.getElementById('host_lan_bar')?.classList.remove('hidden');
+      document.getElementById('display_lan_status').textContent = json.enabled
+        ? (json.passcode ? '口令保护中' : '免密开启')
+        : '已关闭内网';
+    } else {
+      if (json.locked && !json.authorized) {
+        document.getElementById('lan_auth_overlay')?.classList.remove('hidden');
+        return false;
+      }
+      if (json.locked && json.authorized) {
+        document.getElementById('btn_lan_logout')?.classList.remove('hidden');
+      }
+    }
+    return true;
+  } catch (e) {
+    return true;
+  }
+}
+
+async function submitLanAuthForm(e) {
+  e.preventDefault();
+  const input = document.getElementById('lan_auth_passcode_input');
+  const errBox = document.getElementById('lan_auth_error');
+  try {
+    const res = await fetch('/api/lan-auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passcode: input.value.trim() })
+    });
+    const json = await res.json();
+    if (!json.success) {
+      errBox.textContent = json.message || '口令错误';
+      errBox.classList.remove('hidden');
+      return;
+    }
+    setLanToken(json.token || '');
+    errBox.classList.add('hidden');
+    document.getElementById('lan_auth_overlay').classList.add('hidden');
+    await initAppData();
+  } catch (err) {
+    errBox.textContent = '验证请求失败';
+    errBox.classList.remove('hidden');
+  }
+}
+
+function logoutLanSession() {
+  setLanToken('');
+  location.reload();
+}
+
+async function openLanSecurityModal() {
+  const res = await apiFetch('/api/lan-auth/status');
+  const json = await res.json();
+  document.getElementById('lan_enabled_checkbox').checked = json.enabled !== false;
+  document.getElementById('lan_passcode_input').value = json.passcode || '888888';
+  const urlsBox = document.getElementById('lan_urls_box');
+  urlsBox.innerHTML = (json.lan_urls && json.lan_urls.length > 0)
+    ? json.lan_urls.join('<br/>')
+    : `http://127.0.0.1:${json.port || 3000}`;
+  document.getElementById('lan_security_modal').classList.remove('hidden');
+}
+
+function closeLanSecurityModal() {
+  document.getElementById('lan_security_modal').classList.add('hidden');
+}
+
+async function saveLanSecurityForm(e) {
+  e.preventDefault();
+  const enabled = document.getElementById('lan_enabled_checkbox').checked;
+  const passcode = document.getElementById('lan_passcode_input').value.trim();
+  const res = await apiFetch('/api/lan-auth/config', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled, passcode })
+  });
+  const json = await res.json();
+  if (json.success) {
+    setLanToken(json.token || '');
+    closeLanSecurityModal();
+    await checkLanAuthStatus();
+    alert('内网访问口令设置已保存！');
+  }
+}
+
+function copyLanInviteText() {
+  const urlText = document.getElementById('lan_urls_box').innerText.split('\n')[0] || '';
+  const code = document.getElementById('lan_passcode_input').value.trim();
+  const invite = `【企业合同与采购项目台账系统】\n内网协同网址：${urlText}\n访问验证口令：${code}`;
+  navigator.clipboard.writeText(invite);
+  alert('已复制【内网网址 + 验证口令】到剪贴板！');
+}
+
+async function loadOurEntitySetting() {
+  try {
+    const res = await apiFetch('/api/settings/our-entity');
+    const json = await res.json();
     if (json.success) {
-      contractNoRule = json.rule;
-      contractPreviewParts = json.preview_parts || contractPreviewParts;
-      const badge = document.getElementById('next_no_preview_badge');
-      if (badge) badge.textContent = json.next_contract_no || '未设固定规则';
+      defaultOurEntity = json.our_entity;
+      const el = document.getElementById('display_default_entity');
+      if (el) el.textContent = defaultOurEntity;
     }
   } catch (e) {}
 }
 
-async function loadProcNoRule() {
+function openOurEntityModal() {
+  document.getElementById('modal_our_entity_input').value = defaultOurEntity;
+  document.getElementById('our_entity_modal').classList.remove('hidden');
+}
+
+function closeOurEntityModal() {
+  document.getElementById('our_entity_modal').classList.add('hidden');
+}
+
+async function saveOurEntityForm(e) {
+  e.preventDefault();
+  const val = document.getElementById('modal_our_entity_input').value.trim();
+  const res = await apiFetch('/api/settings/our-entity', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ our_entity: val })
+  });
+  const json = await res.json();
+  if (json.success) {
+    defaultOurEntity = json.our_entity;
+    document.getElementById('display_default_entity').textContent = defaultOurEntity;
+    closeOurEntityModal();
+  }
+}
+
+// ==================== 4. 合同与采购夹心式编号规则设置 ====================
+async function loadContractNoRuleSettings() {
   try {
-    const resp = await apiFetch('/api/settings/procurement-no-rule');
-    const json = await resp.json();
+    const res = await apiFetch('/api/settings/no-rule');
+    const json = await res.json();
     if (json.success) {
-      procNoRule = json.rule;
-      procPreviewParts = json.preview_parts || procPreviewParts;
-      const badge = document.getElementById('next_proc_no_preview_badge');
-      if (badge) badge.textContent = json.next_procurement_no || '未设固定规则';
+      contractRule = json.rule;
+      const el = document.getElementById('display_no_rule');
+      if (el) el.textContent = json.next_no || '自定义';
     }
   } catch (e) {}
+}
+
+async function loadProcNoRuleSettings() {
+  try {
+    const res = await apiFetch('/api/settings/proc-no-rule');
+    const json = await res.json();
+    if (json.success) {
+      procRule = json.rule;
+      const el = document.getElementById('display_proc_no_rule');
+      if (el) el.textContent = json.next_no || '自定义';
+    }
+  } catch (e) {}
+}
+
+function formatPreviewDatePart(fmt) {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  if (fmt === 'YYYY') return `${yyyy}`;
+  if (fmt === 'YYYY-') return `${yyyy}-`;
+  if (fmt === 'YYYYMM') return `${yyyy}${mm}`;
+  if (fmt === 'YYYYMM-') return `${yyyy}${mm}-`;
+  if (fmt === 'YYYYMMDD') return `${yyyy}${mm}${dd}`;
+  if (fmt === 'YYYYMMDD-') return `${yyyy}${mm}${dd}-`;
+  return '';
 }
 
 function openNoRuleModal() {
-  document.getElementById('rule_prefix').value = contractNoRule.prefix || '';
-  document.getElementById('rule_date_format').value = contractNoRule.date_format || 'YYYYMM';
-  document.getElementById('rule_seq_digits').value = String(contractNoRule.seq_digits ?? 3);
-  document.getElementById('rule_suffix').value = contractNoRule.suffix || '';
-  updateRuleModalLivePreview();
+  document.getElementById('rule_prefix').value = contractRule.prefix || '';
+  document.getElementById('rule_default_mid').value = contractRule.default_mid || '';
+  document.getElementById('rule_date_part').value = contractRule.date_part || 'YYYYMM';
+  document.getElementById('rule_seq_digits').value = String(contractRule.seq_digits ?? 3);
+  document.getElementById('rule_suffix').value = contractRule.suffix || '';
+  document.getElementById('rule_reset_yearly').checked = contractRule.reset_yearly !== false;
+  updateNoRulePreview();
   document.getElementById('no_rule_modal').classList.remove('hidden');
 }
 
@@ -163,64 +342,47 @@ function closeNoRuleModal() {
   document.getElementById('no_rule_modal').classList.add('hidden');
 }
 
-function applyRulePreset(prefix, dateFmt, digits, suffix) {
-  document.getElementById('rule_prefix').value = prefix;
-  document.getElementById('rule_date_format').value = dateFmt;
-  document.getElementById('rule_seq_digits').value = String(digits);
-  document.getElementById('rule_suffix').value = suffix;
-  updateRuleModalLivePreview();
-}
-
-function updateRuleModalLivePreview() {
-  const prefix = document.getElementById('rule_prefix').value.trim();
-  const dateFmt = document.getElementById('rule_date_format').value;
+function updateNoRulePreview() {
+  const pfx = document.getElementById('rule_prefix').value.trim();
+  const mid = document.getElementById('rule_default_mid').value.trim();
+  const dt = formatPreviewDatePart(document.getElementById('rule_date_part').value);
   const digits = parseInt(document.getElementById('rule_seq_digits').value, 10) || 0;
-  const suffix = document.getElementById('rule_suffix').value.trim();
-
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  let dateStr = '';
-  if (dateFmt === 'YYYY') dateStr = `${yyyy}`;
-  else if (dateFmt === 'YYYYMM') dateStr = `${yyyy}${mm}`;
-  else if (dateFmt === 'YYYYMMDD') dateStr = `${yyyy}${mm}${dd}`;
-
-  const seqStr = digits > 0 ? String(1).padStart(digits, '0') : '';
-  document.getElementById('rule_live_preview').textContent = `${prefix}${dateStr}${seqStr}${suffix}` || '（纯手动输入）';
+  const seq = digits > 0 ? String(1).padStart(digits, '0') : '';
+  const sfx = document.getElementById('rule_suffix').value.trim();
+  document.getElementById('rule_live_preview').textContent = `${pfx}${mid}${dt}${seq}${sfx}` || '（自由手填）';
 }
 
 async function saveNoRuleForm(e) {
   e.preventDefault();
-  try {
-    const payload = {
-      prefix: document.getElementById('rule_prefix').value.trim(),
-      date_format: document.getElementById('rule_date_format').value,
-      seq_digits: Number(document.getElementById('rule_seq_digits').value),
-      suffix: document.getElementById('rule_suffix').value.trim()
-    };
-    const resp = await apiFetch('/api/settings/contract-no-rule', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast('合同编号规则已保存生效');
+  const payload = {
+    prefix: document.getElementById('rule_prefix').value.trim(),
+    default_mid: document.getElementById('rule_default_mid').value.trim(),
+    date_part: document.getElementById('rule_date_part').value,
+    seq_digits: Number(document.getElementById('rule_seq_digits').value),
+    suffix: document.getElementById('rule_suffix').value.trim(),
+    reset_yearly: document.getElementById('rule_reset_yearly').checked
+  };
+  const res = await apiFetch('/api/settings/no-rule', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const json = await res.json();
+  if (json.success) {
     closeNoRuleModal();
-    await loadContractNoRule();
-  } catch (err) {
-    showToast(err.message || '保存规则失败', 'error');
+    await loadContractNoRuleSettings();
+    await loadContracts();
   }
 }
 
-// 采购立项编号规则弹窗
 function openProcNoRuleModal() {
-  document.getElementById('proc_rule_prefix').value = procNoRule.prefix || '';
-  document.getElementById('proc_rule_date_format').value = procNoRule.date_format || 'YYYYMMDD';
-  document.getElementById('proc_rule_seq_digits').value = String(procNoRule.seq_digits ?? 3);
-  document.getElementById('proc_rule_suffix').value = procNoRule.suffix || '';
-  updateProcRuleModalLivePreview();
+  document.getElementById('prule_prefix').value = procRule.prefix || '';
+  document.getElementById('prule_default_mid').value = procRule.default_mid || '';
+  document.getElementById('prule_date_part').value = procRule.date_part || 'YYYYMMDD';
+  document.getElementById('prule_seq_digits').value = String(procRule.seq_digits ?? 3);
+  document.getElementById('prule_suffix').value = procRule.suffix || '';
+  document.getElementById('prule_reset_yearly').checked = procRule.reset_yearly !== false;
+  updateProcNoRulePreview();
   document.getElementById('proc_no_rule_modal').classList.remove('hidden');
 }
 
@@ -228,1072 +390,935 @@ function closeProcNoRuleModal() {
   document.getElementById('proc_no_rule_modal').classList.add('hidden');
 }
 
-function applyProcRulePreset(prefix, dateFmt, digits, suffix) {
-  document.getElementById('proc_rule_prefix').value = prefix;
-  document.getElementById('proc_rule_date_format').value = dateFmt;
-  document.getElementById('proc_rule_seq_digits').value = String(digits);
-  document.getElementById('proc_rule_suffix').value = suffix;
-  updateProcRuleModalLivePreview();
-}
-
-function updateProcRuleModalLivePreview() {
-  const prefix = document.getElementById('proc_rule_prefix').value.trim();
-  const dateFmt = document.getElementById('proc_rule_date_format').value;
-  const digits = parseInt(document.getElementById('proc_rule_seq_digits').value, 10) || 0;
-  const suffix = document.getElementById('proc_rule_suffix').value.trim();
-
-  const now = new Date();
-  const yyyy = now.getFullYear();
-  const mm = String(now.getMonth() + 1).padStart(2, '0');
-  const dd = String(now.getDate()).padStart(2, '0');
-  let dateStr = '';
-  if (dateFmt === 'YYYY') dateStr = `${yyyy}`;
-  else if (dateFmt === 'YYYYMM') dateStr = `${yyyy}${mm}`;
-  else if (dateFmt === 'YYYYMMDD') dateStr = `${yyyy}${mm}${dd}`;
-
-  const seqStr = digits > 0 ? String(1).padStart(digits, '0') : '';
-  document.getElementById('proc_rule_live_preview').textContent = `${prefix}${dateStr}${seqStr}${suffix}` || '（纯手动输入）';
+function updateProcNoRulePreview() {
+  const pfx = document.getElementById('prule_prefix').value.trim();
+  const mid = document.getElementById('prule_default_mid').value.trim();
+  const dt = formatPreviewDatePart(document.getElementById('prule_date_part').value);
+  const digits = parseInt(document.getElementById('prule_seq_digits').value, 10) || 0;
+  const seq = digits > 0 ? String(1).padStart(digits, '0') : '';
+  const sfx = document.getElementById('prule_suffix').value.trim();
+  document.getElementById('prule_live_preview').textContent = `${pfx}${mid}${dt}${seq}${sfx}` || '（自由手填）';
 }
 
 async function saveProcNoRuleForm(e) {
   e.preventDefault();
-  try {
-    const payload = {
-      prefix: document.getElementById('proc_rule_prefix').value.trim(),
-      date_format: document.getElementById('proc_rule_date_format').value,
-      seq_digits: Number(document.getElementById('proc_rule_seq_digits').value),
-      suffix: document.getElementById('proc_rule_suffix').value.trim()
-    };
-    const resp = await apiFetch('/api/settings/procurement-no-rule', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast('采购立项编号规则已保存');
+  const payload = {
+    prefix: document.getElementById('prule_prefix').value.trim(),
+    default_mid: document.getElementById('prule_default_mid').value.trim(),
+    date_part: document.getElementById('prule_date_part').value,
+    seq_digits: Number(document.getElementById('prule_seq_digits').value),
+    suffix: document.getElementById('prule_suffix').value.trim(),
+    reset_yearly: document.getElementById('prule_reset_yearly').checked
+  };
+  const res = await apiFetch('/api/settings/proc-no-rule', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const json = await res.json();
+  if (json.success) {
     closeProcNoRuleModal();
-    await loadProcNoRule();
-  } catch (err) {
-    showToast(err.message || '保存失败', 'error');
+    await loadProcNoRuleSettings();
+    await loadProcurements();
   }
 }
 
-// 分段式编号实时拼接器（合同 & 立项通用）
-function syncContractNoFromSegments() {
-  const pfx = document.getElementById('seg_c_prefix')?.value.trim() || '';
-  const mid = document.getElementById('seg_c_mid')?.value.trim() || '';
-  const dt = document.getElementById('seg_c_date')?.value.trim() || '';
-  const seq = document.getElementById('seg_c_seq')?.value.trim() || '';
-  const sfx = document.getElementById('seg_c_suffix')?.value.trim() || '';
-  const targetInput = document.getElementById('f_contract_no');
-  if (targetInput) {
-    targetInput.value = `${pfx}${mid}${dt}${seq}${sfx}`;
-  }
+// ==================== 5. 夹心式 4 段编号构建器实时同步逻辑 ====================
+function syncSegmentedContractNo() {
+  if (isFreeContractNoMode) return;
+  const pfx = document.getElementById('seg_prefix').textContent || '';
+  const mid = document.getElementById('seg_mid_custom_input').value.trim();
+  const dt = document.getElementById('seg_date').textContent || '';
+  const seq = document.getElementById('seg_middle_input').value.trim();
+  const sfx = document.getElementById('seg_suffix').textContent || '';
+  document.getElementById('f_contract_no').value = `${pfx}${mid}${dt}${seq}${sfx}`;
 }
 
-async function refreshContractNoSegmentsByDateAndMid() {
-  const signDate = document.getElementById('f_sign_date')?.value || new Date().toISOString().slice(0, 10);
-  const midCustom = document.getElementById('seg_c_mid')?.value.trim() || '';
+async function fillAutoContractNo(signDateVal) {
+  const cleanDate = parseSmartDateString(signDateVal) || new Date().toISOString().slice(0, 10);
+  const midVal = document.getElementById('seg_mid_custom_input').value.trim();
   try {
-    const resp = await apiFetch(`/api/settings/contract-no-rule?sign_date=${encodeURIComponent(signDate)}&mid_custom=${encodeURIComponent(midCustom)}`);
-    const json = await resp.json();
-    if (json.success && json.preview_parts) {
-      const p = json.preview_parts;
-      document.getElementById('seg_c_prefix').value = p.prefix || '';
-      document.getElementById('seg_c_date').value = p.date_part || '';
-      document.getElementById('seg_c_seq').value = p.seq_part || '';
-      document.getElementById('seg_c_suffix').value = p.suffix || '';
-      syncContractNoFromSegments();
+    const res = await apiFetch(`/api/contracts/next-no?sign_date=${encodeURIComponent(cleanDate)}&mid_custom=${encodeURIComponent(midVal)}`);
+    const json = await res.json();
+    if (json.success) {
+      document.getElementById('seg_prefix').textContent = json.prefix || '';
+      document.getElementById('seg_date').textContent = json.date_part || '';
+      document.getElementById('seg_middle_input').value = json.seq_part || '';
+      document.getElementById('seg_suffix').textContent = json.suffix || '';
+      syncSegmentedContractNo();
     }
   } catch (e) {}
 }
 
-function syncProcNoFromSegments() {
-  const pfx = document.getElementById('seg_p_prefix')?.value.trim() || '';
-  const mid = document.getElementById('seg_p_mid')?.value.trim() || '';
-  const dt = document.getElementById('seg_p_date')?.value.trim() || '';
-  const seq = document.getElementById('seg_p_seq')?.value.trim() || '';
-  const sfx = document.getElementById('seg_p_suffix')?.value.trim() || '';
-  const targetInput = document.getElementById('p_procurement_no');
-  if (targetInput) {
-    targetInput.value = `${pfx}${mid}${dt}${seq}${sfx}`;
+function onContractMidCustomChange() {
+  fillAutoContractNo(document.getElementById('f_sign_date').value);
+}
+
+function onSignDateBlur(el) {
+  const norm = normalizeDateInputElem(el);
+  if (!document.getElementById('form_id').value && !isFreeContractNoMode) {
+    fillAutoContractNo(norm);
   }
 }
 
-async function refreshProcNoSegmentsByDateAndMid() {
-  const approvalDate = document.getElementById('p_approval_date')?.value || new Date().toISOString().slice(0, 10);
-  const midCustom = document.getElementById('seg_p_mid')?.value.trim() || '';
+function toggleFreeContractNoMode(forceFree) {
+  isFreeContractNoMode = forceFree !== undefined ? forceFree : !isFreeContractNoMode;
+  document.getElementById('segmented_no_box').classList.toggle('hidden', isFreeContractNoMode);
+  document.getElementById('f_contract_no').classList.toggle('hidden', !isFreeContractNoMode);
+  document.getElementById('toggle_no_mode_btn').textContent = isFreeContractNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
+}
+
+function syncSegmentedProcNo() {
+  if (isFreeProcNoMode) return;
+  const pfx = document.getElementById('p_seg_prefix').textContent || '';
+  const mid = document.getElementById('p_seg_mid_custom_input').value.trim();
+  const dt = document.getElementById('p_seg_date').textContent || '';
+  const seq = document.getElementById('p_seg_middle_input').value.trim();
+  const sfx = document.getElementById('p_seg_suffix').textContent || '';
+  document.getElementById('p_procurement_no').value = `${pfx}${mid}${dt}${seq}${sfx}`;
+}
+
+async function fillAutoProcurementNo(approvalDateVal) {
+  const cleanDate = parseSmartDateString(approvalDateVal) || new Date().toISOString().slice(0, 10);
+  const midVal = document.getElementById('p_seg_mid_custom_input').value.trim();
   try {
-    const resp = await apiFetch(`/api/settings/procurement-no-rule?approval_date=${encodeURIComponent(approvalDate)}&mid_custom=${encodeURIComponent(midCustom)}`);
-    const json = await resp.json();
-    if (json.success && json.preview_parts) {
-      const p = json.preview_parts;
-      document.getElementById('seg_p_prefix').value = p.prefix || '';
-      document.getElementById('seg_p_date').value = p.date_part || '';
-      document.getElementById('seg_p_seq').value = p.seq_part || '';
-      document.getElementById('seg_p_suffix').value = p.suffix || '';
-      syncProcNoFromSegments();
+    const res = await apiFetch(`/api/procurements/next-no?approval_date=${encodeURIComponent(cleanDate)}&mid_custom=${encodeURIComponent(midVal)}`);
+    const json = await res.json();
+    if (json.success) {
+      document.getElementById('p_seg_prefix').textContent = json.prefix || '';
+      document.getElementById('p_seg_date').textContent = json.date_part || '';
+      document.getElementById('p_seg_middle_input').value = json.seq_part || '';
+      document.getElementById('p_seg_suffix').textContent = json.suffix || '';
+      syncSegmentedProcNo();
     }
   } catch (e) {}
 }
 
-// ==================== 4. 合同台账列表加载、筛选、新增与编辑 ====================
-function getContractFilterParams() {
-  const params = new URLSearchParams();
-  const kw = document.getElementById('filter_keyword')?.value.trim();
+function onProcMidCustomChange() {
+  fillAutoProcurementNo(document.getElementById('p_approval_date').value);
+}
+
+function onProcApprovalDateBlur(el) {
+  const norm = normalizeDateInputElem(el);
+  if (!document.getElementById('p_form_id').value && !isFreeProcNoMode) {
+    fillAutoProcurementNo(norm);
+  }
+}
+
+function toggleFreeProcNoMode(forceFree) {
+  isFreeProcNoMode = forceFree !== undefined ? forceFree : !isFreeProcNoMode;
+  document.getElementById('p_segmented_no_box').classList.toggle('hidden', isFreeProcNoMode);
+  document.getElementById('p_procurement_no').classList.toggle('hidden', !isFreeProcNoMode);
+  document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
+}
+
+// ==================== 6. 合同管理台账主表渲染（支持一对多跨行合并 rowspan） ====================
+function buildContractQueryParams() {
+  const p = new URLSearchParams();
+  const no = document.getElementById('filter_no')?.value.trim();
+  const cp = document.getElementById('filter_counterparty')?.value.trim();
+  const year = document.getElementById('filter_year')?.value;
   const type = document.getElementById('filter_type')?.value;
   const status = document.getElementById('filter_status')?.value;
-  const year = document.getElementById('filter_year')?.value;
-  const startDate = document.getElementById('filter_start_date')?.value;
-  const endDate = document.getElementById('filter_end_date')?.value;
-  const hasFile = document.getElementById('filter_has_file')?.value;
+  const dateField = document.getElementById('filter_date_field')?.value;
+  const dateFrom = document.getElementById('filter_date_from')?.value.trim();
+  const dateTo = document.getElementById('filter_date_to')?.value.trim();
+  const sortBy = document.getElementById('sort_by')?.value;
+  const sortOrder = document.getElementById('sort_order')?.value;
 
-  if (kw) params.set('keyword', kw);
-  if (type) params.set('contract_type', type);
-  if (status) params.set('status', status);
-  if (year) params.set('year', year);
-  if (startDate) params.set('start_date', startDate);
-  if (endDate) params.set('end_date', endDate);
-  if (hasFile) params.set('has_file', hasFile);
-  return params;
+  if (no) p.set('no', no);
+  if (cp) p.set('counterparty', cp);
+  if (year) p.set('year', year);
+  if (type) p.set('type', type);
+  if (status) p.set('status', status);
+  if (dateField) p.set('date_field', dateField);
+  if (dateFrom) p.set('date_from', dateFrom);
+  if (dateTo) p.set('date_to', dateTo);
+  if (sortBy) p.set('sort_by', sortBy);
+  if (sortOrder) p.set('sort_order', sortOrder);
+  return p;
 }
 
 async function loadContracts() {
   try {
-    const params = getContractFilterParams();
-    const resp = await apiFetch(`/api/contracts?${params.toString()}`);
-    const json = await resp.json();
+    const params = buildContractQueryParams();
+    const res = await apiFetch(`/api/contracts?${params.toString()}`);
+    const json = await res.json();
     if (!json.success) return;
-
-    allContracts = json.data || [];
-    renderContractStats(json.stats);
-    renderContractTable(allContracts);
-  } catch (err) {
-    if (err.message !== '需要验证局域网访问口令') {
-      showToast('加载合同列表失败', 'error');
-    }
-  }
+    contractsCache = json.data || [];
+    renderContractLedgerTable(contractsCache);
+  } catch (e) {}
 }
 
-function renderContractStats(stats) {
-  if (!stats) return;
-  document.getElementById('stat_total_count').textContent = stats.total_count || 0;
-  document.getElementById('stat_total_amount').textContent = formatMoney(stats.total_amount || 0);
-  document.getElementById('stat_active_count').textContent = stats.active_count || 0;
-  document.getElementById('stat_with_file_count').textContent = stats.with_file_count || 0;
+function resetFilters() {
+  ['filter_no', 'filter_counterparty', 'filter_year', 'filter_type', 'filter_status', 'filter_date_from', 'filter_date_to'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  loadContracts();
 }
 
-function getStatusBadgeClass(status) {
-  if (status === '履行中' || status === '采购进行中') return 'badge-blue';
-  if (status === '已完结' || status === '已签合同' || status === '已完成采购待签合同') return 'badge-green';
-  if (status === '已解除' || status === '归档终止' || status === '已取消/终止') return 'badge-red';
-  return 'badge-amber';
-}
-
-function renderContractTable(rows) {
+function renderContractLedgerTable(list) {
   const tbody = document.getElementById('contract_tbody');
   if (!tbody) return;
-  if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" class="empty-row">暂无匹配的合同台账记录，点击右上角【+ 新增合同】开始录入</td></tr>`;
+  if (!list || list.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="26" class="text-center" style="padding:28px;color:#6b7280;">暂无匹配的合同台账，请点击右上角【+ 新增合同】录入</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = rows.map(r => {
-    const hasMain = Boolean(r.file_path);
-    const relCount = Number(r.related_file_count || 0);
-    let fileTagHtml = `<span class="file-tag none">未上传</span>`;
-    if (hasMain && relCount > 0) {
-      fileTagHtml = `<span class="file-tag ok" onclick="openContractDetail(${r.id})">📄 主件 + 📎${relCount}份</span>`;
-    } else if (hasMain) {
-      fileTagHtml = `<span class="file-tag ok" onclick="openContractDetail(${r.id})">📄 已传扫描件</span>`;
-    } else if (relCount > 0) {
-      fileTagHtml = `<span class="file-tag ok" onclick="openContractDetail(${r.id})">📎 资料×${relCount}</span>`;
+  const htmlRows = [];
+  list.forEach((c, groupIdx) => {
+    const parties = c.counterparties && c.counterparties.length > 0 ? c.counterparties : [{}];
+    const span = parties.length;
+    const parityClass = groupIdx % 2 === 1 ? 'contract-group-odd' : 'contract-group-even';
+
+    const scanHtml = c.attachment_path
+      ? `<a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">📄 预览扫描件</a>`
+      : `<span style="color:#9ca3af;">未上传</span>`;
+
+    const procHtml = c.linked_procurement
+      ? `<a class="proc-link-badge" href="javascript:void(0)" onclick="openDetailModal('procurement', ${c.linked_procurement.id})">🔗 ${escapeHtml(c.linked_procurement.procurement_no)} (${(c.linked_procurement.files || []).length}份)</a>`
+      : `<span style="color:#9ca3af;">未关联</span>`;
+
+    const relCount = (c.related_files || []).length;
+    const relHtml = relCount > 0
+      ? `<a class="related-badge-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">📎 资料×${relCount}</a>`
+      : `<a class="link-btn" style="font-size:12px;" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">+ 补传</a>`;
+
+    parties.forEach((cp, pIdx) => {
+      const isLastInGroup = pIdx === span - 1;
+      const trClass = `${parityClass} ${isLastInGroup ? 'contract-group-end' : ''}`;
+
+      const mergedLeftCells = pIdx === 0 ? `
+        <td rowspan="${span}" class="text-center"><span class="seq-badge">${escapeHtml(c.seq_no)}</span></td>
+        <td rowspan="${span}"><strong>${escapeHtml(c.contract_no)}</strong></td>
+        <td rowspan="${span}"><a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">${escapeHtml(c.contract_name)}</a></td>
+        <td rowspan="${span}" class="text-center">${escapeHtml(c.contract_type)}</td>
+        <td rowspan="${span}">${escapeHtml(c.our_entity)}</td>
+        <td rowspan="${span}" class="text-center">${escapeHtml(c.sign_date)}</td>
+        <td rowspan="${span}" class="text-center">${escapeHtml(c.start_date)}</td>
+        <td rowspan="${span}" class="text-center">${renderDueChip(c.expiry_date)}</td>
+        <td rowspan="${span}" class="text-center"><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
+      ` : '';
+
+      const mergedRightCells = pIdx === 0 ? `
+        <td rowspan="${span}">${scanHtml}</td>
+        <td rowspan="${span}">${procHtml}</td>
+        <td rowspan="${span}">${relHtml}</td>
+        <td rowspan="${span}" class="text-center">
+          <button class="btn btn-outline btn-sm" onclick="openDetailModal('contract', ${c.id})">详情</button>
+          <button class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteContractRecord(${c.id}, '${escapeHtml(c.contract_no)}')">删除</button>
+        </td>
+      ` : '';
+
+      const perfInfo = Number(cp.perf_bond_amount || 0) > 0
+        ? `<div>¥${Number(cp.perf_bond_amount).toLocaleString()} (${escapeHtml(cp.perf_bond_status)})</div><div>${renderDueChip(cp.perf_bond_return_date)}</div>`
+        : '<span style="color:#9ca3af;">无</span>';
+
+      const warrantyInfo = Number(cp.warranty_bond_amount || 0) > 0
+        ? `<div>¥${Number(cp.warranty_bond_amount).toLocaleString()} (${escapeHtml(cp.warranty_bond_status)})</div><div>${renderDueChip(cp.warranty_bond_expiry_date)}</div>`
+        : '<span style="color:#9ca3af;">无</span>';
+
+      htmlRows.push(`
+        <tr class="${trClass}">
+          ${mergedLeftCells}
+          <td class="summary-cell" title="${escapeHtml(cp.summary || '')}">${escapeHtml(cp.summary || '-')}</td>
+          <td><strong>${escapeHtml(cp.company_name || '-')}</strong></td>
+          <td>${escapeHtml(cp.credit_code || '-')}</td>
+          <td>${escapeHtml(cp.contact_person || '')} ${escapeHtml(cp.contact_phone || '')}</td>
+          <td class="summary-cell" title="${escapeHtml(cp.bank_account_name || '')} ${escapeHtml(cp.bank_account_no || '')} ${escapeHtml(cp.bank_name || '')}">
+            ${escapeHtml(cp.bank_account_no || '-')} ${escapeHtml(cp.bank_name || '')}
+          </td>
+          <td class="text-right"><strong>${formatMoney(cp.amount)}</strong></td>
+          <td class="text-right">${formatMoney(cp.amount_excl_tax)}</td>
+          <td class="text-center">${cp.tax_rate ? escapeHtml(cp.tax_rate) + '%' : '-'}</td>
+          <td class="text-center">${escapeHtml(cp.invoice_type || '-')}</td>
+          <td class="text-center">${escapeHtml(cp.currency || 'CNY')}</td>
+          <td>${perfInfo}</td>
+          <td>${warrantyInfo}</td>
+          <td class="summary-cell">${escapeHtml(cp.remark || c.remark || '-')}</td>
+          ${mergedRightCells}
+        </tr>
+      `);
+    });
+  });
+
+  tbody.innerHTML = htmlRows.join('');
+}
+
+// ==================== 7. 合同新增/编辑弹窗与动态对方单位卡片 ====================
+function addCounterpartyCard(data = {}) {
+  const container = document.getElementById('counterparties_container');
+  if (!container) return;
+  const idx = container.children.length + 1;
+  const card = document.createElement('div');
+  card.className = 'party-card';
+  card.innerHTML = `
+    <div class="party-card-header">
+      <span>🏢 对方单位履约明细 #${idx}</span>
+      <button type="button" class="btn btn-danger btn-sm" onclick="this.closest('.party-card').remove()">移除该行</button>
+    </div>
+    <div class="form-grid-4">
+      <div class="form-group span-2">
+        <label>对方单位名称 *</label>
+        <input type="text" class="cp-company" value="${escapeHtml(data.company_name || '')}" required placeholder="如：中国邮政速递物流股份有限公司毕节市分公司" />
+      </div>
+      <div class="form-group">
+        <label>统一社会信用代码</label>
+        <input type="text" class="cp-credit" value="${escapeHtml(data.credit_code || '')}" placeholder="18位信用代码" />
+      </div>
+      <div class="form-group">
+        <label>履约摘要(各写各的)</label>
+        <input type="text" class="cp-summary" value="${escapeHtml(data.summary || '')}" placeholder="本单位负责标的内容" />
+      </div>
+
+      <div class="form-group">
+        <label>联系人</label>
+        <input type="text" class="cp-person" value="${escapeHtml(data.contact_person || '')}" />
+      </div>
+      <div class="form-group">
+        <label>联系电话</label>
+        <input type="text" class="cp-phone" value="${escapeHtml(data.contact_phone || '')}" />
+      </div>
+      <div class="form-group">
+        <label>收款账户名称</label>
+        <input type="text" class="cp-bank-user" value="${escapeHtml(data.bank_account_name || '')}" />
+      </div>
+      <div class="form-group">
+        <label>收款银行账号 & 开户行</label>
+        <input type="text" class="cp-bank-no" value="${escapeHtml(data.bank_account_no || '')}" placeholder="账号 / 开户行" />
+      </div>
+
+      <div class="form-group">
+        <label>含税金额 (元)</label>
+        <input type="number" step="0.01" class="cp-amount" value="${data.amount ?? ''}" oninput="calcExclTaxForCard(this)" />
+      </div>
+      <div class="form-group">
+        <label>税率 (%)</label>
+        <input type="text" class="cp-tax-rate" value="${escapeHtml(data.tax_rate ?? '6')}" oninput="calcExclTaxForCard(this)" />
+      </div>
+      <div class="form-group">
+        <label>不含税价 (自动折算可微调)</label>
+        <input type="number" step="0.01" class="cp-amount-excl" value="${data.amount_excl_tax ?? ''}" />
+      </div>
+      <div class="form-group">
+        <label>发票类型</label>
+        <input type="text" class="cp-invoice" list="invoice_type_list" value="${escapeHtml(data.invoice_type || '增值税专用发票')}" />
+      </div>
+
+      <div class="form-group">
+        <label>履约保证金 (元)</label>
+        <input type="number" step="0.01" class="cp-perf-amt" value="${data.perf_bond_amount || 0}" />
+      </div>
+      <div class="form-group">
+        <label>保证金状态 & 应退日</label>
+        <input type="text" class="cp-perf-date" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
+      </div>
+      <div class="form-group">
+        <label>质保金 (元) & 到期日</label>
+        <input type="text" class="cp-warranty-date" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
+      </div>
+      <div class="form-group">
+        <label>分项备注</label>
+        <input type="text" class="cp-remark" value="${escapeHtml(data.remark || '')}" />
+      </div>
+    </div>
+  `;
+  container.appendChild(card);
+}
+
+function calcExclTaxForCard(inputEl) {
+  const card = inputEl.closest('.party-card');
+  if (!card) return;
+  const amt = parseFloat(card.querySelector('.cp-amount')?.value || '0');
+  const rate = parseFloat(card.querySelector('.cp-tax-rate')?.value || '0');
+  const exclEl = card.querySelector('.cp-amount-excl');
+  if (exclEl && amt > 0 && !isNaN(rate) && rate >= 0) {
+    exclEl.value = (amt / (1 + rate / 100)).toFixed(2);
+  }
+}
+
+function collectCounterpartiesFromDOM() {
+  const cards = document.querySelectorAll('#counterparties_container .party-card');
+  const arr = [];
+  cards.forEach(card => {
+    arr.push({
+      company_name: card.querySelector('.cp-company')?.value.trim() || '',
+      credit_code: card.querySelector('.cp-credit')?.value.trim() || '',
+      summary: card.querySelector('.cp-summary')?.value.trim() || '',
+      contact_person: card.querySelector('.cp-person')?.value.trim() || '',
+      contact_phone: card.querySelector('.cp-phone')?.value.trim() || '',
+      bank_account_name: card.querySelector('.cp-bank-user')?.value.trim() || '',
+      bank_account_no: card.querySelector('.cp-bank-no')?.value.trim() || '',
+      amount: Number(card.querySelector('.cp-amount')?.value || 0),
+      tax_rate: card.querySelector('.cp-tax-rate')?.value.trim() || '',
+      amount_excl_tax: Number(card.querySelector('.cp-amount-excl')?.value || 0),
+      invoice_type: card.querySelector('.cp-invoice')?.value.trim() || '增值税专用发票',
+      perf_bond_amount: Number(card.querySelector('.cp-perf-amt')?.value || 0),
+      perf_bond_return_date: parseSmartDateString(card.querySelector('.cp-perf-date')?.value || ''),
+      warranty_bond_expiry_date: parseSmartDateString(card.querySelector('.cp-warranty-date')?.value || ''),
+      remark: card.querySelector('.cp-remark')?.value.trim() || ''
+    });
+  });
+  return arr;
+}
+
+async function populateProcDropdownInContractForm(selectedId = null) {
+  const sel = document.getElementById('f_procurement_id');
+  if (!sel) return;
+  try {
+    const res = await apiFetch('/api/procurements');
+    const json = await res.json();
+    const list = json.data || [];
+    sel.innerHTML = `<option value="">-- 暂不关联采购立项 (或稍后在采购台账中反向关联) --</option>` + list.map(p => {
+      return `<option value="${p.id}"
+        data-name="${escapeHtml(p.project_name)}"
+        data-supplier="${escapeHtml(p.supplier_name || '')}"
+        data-amount="${p.deal_amount || p.budget_amount || 0}">
+        ${escapeHtml(p.procurement_no)} - ${escapeHtml(p.project_name)}
+      </option>`;
+    }).join('');
+    if (selectedId) sel.value = String(selectedId);
+  } catch (e) {}
+}
+
+function onSelectLinkedProcurementInContractForm(sel) {
+  const opt = sel.options[sel.selectedIndex];
+  if (!opt || !sel.value) return;
+  const nameInput = document.getElementById('f_contract_name');
+  if (nameInput && !nameInput.value.trim() && opt.dataset.name) {
+    nameInput.value = opt.dataset.name;
+  }
+  const firstCompany = document.querySelector('#counterparties_container .cp-company');
+  if (firstCompany && !firstCompany.value.trim() && opt.dataset.supplier) {
+    firstCompany.value = opt.dataset.supplier;
+  }
+  const firstAmount = document.querySelector('#counterparties_container .cp-amount');
+  if (firstAmount && !firstAmount.value && Number(opt.dataset.amount) > 0) {
+    firstAmount.value = opt.dataset.amount;
+    calcExclTaxForCard(firstAmount);
+  }
+}
+
+async function openFormModal(editId = null) {
+  const form = document.getElementById('contract_form');
+  form.reset();
+  document.getElementById('counterparties_container').innerHTML = '';
+
+  const today = new Date().toISOString().slice(0, 10);
+
+  if (!editId) {
+    document.getElementById('form_id').value = '';
+    document.getElementById('form_modal_title').textContent = '新增合同台账';
+    document.getElementById('f_our_entity').value = defaultOurEntity;
+    document.getElementById('f_sign_date').value = today;
+    document.getElementById('f_start_date').value = today;
+    document.getElementById('f_expiry_date').value = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
+    document.getElementById('seg_mid_custom_input').value = contractRule.default_mid || '';
+    toggleFreeContractNoMode(false);
+    addCounterpartyCard();
+    await populateProcDropdownInContractForm(null);
+    await fillAutoContractNo(today);
+  } else {
+    const res = await apiFetch(`/api/contracts/${editId}`);
+    const json = await res.json();
+    if (!json.success) return;
+    const c = json.data;
+    document.getElementById('form_id').value = c.id;
+    document.getElementById('form_modal_title').textContent = `编辑合同：${c.contract_no}`;
+    toggleFreeContractNoMode(true);
+    document.getElementById('f_contract_no').value = c.contract_no;
+    document.getElementById('f_contract_name').value = c.contract_name;
+    document.getElementById('f_contract_type').value = c.contract_type;
+    document.getElementById('f_status').value = c.status;
+    document.getElementById('f_our_entity').value = c.our_entity;
+    document.getElementById('f_sign_date').value = c.sign_date;
+    document.getElementById('f_start_date').value = c.start_date;
+    document.getElementById('f_expiry_date').value = c.expiry_date;
+    await populateProcDropdownInContractForm(c.procurement_id);
+    (c.counterparties || [{}]).forEach(cp => addCounterpartyCard(cp));
+  }
+
+  document.getElementById('form_modal').classList.remove('hidden');
+}
+
+function closeFormModal() {
+  document.getElementById('form_modal').classList.add('hidden');
+}
+
+async function submitContractForm(e) {
+  e.preventDefault();
+  if (isSubmitting) return;
+  isSubmitting = true;
+  const btn = document.getElementById('btn_submit_contract');
+  if (btn) btn.disabled = true;
+
+  try {
+    if (!isFreeContractNoMode) syncSegmentedContractNo();
+    const editId = document.getElementById('form_id').value;
+    const fd = new FormData();
+    fd.append('contract_no', document.getElementById('f_contract_no').value.trim());
+    fd.append('contract_name', document.getElementById('f_contract_name').value.trim());
+    fd.append('contract_type', document.getElementById('f_contract_type').value);
+    fd.append('status', document.getElementById('f_status').value);
+    fd.append('our_entity', document.getElementById('f_our_entity').value.trim());
+    fd.append('sign_date', parseSmartDateString(document.getElementById('f_sign_date').value));
+    fd.append('start_date', parseSmartDateString(document.getElementById('f_start_date').value));
+    fd.append('expiry_date', parseSmartDateString(document.getElementById('f_expiry_date').value));
+    fd.append('procurement_id', document.getElementById('f_procurement_id').value || '');
+    fd.append('counterparties_json', JSON.stringify(collectCounterpartiesFromDOM()));
+
+    const attInput = document.getElementById('f_attachment');
+    if (attInput && attInput.files[0]) {
+      fd.append('attachment', attInput.files[0]);
+    }
+    const relInput = document.getElementById('f_related_files');
+    if (relInput && relInput.files.length > 0) {
+      for (const f of relInput.files) fd.append('related_files', f);
     }
 
-    const procBadge = r.linked_procurement_no
-      ? `<span class="link-chip" title="${escapeHtml(r.linked_procurement_name || '')}" onclick="jumpToProcurementDetail(${r.procurement_id})">🔗 ${escapeHtml(r.linked_procurement_no)}</span>`
-      : `<span class="text-muted">-</span>`;
+    const url = editId ? `/api/contracts/${editId}` : '/api/contracts';
+    const method = editId ? 'PUT' : 'POST';
+    const res = await apiFetch(url, { method, body: fd });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
 
-    const partiesHtml = `
-      <div class="party-line"><strong>甲：</strong>${escapeHtml(r.party_a)}</div>
-      <div class="party-line"><strong>乙：</strong>${escapeHtml(r.party_b)}</div>
-      ${r.party_c ? `<div class="party-line"><strong>丙：</strong>${escapeHtml(r.party_c)}</div>` : ''}
-    `;
+    closeFormModal();
+    await loadContractNoRuleSettings();
+    await loadContracts();
+  } catch (err) {
+    alert(err.message || '保存合同失败');
+  } finally {
+    isSubmitting = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function deleteContractRecord(id, no) {
+  if (!confirm(`确定删除合同【${no}】吗？关联扫描件及附件将一并从磁盘清除，且后续序号自动重排对齐！`)) return;
+  const res = await apiFetch(`/api/contracts/${id}`, { method: 'DELETE' });
+  const json = await res.json();
+  if (json.success) {
+    await loadContractNoRuleSettings();
+    await loadContracts();
+  }
+}
+
+// ==================== 8. 采购项目立项台账主表与表单逻辑 ====================
+function buildProcQueryParams() {
+  const p = new URLSearchParams();
+  const kw = document.getElementById('proc_filter_kw')?.value.trim();
+  const year = document.getElementById('proc_filter_year')?.value;
+  const type = document.getElementById('proc_filter_type')?.value;
+  const dept = document.getElementById('proc_filter_dept')?.value.trim();
+  const hasC = document.getElementById('proc_filter_has_contract')?.value;
+  const sortOrder = document.getElementById('proc_sort_order')?.value;
+
+  if (kw) p.set('kw', kw);
+  if (year) p.set('year', year);
+  if (type) p.set('type', type);
+  if (dept) p.set('dept', dept);
+  if (hasC) p.set('has_contract', hasC);
+  if (sortOrder) p.set('sort_order', sortOrder);
+  return p;
+}
+
+async function loadProcurements() {
+  try {
+    const params = buildProcQueryParams();
+    const res = await apiFetch(`/api/procurements?${params.toString()}`);
+    const json = await res.json();
+    if (!json.success) return;
+    procurementsCache = json.data || [];
+    renderProcurementTable(procurementsCache);
+  } catch (e) {}
+}
+
+function resetProcurementFilters() {
+  ['proc_filter_kw', 'proc_filter_year', 'proc_filter_type', 'proc_filter_dept', 'proc_filter_has_contract'].forEach(id => {
+    const el = document.getElementById(id);
+    if (el) el.value = '';
+  });
+  loadProcurements();
+}
+
+function renderProcurementTable(list) {
+  const tbody = document.getElementById('procurement_tbody');
+  if (!tbody) return;
+  if (!list || list.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="19" class="text-center" style="padding:28px;color:#6b7280;">暂无采购立项记录，请点击右上角【+ 新增采购立项】开始录入</td></tr>`;
+    return;
+  }
+
+  tbody.innerHTML = list.map((p, idx) => {
+    const oddClass = idx % 2 === 1 ? 'proc-group-odd' : '';
+    const contractHtml = p.linked_contract
+      ? `<a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${p.linked_contract.id})">📄 ${escapeHtml(p.linked_contract.contract_no)}</a>`
+      : (p.contract_no_manual ? `<span title="预填合同号，录入对应合同后自动绑定">${escapeHtml(p.contract_no_manual)} (待录合同)</span>` : '<span style="color:#9ca3af;">-</span>');
+
+    const filesCount = (p.files || []).length;
+    const filesHtml = filesCount > 0
+      ? `<a class="related-badge-btn" href="javascript:void(0)" onclick="openDetailModal('procurement', ${p.id})">📁 立项资料×${filesCount}</a>`
+      : `<a class="link-btn" style="font-size:12px;" href="javascript:void(0)" onclick="openDetailModal('procurement', ${p.id})">+ 补传资料</a>`;
 
     return `
-      <tr>
-        <td class="mono-cell">${escapeHtml(r.seq_no)}</td>
-        <td class="mono-cell font-semibold">${escapeHtml(r.contract_no)}</td>
-        <td>
-          <div class="title-link" onclick="openContractDetail(${r.id})">${escapeHtml(r.contract_name)}</div>
-          ${r.department || r.owner ? `<div class="sub-meta">${escapeHtml(r.department || '')} ${escapeHtml(r.owner || '')}</div>` : ''}
-        </td>
-        <td><span class="type-pill">${escapeHtml(r.contract_type)}</span></td>
-        <td class="parties-cell">${partiesHtml}</td>
-        <td class="money-cell">${formatMoney(r.amount)}</td>
-        <td class="center-cell">${escapeHtml(r.sign_date)}</td>
-        <td class="center-cell"><span class="status-badge ${getStatusBadgeClass(r.status)}">${escapeHtml(r.status)}</span></td>
-        <td class="center-cell">${procBadge}</td>
-        <td class="center-cell">${fileTagHtml}</td>
-        <td class="remark-cell" title="${escapeHtml(r.remark || '')}">${escapeHtml(r.remark || '-')}</td>
-        <td class="action-cell">
-          <button class="btn-link" onclick="openContractDetail(${r.id})">预览/附件</button>
-          <button class="btn-link" onclick="openEditContractModal(${r.id})">编辑</button>
-          <button class="btn-link danger" onclick="deleteContract(${r.id}, '${escapeHtml(r.contract_no)}')">删除</button>
+      <tr class="${oddClass}">
+        <td class="text-center"><span class="seq-badge">${escapeHtml(p.seq_no)}</span></td>
+        <td><strong>${escapeHtml(p.procurement_no)}</strong></td>
+        <td><a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('procurement', ${p.id})">${escapeHtml(p.project_name)}</a></td>
+        <td class="text-center">${escapeHtml(p.project_type)}</td>
+        <td class="text-center"><strong>${escapeHtml(p.cost_department || '-')}</strong></td>
+        <td class="text-right">${formatMoney(p.budget_amount)}</td>
+        <td class="text-center">${escapeHtml(p.budget_subject || '-')}</td>
+        <td class="text-center">${escapeHtml(p.procurement_type || '-')}</td>
+        <td class="text-center">${escapeHtml(p.procurement_method || '-')}</td>
+        <td class="text-center">${escapeHtml(p.approval_date || '-')}</td>
+        <td class="text-center">${escapeHtml(p.decision_date || '-')}</td>
+        <td class="text-center">${escapeHtml(p.completion_date || '-')}</td>
+        <td>${escapeHtml(p.supplier_name || '-')}</td>
+        <td class="text-right"><strong>${formatMoney(p.deal_amount)}</strong></td>
+        <td class="text-center"><span class="badge badge-${escapeHtml(p.has_contract)}">${escapeHtml(p.has_contract)}</span></td>
+        <td>${contractHtml}</td>
+        <td class="summary-cell">${escapeHtml(p.remark || '-')}</td>
+        <td>${filesHtml}</td>
+        <td class="text-center">
+          <button class="btn btn-outline btn-sm" onclick="openDetailModal('procurement', ${p.id})">详情</button>
+          <button class="btn btn-outline btn-sm" onclick="openProcurementFormModal(${p.id})">编辑</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteProcRecord(${p.id}, '${escapeHtml(p.procurement_no)}')">删除</button>
         </td>
       </tr>
     `;
   }).join('');
 }
 
-function resetContractFilters() {
-  document.getElementById('filter_keyword').value = '';
-  document.getElementById('filter_type').value = '';
-  document.getElementById('filter_status').value = '';
-  document.getElementById('filter_year').value = '';
-  document.getElementById('filter_start_date').value = '';
-  document.getElementById('filter_end_date').value = '';
-  document.getElementById('filter_has_file').value = '';
-  loadContracts();
-}
-
-async function loadProcurementOptionsForContractForm(selectedProcId = null) {
-  const sel = document.getElementById('f_procurement_id');
+async function populateContractDropdownInProcForm(selectedContractId = null) {
+  const sel = document.getElementById('p_contract_id');
   if (!sel) return;
   try {
-    const resp = await apiFetch('/api/options/procurements');
-    const json = await resp.json();
+    const res = await apiFetch('/api/contracts');
+    const json = await res.json();
     const list = json.data || [];
-    sel.innerHTML = `<option value="">-- 不关联 / 暂未关联采购立项 --</option>` + list.map(p => {
-      const boundTip = p.linked_contract_no && Number(p.id) !== Number(selectedProcId)
-        ? ` [已绑:${p.linked_contract_no}]`
-        : '';
-      return `<option value="${p.id}"
-        data-name="${escapeHtml(p.project_name)}"
-        data-dept="${escapeHtml(p.department || '')}"
-        data-applicant="${escapeHtml(p.applicant || '')}"
-        data-supplier="${escapeHtml(p.supplier_name || '')}"
-        data-amount="${p.final_amount || p.budget_amount || 0}">
-        ${escapeHtml(p.procurement_no)} - ${escapeHtml(p.project_name)}${escapeHtml(boundTip)}
-      </option>`;
+    sel.innerHTML = `<option value="">-- 暂不绑定已有合同 (或右侧直接手填合同编号) --</option>` + list.map(c => {
+      return `<option value="${c.id}" data-no="${escapeHtml(c.contract_no)}">${escapeHtml(c.contract_no)} - ${escapeHtml(c.contract_name)}</option>`;
     }).join('');
-    if (selectedProcId) sel.value = String(selectedProcId);
+    if (selectedContractId) sel.value = String(selectedContractId);
   } catch (e) {}
 }
 
-function onSelectLinkedProcurementChange() {
-  const sel = document.getElementById('f_procurement_id');
-  if (!sel || !sel.value) return;
+function onSelectLinkedContractInProcForm(sel) {
   const opt = sel.options[sel.selectedIndex];
-  if (!opt) return;
-
-  const nameInput = document.getElementById('f_contract_name');
-  const partyBInput = document.getElementById('f_party_b');
-  const amountInput = document.getElementById('f_amount');
-  const deptInput = document.getElementById('f_department');
-  const ownerInput = document.getElementById('f_owner');
-
-  if (nameInput && !nameInput.value.trim() && opt.dataset.name) nameInput.value = opt.dataset.name;
-  if (partyBInput && !partyBInput.value.trim() && opt.dataset.supplier) partyBInput.value = opt.dataset.supplier;
-  if (amountInput && (!amountInput.value || Number(amountInput.value) === 0) && Number(opt.dataset.amount) > 0) {
-    amountInput.value = opt.dataset.amount;
+  if (opt && sel.value) {
+    document.getElementById('p_contract_no_manual').value = opt.dataset.no || '';
+    document.getElementById('p_has_contract').value = '是';
   }
-  if (deptInput && !deptInput.value.trim() && opt.dataset.dept) deptInput.value = opt.dataset.dept;
-  if (ownerInput && !ownerInput.value.trim() && opt.dataset.applicant) ownerInput.value = opt.dataset.applicant;
 }
 
-async function openCreateContractModal() {
-  document.getElementById('contract_form').reset();
-  document.getElementById('f_id').value = '';
-  document.getElementById('contract_modal_title').textContent = '新增合同台账';
-  document.getElementById('existing_file_box').classList.add('hidden');
-  document.getElementById('f_remove_file').value = '0';
-
+async function openProcurementFormModal(editId = null) {
+  const form = document.getElementById('procurement_form');
+  form.reset();
   const today = new Date().toISOString().slice(0, 10);
-  document.getElementById('f_sign_date').value = today;
-  document.getElementById('seg_c_mid').value = '';
 
-  await loadProcurementOptionsForContractForm(null);
-  await refreshContractNoSegmentsByDateAndMid();
-  document.getElementById('contract_modal').classList.remove('hidden');
-}
-
-async function openEditContractModal(id) {
-  try {
-    const resp = await apiFetch(`/api/contracts/${id}`);
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    const c = json.data;
-
-    document.getElementById('contract_form').reset();
-    document.getElementById('f_id').value = c.id;
-    document.getElementById('contract_modal_title').textContent = `编辑合同：${c.contract_no}`;
-
-    await loadProcurementOptionsForContractForm(c.procurement_id);
-
-    document.getElementById('f_contract_no').value = c.contract_no;
-    document.getElementById('seg_c_prefix').value = contractNoRule.prefix || '';
-    document.getElementById('seg_c_mid').value = '';
-    document.getElementById('seg_c_date').value = '';
-    document.getElementById('seg_c_seq').value = '';
-    document.getElementById('seg_c_suffix').value = contractNoRule.suffix || '';
-
-    document.getElementById('f_contract_name').value = c.contract_name;
-    document.getElementById('f_contract_type').value = c.contract_type;
-    document.getElementById('f_party_a').value = c.party_a;
-    document.getElementById('f_party_b').value = c.party_b;
-    document.getElementById('f_party_c').value = c.party_c || '';
-    document.getElementById('f_amount').value = c.amount;
-    document.getElementById('f_sign_date').value = c.sign_date;
-    document.getElementById('f_start_date').value = c.start_date || '';
-    document.getElementById('f_end_date').value = c.end_date || '';
-    document.getElementById('f_status').value = c.status;
-    document.getElementById('f_department').value = c.department || '';
-    document.getElementById('f_owner').value = c.owner || '';
-    document.getElementById('f_remark').value = c.remark || '';
-    document.getElementById('f_remove_file').value = '0';
-
-    const fileBox = document.getElementById('existing_file_box');
-    if (c.file_path) {
-      fileBox.classList.remove('hidden');
-      document.getElementById('existing_file_name').textContent = `${c.file_original_name || c.file_path} (${formatFileSize(c.file_size)})`;
-    } else {
-      fileBox.classList.add('hidden');
-    }
-
-    document.getElementById('contract_modal').classList.remove('hidden');
-  } catch (err) {
-    showToast(err.message || '读取合同信息失败', 'error');
-  }
-}
-
-function markRemoveExistingScan() {
-  document.getElementById('f_remove_file').value = '1';
-  document.getElementById('existing_file_box').classList.add('hidden');
-  showToast('已标记移除原主扫描件，点击保存后生效');
-}
-
-function closeContractModal() {
-  document.getElementById('contract_modal').classList.add('hidden');
-}
-
-async function submitContractForm(e) {
-  e.preventDefault();
-  if (isSubmittingForm) return;
-  isSubmittingForm = true;
-  const submitBtn = document.getElementById('contract_submit_btn');
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    const id = document.getElementById('f_id').value;
-    const fd = new FormData();
-    fd.append('contract_no', document.getElementById('f_contract_no').value.trim());
-    fd.append('contract_name', document.getElementById('f_contract_name').value.trim());
-    fd.append('contract_type', document.getElementById('f_contract_type').value);
-    fd.append('party_a', document.getElementById('f_party_a').value.trim());
-    fd.append('party_b', document.getElementById('f_party_b').value.trim());
-    fd.append('party_c', document.getElementById('f_party_c').value.trim());
-    fd.append('amount', document.getElementById('f_amount').value || '0');
-    fd.append('sign_date', document.getElementById('f_sign_date').value);
-    fd.append('start_date', document.getElementById('f_start_date').value);
-    fd.append('end_date', document.getElementById('f_end_date').value);
-    fd.append('status', document.getElementById('f_status').value);
-    fd.append('department', document.getElementById('f_department').value.trim());
-    fd.append('owner', document.getElementById('f_owner').value.trim());
-    fd.append('remark', document.getElementById('f_remark').value.trim());
-    fd.append('procurement_id', document.getElementById('f_procurement_id').value || '');
-    fd.append('remove_file', document.getElementById('f_remove_file').value);
-
-    const scanInput = document.getElementById('f_scan_file');
-    if (scanInput && scanInput.files[0]) {
-      fd.append('scan_file', scanInput.files[0]);
-    }
-    const relInput = document.getElementById('f_related_files');
-    if (relInput && relInput.files.length > 0) {
-      for (const f of relInput.files) {
-        fd.append('related_files', f);
-      }
-    }
-
-    const url = id ? `/api/contracts/${id}` : '/api/contracts';
-    const method = id ? 'PUT' : 'POST';
-    const resp = await apiFetch(url, { method, body: fd });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-
-    showToast(json.message || '保存成功');
-    closeContractModal();
-    await loadContractNoRule();
-    await loadContracts();
-  } catch (err) {
-    showToast(err.message || '保存失败', 'error');
-  } finally {
-    isSubmittingForm = false;
-    if (submitBtn) submitBtn.disabled = false;
-  }
-}
-
-async function deleteContract(id, contractNo) {
-  if (!confirm(`确定要彻底删除合同【${contractNo}】吗？\n删除后，关联的主扫描件及所有附件将同步从磁盘物理清除，且后续序号将自动重排对齐！`)) {
-    return;
-  }
-  try {
-    const resp = await apiFetch(`/api/contracts/${id}`, { method: 'DELETE' });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast(json.message);
-    await loadContractNoRule();
-    await loadContracts();
-  } catch (err) {
-    showToast(err.message || '删除失败', 'error');
-  }
-}
-
-// ==================== 5. 合同详情与多模态预览弹窗（关闭即销毁 DOM 防泄漏） ====================
-async function openContractDetail(id) {
-  try {
-    const resp = await apiFetch(`/api/contracts/${id}`);
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    currentDetailContract = json.data;
-    renderContractDetailModal(currentDetailContract);
-    document.getElementById('detail_modal').classList.remove('hidden');
-  } catch (err) {
-    showToast(err.message || '获取详情失败', 'error');
-  }
-}
-
-function renderContractDetailModal(c) {
-  document.getElementById('d_title').textContent = `${c.contract_no} - ${c.contract_name}`;
-  const procInfo = c.linked_procurement_no
-    ? `<span class="link-chip" onclick="closeDetailModal(); jumpToProcurementDetail(${c.procurement_id})">🔗 ${escapeHtml(c.linked_procurement_no)} (${escapeHtml(c.linked_procurement_name || '')})</span>`
-    : '未关联采购立项';
-
-  document.getElementById('d_meta_grid').innerHTML = `
-    <div><strong>年度序号：</strong>${escapeHtml(c.seq_no)}</div>
-    <div><strong>合同类型：</strong>${escapeHtml(c.contract_type)}</div>
-    <div><strong>合同金额：</strong><span class="money-text">${formatMoney(c.amount)}</span></div>
-    <div><strong>履行状态：</strong><span class="status-badge ${getStatusBadgeClass(c.status)}">${escapeHtml(c.status)}</span></div>
-    <div><strong>甲方单位：</strong>${escapeHtml(c.party_a)}</div>
-    <div><strong>乙方单位：</strong>${escapeHtml(c.party_b)}</div>
-    ${c.party_c ? `<div><strong>丙方单位：</strong>${escapeHtml(c.party_c)}</div>` : ''}
-    <div><strong>签订日期：</strong>${escapeHtml(c.sign_date)}</div>
-    <div><strong>履行期限：</strong>${escapeHtml(c.start_date || '未填')} 至 ${escapeHtml(c.end_date || '未填')}</div>
-    <div><strong>部门/负责人：</strong>${escapeHtml(c.department || '-')} / ${escapeHtml(c.owner || '-')}</div>
-    <div style="grid-column: span 2;"><strong>关联采购立项：</strong>${procInfo}</div>
-    <div style="grid-column: span 2;"><strong>备注说明：</strong>${escapeHtml(c.remark || '无')}</div>
-  `;
-
-  renderContractAttachmentList(c);
-  if (c.file_path) {
-    previewAttachmentInContainer(c.file_path, c.file_original_name || c.file_path, 'preview_container');
-  } else if (c.related_files && c.related_files.length > 0) {
-    previewAttachmentInContainer(c.related_files[0].file_path, c.related_files[0].file_original_name, 'preview_container');
+  if (!editId) {
+    document.getElementById('p_form_id').value = '';
+    document.getElementById('proc_form_modal_title').textContent = '🛒 新增采购项目立项台账';
+    document.getElementById('p_approval_date').value = today;
+    document.getElementById('p_seg_mid_custom_input').value = procRule.default_mid || '';
+    toggleFreeProcNoMode(false);
+    await populateContractDropdownInProcForm(null);
+    await fillAutoProcurementNo(today);
   } else {
-    document.getElementById('preview_container').innerHTML = `<div class="empty-preview">暂未上传主合同扫描件或相关资料，可在上方一键补传</div>`;
+    const res = await apiFetch(`/api/procurements/${editId}`);
+    const json = await res.json();
+    if (!json.success) return;
+    const p = json.data;
+    document.getElementById('p_form_id').value = p.id;
+    document.getElementById('proc_form_modal_title').textContent = `🛒 编辑采购立项：${p.procurement_no}`;
+    toggleFreeProcNoMode(true);
+    document.getElementById('p_procurement_no').value = p.procurement_no;
+    document.getElementById('p_project_name').value = p.project_name;
+    document.getElementById('p_project_type').value = p.project_type;
+    document.getElementById('p_cost_department').value = p.cost_department || '';
+    document.getElementById('p_budget_amount').value = p.budget_amount || '';
+    document.getElementById('p_budget_subject').value = p.budget_subject || '';
+    document.getElementById('p_procurement_type').value = p.procurement_type || '小额零星采购';
+    document.getElementById('p_procurement_method').value = p.procurement_method || '合作谈判';
+    document.getElementById('p_approval_date').value = p.approval_date || '';
+    document.getElementById('p_decision_date').value = p.decision_date || '';
+    document.getElementById('p_completion_date').value = p.completion_date || '';
+    document.getElementById('p_supplier_name').value = p.supplier_name || '';
+    document.getElementById('p_deal_amount').value = p.deal_amount || '';
+    document.getElementById('p_has_contract').value = p.has_contract || '否';
+    document.getElementById('p_contract_no_manual').value = p.contract_no_manual || '';
+    document.getElementById('p_remark').value = p.remark || '';
+    await populateContractDropdownInProcForm(p.contract_id);
+  }
+
+  document.getElementById('proc_form_modal').classList.remove('hidden');
+}
+
+function closeProcurementFormModal() {
+  document.getElementById('proc_form_modal').classList.add('hidden');
+}
+
+async function submitProcurementForm(e) {
+  e.preventDefault();
+  if (isSubmitting) return;
+  isSubmitting = true;
+  const btn = document.getElementById('btn_submit_procurement');
+  if (btn) btn.disabled = true;
+
+  try {
+    if (!isFreeProcNoMode) syncSegmentedProcNo();
+    const editId = document.getElementById('p_form_id').value;
+    const fd = new FormData();
+    fd.append('procurement_no', document.getElementById('p_procurement_no').value.trim());
+    fd.append('project_name', document.getElementById('p_project_name').value.trim());
+    fd.append('project_type', document.getElementById('p_project_type').value);
+    fd.append('cost_department', document.getElementById('p_cost_department').value.trim());
+    fd.append('budget_amount', document.getElementById('p_budget_amount').value || '0');
+    fd.append('budget_subject', document.getElementById('p_budget_subject').value.trim());
+    fd.append('procurement_type', document.getElementById('p_procurement_type').value);
+    fd.append('procurement_method', document.getElementById('p_procurement_method').value.trim());
+    fd.append('approval_date', parseSmartDateString(document.getElementById('p_approval_date').value));
+    fd.append('decision_date', parseSmartDateString(document.getElementById('p_decision_date').value));
+    fd.append('completion_date', parseSmartDateString(document.getElementById('p_completion_date').value));
+    fd.append('supplier_name', document.getElementById('p_supplier_name').value.trim());
+    fd.append('deal_amount', document.getElementById('p_deal_amount').value || '0');
+    fd.append('has_contract', document.getElementById('p_has_contract').value);
+    fd.append('contract_id', document.getElementById('p_contract_id').value || '');
+    fd.append('contract_no_manual', document.getElementById('p_contract_no_manual').value.trim());
+    fd.append('remark', document.getElementById('p_remark').value.trim());
+
+    const fInput = document.getElementById('p_procurement_files');
+    if (fInput && fInput.files.length > 0) {
+      for (const f of fInput.files) fd.append('procurement_files', f);
+    }
+
+    const url = editId ? `/api/procurements/${editId}` : '/api/procurements';
+    const method = editId ? 'PUT' : 'POST';
+    const res = await apiFetch(url, { method, body: fd });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+
+    closeProcurementFormModal();
+    await loadProcNoRuleSettings();
+    await loadProcurements();
+  } catch (err) {
+    alert(err.message || '保存采购立项失败');
+  } finally {
+    isSubmitting = false;
+    if (btn) btn.disabled = false;
   }
 }
 
-function renderContractAttachmentList(c) {
-  const box = document.getElementById('d_attachments_list');
-  const items = [];
-
-  if (c.file_path) {
-    const dlUrl = withTokenUrl(`/uploads/${encodeURI(c.file_path)}?download=1&filename=${encodeURIComponent(c.file_path)}`);
-    items.push(`
-      <div class="att-card main-att">
-        <div class="att-info" onclick="previewAttachmentInContainer('${escapeHtml(c.file_path)}', '${escapeHtml(c.file_original_name || c.file_path)}', 'preview_container')">
-          <span class="att-badge">主合同扫描件</span>
-          <span class="att-name">${escapeHtml(c.file_path)}</span>
-          <span class="att-size">(${formatFileSize(c.file_size)})</span>
-        </div>
-        <div class="att-actions">
-          <button class="btn-xs" onclick="previewAttachmentInContainer('${escapeHtml(c.file_path)}', '${escapeHtml(c.file_original_name || c.file_path)}', 'preview_container')">预览</button>
-          <a class="btn-xs" href="${dlUrl}">下载</a>
-        </div>
-      </div>
-    `);
+async function deleteProcRecord(id, no) {
+  if (!confirm(`确定删除采购立项【${no}】吗？关联立项资料文件将同步从磁盘清除！`)) return;
+  const res = await apiFetch(`/api/procurements/${id}`, { method: 'DELETE' });
+  const json = await res.json();
+  if (json.success) {
+    await loadProcNoRuleSettings();
+    await loadProcurements();
   }
-
-  for (const rf of (c.related_files || [])) {
-    const dlUrl = withTokenUrl(`/uploads/${encodeURI(rf.file_path)}?download=1&filename=${encodeURIComponent(rf.file_original_name)}`);
-    items.push(`
-      <div class="att-card">
-        <div class="att-info" onclick="previewAttachmentInContainer('${escapeHtml(rf.file_path)}', '${escapeHtml(rf.file_original_name)}', 'preview_container')">
-          <span class="att-badge secondary">相关资料</span>
-          <span class="att-name">${escapeHtml(rf.file_original_name)}</span>
-          <span class="att-size">(${formatFileSize(rf.file_size)})</span>
-        </div>
-        <div class="att-actions">
-          <button class="btn-xs" onclick="previewAttachmentInContainer('${escapeHtml(rf.file_path)}', '${escapeHtml(rf.file_original_name)}', 'preview_container')">预览</button>
-          <a class="btn-xs" href="${dlUrl}">下载</a>
-          <button class="btn-xs danger" onclick="deleteContractRelatedFile(${c.id}, ${rf.id})">删除</button>
-        </div>
-      </div>
-    `);
-  }
-
-  box.innerHTML = items.length > 0 ? items.join('') : `<div class="text-muted">暂无任何附件</div>`;
 }
 
-function previewAttachmentInContainer(relPath, displayName, containerId) {
-  const container = document.getElementById(containerId);
-  if (!container) return;
-  container.innerHTML = ''; // 先释放旧 DOM 节点
+// ==================== 9. 全能详情与三大文件在线预览中心 ====================
+async function openDetailModal(mode, id) {
+  const fieldsBox = document.getElementById('detail_fields');
+  const toolbar = document.getElementById('attachment_toolbar');
+  const preview = document.getElementById('preview_container');
+  preview.innerHTML = '';
 
+  if (mode === 'contract') {
+    const res = await apiFetch(`/api/contracts/${id}`);
+    const json = await res.json();
+    if (!json.success) return;
+    const c = json.data;
+    document.getElementById('detail_modal_title').textContent = `📄 合同全量详情：${c.contract_no} - ${c.contract_name}`;
+
+    const procFiles = c.linked_procurement?.files || [];
+    const relFiles = c.related_files || [];
+
+    fieldsBox.innerHTML = `
+      <div class="detail-card">
+        <h4>📌 合同基础信息</h4>
+        <div class="detail-row"><span class="label">年度序号 / 合同编号</span><span class="val">${escapeHtml(c.seq_no)} / ${escapeHtml(c.contract_no)}</span></div>
+        <div class="detail-row"><span class="label">合同名称</span><span class="val">${escapeHtml(c.contract_name)}</span></div>
+        <div class="detail-row"><span class="label">我方签约主体</span><span class="val">${escapeHtml(c.our_entity)}</span></div>
+        <div class="detail-row"><span class="label">签订 / 履约 / 到期日</span><span class="val">${escapeHtml(c.sign_date)} / ${escapeHtml(c.start_date)} / ${escapeHtml(c.expiry_date)}</span></div>
+      </div>
+
+      <div class="detail-card">
+        <h4>① 主合同扫描件</h4>
+        ${c.attachment_path
+          ? `<div class="related-list-item">
+               <span class="fname">${escapeHtml(c.attachment_original_name || c.attachment_path)}</span>
+               <div class="factions">
+                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(c.attachment_path)}', '${escapeHtml(c.attachment_original_name || c.attachment_path)}')">预览</button>
+                 <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(c.attachment_path)}?download=1`)}">下载</a>
+               </div>
+             </div>`
+          : `<div style="color:#9ca3af;">暂未上传主合同扫描件</div>`}
+      </div>
+
+      <div class="detail-card">
+        <h4>② 关联采购立项及立项资料 (${procFiles.length}份)</h4>
+        ${c.linked_procurement
+          ? `<div style="margin-bottom:6px;font-weight:600;color:#6b21a8;">立项号：${escapeHtml(c.linked_procurement.procurement_no)} (${escapeHtml(c.linked_procurement.project_name)})</div>` +
+            procFiles.map(pf => `
+              <div class="related-list-item">
+                <span class="fname">${escapeHtml(pf.file_original_name)}</span>
+                <div class="factions">
+                  <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(pf.file_path)}', '${escapeHtml(pf.file_original_name)}')">预览</button>
+                  <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(pf.file_path)}?download=1`)}">下载</a>
+                </div>
+              </div>
+            `).join('')
+          : `<div style="color:#9ca3af;">未关联采购立项</div>`}
+      </div>
+
+      <div class="detail-card">
+        <h4>③ 合同其他关联资料 (${relFiles.length}份)</h4>
+        ${relFiles.map(rf => `
+          <div class="related-list-item">
+            <span class="fname">${escapeHtml(rf.file_original_name)}</span>
+            <div class="factions">
+              <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(rf.file_path)}', '${escapeHtml(rf.file_original_name)}')">预览</button>
+              <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(rf.file_path)}?download=1`)}">下载</a>
+            </div>
+          </div>
+        `).join('') || `<div style="color:#9ca3af;">暂无其他关联资料</div>`}
+      </div>
+    `;
+
+    toolbar.innerHTML = `<span>💡 点击左侧任意文件即可在下方直接在线预览 PDF / 图片</span>`;
+    if (c.attachment_path) {
+      previewFileInBox(c.attachment_path, c.attachment_original_name || c.attachment_path);
+    } else if (procFiles[0]) {
+      previewFileInBox(procFiles[0].file_path, procFiles[0].file_original_name);
+    } else if (relFiles[0]) {
+      previewFileInBox(relFiles[0].file_path, relFiles[0].file_original_name);
+    } else {
+      preview.innerHTML = `<div class="empty-preview">暂无可预览的附件</div>`;
+    }
+  } else {
+    const res = await apiFetch(`/api/procurements/${id}`);
+    const json = await res.json();
+    if (!json.success) return;
+    const p = json.data;
+    document.getElementById('detail_modal_title').textContent = `🛒 采购立项详情：${p.procurement_no} - ${p.project_name}`;
+
+    const files = p.files || [];
+    fieldsBox.innerHTML = `
+      <div class="detail-card">
+        <h4>📌 采购立项核心信息</h4>
+        <div class="detail-row"><span class="label">立项编号</span><span class="val">${escapeHtml(p.procurement_no)}</span></div>
+        <div class="detail-row"><span class="label">项目名称</span><span class="val">${escapeHtml(p.project_name)}</span></div>
+        <div class="detail-row"><span class="label">立项类型 / 费用承担部门</span><span class="val">${escapeHtml(p.project_type)} / ${escapeHtml(p.cost_department || '-')}</span></div>
+        <div class="detail-row"><span class="label">预算金额 / 成交金额</span><span class="val">${formatMoney(p.budget_amount)} / ${formatMoney(p.deal_amount)}</span></div>
+        <div class="detail-row"><span class="label">成交供应商</span><span class="val">${escapeHtml(p.supplier_name || '-')}</span></div>
+      </div>
+
+      <div class="detail-card">
+        <h4>📁 立项相关资料 (${files.length}份)</h4>
+        ${files.map(f => `
+          <div class="related-list-item">
+            <span class="fname">${escapeHtml(f.file_original_name)}</span>
+            <div class="factions">
+              <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(f.file_path)}', '${escapeHtml(f.file_original_name)}')">预览</button>
+              <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(f.file_path)}?download=1`)}">下载</a>
+            </div>
+          </div>
+        `).join('') || `<div style="color:#9ca3af;">暂未上传立项资料</div>`}
+      </div>
+
+      <div class="detail-card">
+        <h4>📄 关联合同扫描件直连</h4>
+        ${p.linked_contract && p.linked_contract.attachment_path
+          ? `<div class="related-list-item">
+               <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 主扫描件</span>
+               <div class="factions">
+                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(p.linked_contract.attachment_path)}', '${escapeHtml(p.linked_contract.contract_no)}')">预览</button>
+               </div>
+             </div>`
+          : `<div style="color:#9ca3af;">暂未关联已上传扫描件的合同</div>`}
+      </div>
+    `;
+
+    toolbar.innerHTML = `<span>💡 点击左侧文件即可在线预览</span>`;
+    if (files[0]) {
+      previewFileInBox(files[0].file_path, files[0].file_original_name);
+    } else if (p.linked_contract?.attachment_path) {
+      previewFileInBox(p.linked_contract.attachment_path, p.linked_contract.contract_no);
+    } else {
+      preview.innerHTML = `<div class="empty-preview">暂无可预览的资料</div>`;
+    }
+  }
+
+  document.getElementById('detail_modal').classList.remove('hidden');
+}
+
+function previewFileInBox(relPath, title) {
+  const box = document.getElementById('preview_container');
+  if (!box) return;
+  box.innerHTML = '';
   const url = withTokenUrl(`/uploads/${encodeURI(relPath)}`);
-  const dlUrl = withTokenUrl(`/uploads/${encodeURI(relPath)}?download=1&filename=${encodeURIComponent(displayName)}`);
+  const dlUrl = withTokenUrl(`/uploads/${encodeURI(relPath)}?download=1&filename=${encodeURIComponent(title)}`);
   const ext = (relPath.split('.').pop() || '').toLowerCase();
 
   if (ext === 'pdf') {
-    container.innerHTML = `<iframe src="${url}" class="pdf-frame" title="${escapeHtml(displayName)}"></iframe>`;
+    box.innerHTML = `<iframe src="${url}"></iframe>`;
   } else if (['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(ext)) {
-    container.innerHTML = `<div class="img-preview-wrap"><img src="${url}" alt="${escapeHtml(displayName)}" /></div>`;
+    box.innerHTML = `<img src="${url}" alt="${escapeHtml(title)}" />`;
   } else {
-    container.innerHTML = `
+    box.innerHTML = `
       <div class="empty-preview">
-        <p>当前文件 <strong>${escapeHtml(displayName)}</strong> 为 ${ext.toUpperCase()} 格式，不支持浏览器直接内嵌渲染。</p>
+        <p>文件 <strong>${escapeHtml(title)}</strong> (${ext.toUpperCase()}) 不支持直接内嵌预览</p>
         <p style="margin-top:12px;"><a class="btn btn-primary" href="${dlUrl}">📥 点击下载到本地查看</a></p>
       </div>
     `;
   }
 }
 
-async function quickUploadMainScan(inputEl) {
-  if (!currentDetailContract || !inputEl.files[0] || isUploadingDetail) return;
-  isUploadingDetail = true;
-  try {
-    const fd = new FormData();
-    fd.append('scan_file', inputEl.files[0]);
-    const resp = await apiFetch(`/api/contracts/${currentDetailContract.id}/upload`, { method: 'POST', body: fd });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast('主合同扫描件已上传更新');
-    inputEl.value = '';
-    await openContractDetail(currentDetailContract.id);
-    await loadContracts();
-  } catch (err) {
-    showToast(err.message || '上传失败', 'error');
-  } finally {
-    isUploadingDetail = false;
-  }
-}
-
-async function quickUploadRelatedFiles(inputEl) {
-  if (!currentDetailContract || !inputEl.files.length || isUploadingDetail) return;
-  isUploadingDetail = true;
-  try {
-    const fd = new FormData();
-    for (const f of inputEl.files) fd.append('related_files', f);
-    const resp = await apiFetch(`/api/contracts/${currentDetailContract.id}/related-files`, { method: 'POST', body: fd });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast(json.message);
-    inputEl.value = '';
-    await openContractDetail(currentDetailContract.id);
-    await loadContracts();
-  } catch (err) {
-    showToast(err.message || '上传失败', 'error');
-  } finally {
-    isUploadingDetail = false;
-  }
-}
-
-async function deleteContractRelatedFile(contractId, fileId) {
-  if (!confirm('确认删除该份相关资料附件？删除后将从硬盘物理清除！')) return;
-  try {
-    const resp = await apiFetch(`/api/contracts/${contractId}/related-files/${fileId}`, { method: 'DELETE' });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast('附件已物理删除');
-    await openContractDetail(contractId);
-    await loadContracts();
-  } catch (err) {
-    showToast(err.message || '删除失败', 'error');
-  }
-}
-
 function closeDetailModal() {
   document.getElementById('detail_modal').classList.add('hidden');
-  const container = document.getElementById('preview_container');
-  if (container) container.innerHTML = ''; // 彻底销毁 iframe/img 句柄释放浏览器内存
-  currentDetailContract = null;
+  const box = document.getElementById('preview_container');
+  if (box) box.innerHTML = ''; // 立即销毁 iframe/img 释放内存
 }
 
-// ==================== 6. 采购立项台账加载、CRUD 与跨表跳转 ====================
-function getProcFilterParams() {
-  const params = new URLSearchParams();
-  const kw = document.getElementById('proc_filter_keyword')?.value.trim();
-  const type = document.getElementById('proc_filter_type')?.value;
-  const method = document.getElementById('proc_filter_method')?.value;
-  const status = document.getElementById('proc_filter_status')?.value;
-  const year = document.getElementById('proc_filter_year')?.value;
-  const hasFile = document.getElementById('proc_filter_has_file')?.value;
-
-  if (kw) params.set('keyword', kw);
-  if (type) params.set('procurement_type', type);
-  if (method) params.set('procurement_method', method);
-  if (status) params.set('status', status);
-  if (year) params.set('year', year);
-  if (hasFile) params.set('has_file', hasFile);
-  return params;
+// ==================== 10. Excel 导出动作绑定 ====================
+function exportExcel(mode) {
+  const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildContractQueryParams();
+  window.location.href = withTokenUrl(`/api/export/excel?${params.toString()}`);
 }
 
-async function loadProcurements() {
-  try {
-    const params = getProcFilterParams();
-    const resp = await apiFetch(`/api/procurements?${params.toString()}`);
-    const json = await resp.json();
-    if (!json.success) return;
-
-    allProcurements = json.data || [];
-    renderProcStats(json.stats);
-    renderProcTable(allProcurements);
-  } catch (err) {
-    if (err.message !== '需要验证局域网访问口令') {
-      showToast('加载采购立项失败', 'error');
-    }
-  }
-}
-
-function renderProcStats(stats) {
-  if (!stats) return;
-  document.getElementById('p_stat_total_count').textContent = stats.total_count || 0;
-  document.getElementById('p_stat_total_budget').textContent = formatMoney(stats.total_budget || 0);
-  document.getElementById('p_stat_total_final').textContent = formatMoney(stats.total_final || 0);
-  document.getElementById('p_stat_linked_count').textContent = stats.linked_contract_count || 0;
-}
-
-function renderProcTable(rows) {
-  const tbody = document.getElementById('procurement_tbody');
-  if (!tbody) return;
-  if (!rows || rows.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="12" class="empty-row">暂无采购立项记录，点击右上角【+ 新增采购立项】开始录入</td></tr>`;
-    return;
-  }
-
-  tbody.innerHTML = rows.map(r => {
-    const fCount = Number(r.file_count || 0);
-    const fileTag = fCount > 0
-      ? `<span class="file-tag ok" onclick="openProcurementDetail(${r.id})">📁 立项资料×${fCount}</span>`
-      : `<span class="file-tag none">未上传</span>`;
-
-    const contractChip = r.linked_contract_no
-      ? `<span class="link-chip" title="${escapeHtml(r.linked_contract_name || '')}" onclick="jumpToContractDetail(${r.contract_id})">📄 ${escapeHtml(r.linked_contract_no)}</span>`
-      : `<span class="text-muted">暂未签合同</span>`;
-
-    return `
-      <tr>
-        <td class="mono-cell">${escapeHtml(r.seq_no)}</td>
-        <td class="mono-cell font-semibold">${escapeHtml(r.procurement_no)}</td>
-        <td>
-          <div class="title-link" onclick="openProcurementDetail(${r.id})">${escapeHtml(r.project_name)}</div>
-          ${r.supplier_name ? `<div class="sub-meta">供应商：${escapeHtml(r.supplier_name)}</div>` : ''}
-        </td>
-        <td class="center-cell">
-          <span class="type-pill">${escapeHtml(r.procurement_type)}</span>
-          <div class="sub-meta">${escapeHtml(r.procurement_method)}</div>
-        </td>
-        <td class="money-cell">${formatMoney(r.budget_amount)}</td>
-        <td class="money-cell">${r.final_amount > 0 ? formatMoney(r.final_amount) : '<span class="text-muted">待定</span>'}</td>
-        <td class="center-cell">${escapeHtml(r.department || '-')} / ${escapeHtml(r.applicant || '-')}</td>
-        <td class="center-cell">${escapeHtml(r.approval_date)}</td>
-        <td class="center-cell"><span class="status-badge ${getStatusBadgeClass(r.status)}">${escapeHtml(r.status)}</span></td>
-        <td class="center-cell">${contractChip}</td>
-        <td class="center-cell">${fileTag}</td>
-        <td class="action-cell">
-          <button class="btn-link" onclick="openProcurementDetail(${r.id})">资料/详情</button>
-          <button class="btn-link" onclick="openEditProcurementModal(${r.id})">编辑</button>
-          <button class="btn-link danger" onclick="deleteProcurement(${r.id}, '${escapeHtml(r.procurement_no)}')">删除</button>
-        </td>
-      </tr>
-    `;
-  }).join('');
-}
-
-function resetProcFilters() {
-  document.getElementById('proc_filter_keyword').value = '';
-  document.getElementById('proc_filter_type').value = '';
-  document.getElementById('proc_filter_method').value = '';
-  document.getElementById('proc_filter_status').value = '';
-  document.getElementById('proc_filter_year').value = '';
-  document.getElementById('proc_filter_has_file').value = '';
-  loadProcurements();
-}
-
-async function loadContractOptionsForProcForm(selectedContractId = null) {
-  const sel = document.getElementById('p_contract_id');
-  if (!sel) return;
-  try {
-    const resp = await apiFetch('/api/options/contracts');
-    const json = await resp.json();
-    const list = json.data || [];
-    sel.innerHTML = `<option value="">-- 暂未签订合同 / 后续再关联 --</option>` + list.map(c => {
-      const boundTip = c.linked_procurement_no && Number(c.id) !== Number(selectedContractId)
-        ? ` [已绑:${c.linked_procurement_no}]`
-        : '';
-      return `<option value="${c.id}">${escapeHtml(c.contract_no)} - ${escapeHtml(c.contract_name)} (${formatMoney(c.amount)})${escapeHtml(boundTip)}</option>`;
-    }).join('');
-    if (selectedContractId) sel.value = String(selectedContractId);
-  } catch (e) {}
-}
-
-async function openCreateProcurementModal() {
-  document.getElementById('procurement_form').reset();
-  document.getElementById('p_id').value = '';
-  document.getElementById('proc_modal_title').textContent = '新增采购立项与资料归档';
-
-  const today = new Date().toISOString().slice(0, 10);
-  document.getElementById('p_approval_date').value = today;
-  document.getElementById('seg_p_mid').value = '';
-
-  await loadContractOptionsForProcForm(null);
-  await refreshProcNoSegmentsByDateAndMid();
-  document.getElementById('procurement_modal').classList.remove('hidden');
-}
-
-async function openEditProcurementModal(id) {
-  try {
-    const resp = await apiFetch(`/api/procurements/${id}`);
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    const p = json.data;
-
-    document.getElementById('procurement_form').reset();
-    document.getElementById('p_id').value = p.id;
-    document.getElementById('proc_modal_title').textContent = `编辑采购立项：${p.procurement_no}`;
-
-    await loadContractOptionsForProcForm(p.contract_id);
-
-    document.getElementById('p_procurement_no').value = p.procurement_no;
-    document.getElementById('seg_p_prefix').value = procNoRule.prefix || '';
-    document.getElementById('seg_p_mid').value = '';
-    document.getElementById('seg_p_date').value = '';
-    document.getElementById('seg_p_seq').value = '';
-    document.getElementById('seg_p_suffix').value = procNoRule.suffix || '';
-
-    document.getElementById('p_project_name').value = p.project_name;
-    document.getElementById('p_procurement_type').value = p.procurement_type;
-    document.getElementById('p_procurement_method').value = p.procurement_method;
-    document.getElementById('p_budget_amount').value = p.budget_amount;
-    document.getElementById('p_control_price').value = p.control_price;
-    document.getElementById('p_final_amount').value = p.final_amount;
-    document.getElementById('p_department').value = p.department || '';
-    document.getElementById('p_applicant').value = p.applicant || '';
-    document.getElementById('p_approval_date').value = p.approval_date;
-    document.getElementById('p_supplier_name').value = p.supplier_name || '';
-    document.getElementById('p_status').value = p.status;
-    document.getElementById('p_remark').value = p.remark || '';
-
-    document.getElementById('procurement_modal').classList.remove('hidden');
-  } catch (err) {
-    showToast(err.message || '读取立项详情失败', 'error');
-  }
-}
-
-function closeProcurementModal() {
-  document.getElementById('procurement_modal').classList.add('hidden');
-}
-
-async function submitProcurementForm(e) {
-  e.preventDefault();
-  if (isSubmittingForm) return;
-  isSubmittingForm = true;
-  const submitBtn = document.getElementById('proc_submit_btn');
-  if (submitBtn) submitBtn.disabled = true;
-
-  try {
-    const id = document.getElementById('p_id').value;
-    const fd = new FormData();
-    fd.append('procurement_no', document.getElementById('p_procurement_no').value.trim());
-    fd.append('project_name', document.getElementById('p_project_name').value.trim());
-    fd.append('procurement_type', document.getElementById('p_procurement_type').value);
-    fd.append('procurement_method', document.getElementById('p_procurement_method').value);
-    fd.append('budget_amount', document.getElementById('p_budget_amount').value || '0');
-    fd.append('control_price', document.getElementById('p_control_price').value || '0');
-    fd.append('final_amount', document.getElementById('p_final_amount').value || '0');
-    fd.append('department', document.getElementById('p_department').value.trim());
-    fd.append('applicant', document.getElementById('p_applicant').value.trim());
-    fd.append('approval_date', document.getElementById('p_approval_date').value);
-    fd.append('supplier_name', document.getElementById('p_supplier_name').value.trim());
-    fd.append('status', document.getElementById('p_status').value);
-    fd.append('contract_id', document.getElementById('p_contract_id').value || '');
-    fd.append('remark', document.getElementById('p_remark').value.trim());
-    fd.append('file_category', document.getElementById('p_file_category').value || '立项审批表/资料');
-
-    const filesInput = document.getElementById('p_proc_files');
-    if (filesInput && filesInput.files.length > 0) {
-      for (const f of filesInput.files) {
-        fd.append('proc_files', f);
-      }
-    }
-
-    const url = id ? `/api/procurements/${id}` : '/api/procurements';
-    const method = id ? 'PUT' : 'POST';
-    const resp = await apiFetch(url, { method, body: fd });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-
-    showToast(json.message || '保存成功');
-    closeProcurementModal();
-    await loadProcNoRule();
-    await loadProcurements();
-  } catch (err) {
-    showToast(err.message || '保存失败', 'error');
-  } finally {
-    isSubmittingForm = false;
-    if (submitBtn) submitBtn.disabled = false;
-  }
-}
-
-async function deleteProcurement(id, procNo) {
-  if (!confirm(`确定要彻底删除采购立项【${procNo}】吗？\n删除后，该立项下的所有资料文件与文件夹将同步从硬盘物理删除！`)) {
-    return;
-  }
-  try {
-    const resp = await apiFetch(`/api/procurements/${id}`, { method: 'DELETE' });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast(json.message);
-    await loadProcNoRule();
-    await loadProcurements();
-  } catch (err) {
-    showToast(err.message || '删除失败', 'error');
-  }
-}
-
-// 采购立项详情与附件预览弹窗
-async function openProcurementDetail(id) {
-  try {
-    const resp = await apiFetch(`/api/procurements/${id}`);
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    currentDetailProcurement = json.data;
-    renderProcurementDetailModal(currentDetailProcurement);
-    document.getElementById('proc_detail_modal').classList.remove('hidden');
-  } catch (err) {
-    showToast(err.message || '获取立项详情失败', 'error');
-  }
-}
-
-function renderProcurementDetailModal(p) {
-  document.getElementById('pd_title').textContent = `${p.procurement_no} - ${p.project_name}`;
-  const contractInfo = p.linked_contract_no
-    ? `<span class="link-chip" onclick="closeProcDetailModal(); jumpToContractDetail(${p.contract_id})">📄 ${escapeHtml(p.linked_contract_no)} (${escapeHtml(p.linked_contract_name || '')})</span>`
-    : '暂未关联主合同';
-
-  document.getElementById('pd_meta_grid').innerHTML = `
-    <div><strong>立项序号：</strong>${escapeHtml(p.seq_no)}</div>
-    <div><strong>类别/方式：</strong>${escapeHtml(p.procurement_type)} / ${escapeHtml(p.procurement_method)}</div>
-    <div><strong>预算金额：</strong><span class="money-text">${formatMoney(p.budget_amount)}</span></div>
-    <div><strong>控制价/最高限价：</strong>${formatMoney(p.control_price)}</div>
-    <div><strong>中标/成交金额：</strong><span class="money-text">${p.final_amount > 0 ? formatMoney(p.final_amount) : '待定'}</span></div>
-    <div><strong>立项状态：</strong><span class="status-badge ${getStatusBadgeClass(p.status)}">${escapeHtml(p.status)}</span></div>
-    <div><strong>申请部门/经办人：</strong>${escapeHtml(p.department || '-')} / ${escapeHtml(p.applicant || '-')}</div>
-    <div><strong>立项批准日期：</strong>${escapeHtml(p.approval_date)}</div>
-    <div><strong>成交供应商：</strong>${escapeHtml(p.supplier_name || '待定')}</div>
-    <div><strong>关联主合同：</strong>${contractInfo}</div>
-    <div style="grid-column: span 2;"><strong>备注说明：</strong>${escapeHtml(p.remark || '无')}</div>
-  `;
-
-  const files = p.files || [];
-  const listEl = document.getElementById('pd_attachments_list');
-  if (files.length === 0) {
-    listEl.innerHTML = `<div class="text-muted">暂未上传任何立项资料</div>`;
-    document.getElementById('proc_preview_container').innerHTML = `<div class="empty-preview">暂无立项资料可预览，可在上方选择分类并补传资料</div>`;
-  } else {
-    listEl.innerHTML = files.map(f => {
-      const dlUrl = withTokenUrl(`/uploads/${encodeURI(f.file_path)}?download=1&filename=${encodeURIComponent(f.file_original_name)}`);
-      return `
-        <div class="att-card">
-          <div class="att-info" onclick="previewAttachmentInContainer('${escapeHtml(f.file_path)}', '${escapeHtml(f.file_original_name)}', 'proc_preview_container')">
-            <span class="att-badge">${escapeHtml(f.file_category || '立项资料')}</span>
-            <span class="att-name">${escapeHtml(f.file_original_name)}</span>
-            <span class="att-size">(${formatFileSize(f.file_size)})</span>
-          </div>
-          <div class="att-actions">
-            <button class="btn-xs" onclick="previewAttachmentInContainer('${escapeHtml(f.file_path)}', '${escapeHtml(f.file_original_name)}', 'proc_preview_container')">预览</button>
-            <a class="btn-xs" href="${dlUrl}">下载</a>
-            <button class="btn-xs danger" onclick="deleteProcFile(${p.id}, ${f.id})">删除</button>
-          </div>
-        </div>
-      `;
-    }).join('');
-    previewAttachmentInContainer(files[0].file_path, files[0].file_original_name, 'proc_preview_container');
-  }
-}
-
-async function quickUploadProcFiles(inputEl) {
-  if (!currentDetailProcurement || !inputEl.files.length || isUploadingDetail) return;
-  isUploadingDetail = true;
-  try {
-    const fd = new FormData();
-    const cat = document.getElementById('pd_quick_category')?.value || '立项资料';
-    fd.append('file_category', cat);
-    for (const f of inputEl.files) fd.append('proc_files', f);
-
-    const resp = await apiFetch(`/api/procurements/${currentDetailProcurement.id}/files`, { method: 'POST', body: fd });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast(json.message);
-    inputEl.value = '';
-    await openProcurementDetail(currentDetailProcurement.id);
-    await loadProcurements();
-  } catch (err) {
-    showToast(err.message || '上传立项资料失败', 'error');
-  } finally {
-    isUploadingDetail = false;
-  }
-}
-
-async function deleteProcFile(procId, fileId) {
-  if (!confirm('确认删除该份立项资料？删除后将从硬盘物理清除！')) return;
-  try {
-    const resp = await apiFetch(`/api/procurements/${procId}/files/${fileId}`, { method: 'DELETE' });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    showToast('立项资料已物理删除');
-    await openProcurementDetail(procId);
-    await loadProcurements();
-  } catch (err) {
-    showToast(err.message || '删除失败', 'error');
-  }
-}
-
-function closeProcDetailModal() {
-  document.getElementById('proc_detail_modal').classList.add('hidden');
-  const container = document.getElementById('proc_preview_container');
-  if (container) container.innerHTML = ''; // 立即销毁预览 DOM 释放内存
-  currentDetailProcurement = null;
-}
-
-// 跨模块跳转查看详情
-async function jumpToProcurementDetail(procId) {
-  if (!procId) return;
-  await switchModule('procurement');
-  await openProcurementDetail(procId);
-}
-
-async function jumpToContractDetail(contractId) {
-  if (!contractId) return;
-  await switchModule('contracts');
-  await openContractDetail(contractId);
-}
-
-// ==================== 7. Excel 报表导出 ====================
-function exportContractsExcel() {
-  const params = getContractFilterParams();
-  window.location.href = withTokenUrl(`/api/contracts/export?${params.toString()}`);
-}
-
-function exportProcurementsExcel() {
-  const params = getProcFilterParams();
+function exportProcurementExcel(mode) {
+  const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildProcQueryParams();
   window.location.href = withTokenUrl(`/api/procurements/export?${params.toString()}`);
 }
 
-function exportCombinedExcel() {
+function exportCombinedWorkbook() {
   window.location.href = withTokenUrl('/api/export/combined');
 }
 
-// ==================== 8. 局域网共享弹窗与口令锁 ====================
-async function openLanShareModal() {
-  try {
-    const resp = await apiFetch('/api/system/network');
-    const json = await resp.json();
-    const listEl = document.getElementById('lan_url_list');
-    if (json.lan_urls && json.lan_urls.length > 0) {
-      listEl.innerHTML = json.lan_urls.map(u => `
-        <div class="lan-url-item">
-          <code>${escapeHtml(u)}</code>
-          <button class="btn-xs" onclick="navigator.clipboard.writeText('${escapeHtml(u)}'); showToast('已复制局域网链接');">复制地址</button>
-        </div>
-      `).join('');
-    } else {
-      listEl.innerHTML = `<div class="text-muted">未检测到局域网网卡 IP，本机可使用 ${escapeHtml(json.local_url)}</div>`;
-    }
-    document.getElementById('lan_modal').classList.remove('hidden');
-  } catch (e) {
-    showToast('获取网络信息失败', 'error');
-  }
-}
-
-function closeLanShareModal() {
-  document.getElementById('lan_modal').classList.add('hidden');
-}
-
-async function saveLanAccessCode() {
-  const code = document.getElementById('lan_new_code').value.trim();
-  try {
-    const resp = await apiFetch('/api/auth/set-code', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ new_code: code })
-    });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    setAccessToken(json.token || '');
-    document.getElementById('lan_new_code').value = '';
-    showToast(json.message);
-  } catch (err) {
-    showToast(err.message || '设置口令失败', 'error');
-  }
-}
-
-function showLanAuthOverlay() {
-  document.getElementById('lan_auth_overlay')?.classList.remove('hidden');
-}
-
-async function submitLanAuthVerify(e) {
-  e.preventDefault();
-  const code = document.getElementById('lan_auth_input').value.trim();
-  try {
-    const resp = await fetch('/api/auth/verify', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ access_code: code })
-    });
-    const json = await resp.json();
-    if (!json.success) throw new Error(json.message);
-    setAccessToken(json.token || '');
-    document.getElementById('lan_auth_overlay').classList.add('hidden');
-    document.getElementById('lan_auth_input').value = '';
-    showToast('口令验证成功');
-    await switchModule(currentModule);
-  } catch (err) {
-    showToast(err.message || '口令错误', 'error');
-  }
-}
-
-// ==================== 9. 多机局域网协同：窗口激活与定时静默同步 ====================
-function isAnyModalOpen() {
-  const modalIds = [
-    'lan_auth_overlay',
-    'contract_modal',
-    'procurement_modal',
-    'detail_modal',
-    'proc_detail_modal',
-    'no_rule_modal',
-    'proc_no_rule_modal',
-    'lan_modal'
-  ];
-  for (const id of modalIds) {
+// ==================== 11. 多机局域网协同：静默同步（带弹窗防打扰锁） ====================
+function hasOpenModal() {
+  const ids = ['lan_auth_overlay', 'lan_security_modal', 'our_entity_modal', 'no_rule_modal', 'proc_no_rule_modal', 'form_modal', 'proc_form_modal', 'detail_modal'];
+  return ids.some(id => {
     const el = document.getElementById(id);
-    if (el && !el.classList.contains('hidden')) return true;
-  }
-  return false;
+    return el && !el.classList.contains('hidden');
+  });
 }
 
-async function silentSyncMultiClientData() {
-  // 防打扰保护：若用户正在弹窗中录入/编辑/预览，或正在上传/提交，绝不执行静默刷新
-  if (isSilentSyncing || isSubmittingForm || isUploadingDetail || isAnyModalOpen()) return;
+async function silentSyncAll() {
+  if (isSilentSyncing || isSubmitting || hasOpenModal()) return;
   isSilentSyncing = true;
   try {
-    if (currentModule === 'procurement') {
-      await loadProcNoRule();
+    if (currentTab === 'procurement') {
+      await loadProcNoRuleSettings();
       await loadProcurements();
     } else {
-      await loadContractNoRule();
+      await loadContractNoRuleSettings();
       await loadContracts();
     }
   } catch (e) {
@@ -1302,31 +1327,23 @@ async function silentSyncMultiClientData() {
   }
 }
 
-window.addEventListener('focus', () => {
-  silentSyncMultiClientData();
-});
-
+window.addEventListener('focus', () => silentSyncAll());
 setInterval(() => {
-  if (!document.hidden) {
-    silentSyncMultiClientData();
-  }
+  if (!document.hidden) silentSyncAll();
 }, 30000);
 
-// ==================== 10. 页面启动入口 ====================
-window.addEventListener('DOMContentLoaded', async () => {
-  initYearSelects();
-  try {
-    const resp = await fetch('/api/auth/status', {
-      headers: getAccessToken() ? { 'x-access-token': getAccessToken() } : {}
-    });
-    const json = await resp.json();
-    if (json.locked && !json.authorized) {
-      showLanAuthOverlay();
-      return;
-    }
-  } catch (e) {}
-
-  await loadContractNoRule();
-  await loadProcNoRule();
+// ==================== 12. 应用启动初始化 ====================
+async function initAppData() {
+  await loadOurEntitySetting();
+  await loadContractNoRuleSettings();
+  await loadProcNoRuleSettings();
   await loadContracts();
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  initYearDropdowns();
+  const ok = await checkLanAuthStatus();
+  if (ok) {
+    await initAppData();
+  }
 });
