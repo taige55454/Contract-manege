@@ -1,19 +1,56 @@
 {
   "name": "contract-manager",
-  "version": "2.0.0",
-  "description": "Enterprise Multi-Party Contract Ledger & Attachment Management System",
-  "main": "server.js",
+  "version": "2.1.0",
+  "description": "Enterprise Contract Ledger Desktop Application (Single-Instance & System Tray)",
+  "main": "main.js",
   "scripts": {
-    "start": "node server.js",
-    "test": "node test-smoke.js"
-  },
-  "engines": {
-    "node": ">=18.0.0"
+    "start": "electron .",
+    "server": "node server.js",
+    "test": "node test-smoke.js",
+    "postinstall": "electron-builder install-app-deps",
+    "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
     "express": "^4.19.2",
     "multer": "^1.4.5-lts.1",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "electron": "^31.7.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.enterprise.contractmanager",
+    "productName": "ContractManager",
+    "asar": true,
+    "files": [
+      "main.js",
+      "server.js",
+      "public/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "portable",
+          "arch": ["x64"]
+        },
+        {
+          "target": "nsis",
+          "arch": ["x64"]
+        }
+      ],
+      "artifactName": "${productName}-${version}-${target}.${ext}"
+    },
+    "portable": {
+      "artifactName": "${productName}-${version}-Portable.exe"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "企业合同台账管理系统"
+    }
   }
 }
