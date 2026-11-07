@@ -17,7 +17,7 @@ let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
 let dropdownPresets = {
-  contract_types: ['采购', '销售', '服务', '租赁', '劳动', '工程', '其他'],
+  contract_types: ['购货', '销售', '服务', '租赁', '仓储', '工程', '其他'],
   contract_statuses: ['生效中', '履行完毕', '已解除', '待签署', '已归档'],
   project_types: ['服务类项目', '物资采购类', '工程维保类', '信息化建设', '零星采购', '其他'],
   cost_departments: ['综合部', '市场部', '财务部', '运营部', '揽投部', '寄递事业部', '渠道平台部', '安保部'],
