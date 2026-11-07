@@ -50,7 +50,7 @@ db.exec(`
     value TEXT NOT NULL
   );
 
-  INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_our_entity', '本单位默认签约主体名称（点击顶部可修改）');
+  INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_our_entity', '本单位默认签约主体（点击顶部可修改）');
 
   CREATE TABLE IF NOT EXISTS contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -115,6 +115,30 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_expiry_date ON contracts(expiry_date);
   CREATE INDEX IF NOT EXISTS idx_party_contract_id ON contract_parties(contract_id);
 `);
+
+// 自动平滑升级旧版数据库表结构（防止旧库缺少新增列）
+function ensureSchemaUpgraded() {
+  const partyCols = db.prepare(`PRAGMA table_info(contract_parties)`).all().map(c => c.name);
+  const addPartyColIfMissing = (colName, colDef) => {
+    if (!partyCols.includes(colName)) {
+      db.exec(`ALTER TABLE contract_parties ADD COLUMN ${colName} ${colDef}`);
+    }
+  };
+  addPartyColIfMissing('party_index', 'INTEGER NOT NULL DEFAULT 1');
+  addPartyColIfMissing('item_summary', "TEXT DEFAULT ''");
+  addPartyColIfMissing('amount', 'REAL NOT NULL DEFAULT 0');
+  addPartyColIfMissing('amount_excl_tax', 'REAL DEFAULT NULL');
+  addPartyColIfMissing('tax_rate', "TEXT DEFAULT ''");
+  addPartyColIfMissing('invoice_type', "TEXT DEFAULT ''");
+  addPartyColIfMissing('currency', "TEXT NOT NULL DEFAULT 'CNY'");
+  addPartyColIfMissing('perf_bond_amount', 'REAL DEFAULT NULL');
+  addPartyColIfMissing('perf_bond_pay_date', "TEXT DEFAULT ''");
+  addPartyColIfMissing('perf_bond_return_date', "TEXT DEFAULT ''");
+  addPartyColIfMissing('warranty_bond_amount', 'REAL DEFAULT NULL');
+  addPartyColIfMissing('warranty_bond_expiry_date', "TEXT DEFAULT ''");
+  addPartyColIfMissing('remark', "TEXT DEFAULT ''");
+}
+ensureSchemaUpgraded();
 
 // ==================== 工具与安全校验函数 ====================
 
@@ -406,8 +430,8 @@ app.get('/api/contracts/export', (req, res) => {
     const { sql, params } = buildQuery(queryObj);
     const rows = db.prepare(sql).all(...params);
 
-    // 表头严格与前端页面列顺序一致（共 26 列，索引 0~25）
-    // 索引 0~7 为合同公共列（跨行合并），索引 8~24 为各相对方独立履约列（各填各的），索引 25 为扫描件归档名（跨行合并）
+    // 共 29 列（索引 0~28）
+    // 索引 0~7 为合同公共列（跨行合并），索引 8~27 为各相对方独立履约列（各填各的），索引 28 为扫描件归档名（跨行合并）
     const headers = [
       '合同编号', '合同名称', '合同类型', '我方签约主体', '签订日期', '开始履约日', '合同到期日', '合同状态',
       '履约摘要(分项)', '对方单位名称', '统一信用代码', '联系人', '联系方式', '收款账户名称', '收款账号', '开户行', '开户行号',
@@ -418,10 +442,9 @@ app.get('/api/contracts/export', (req, res) => {
 
     const aoa = [headers];
     const merges = [];
-    // 需要跨行合并的列索引：前 8 列 (0~7) 以及最后 1 列 (28: 扫描件归档名)
     const mergeColIndices = [0, 1, 2, 3, 4, 5, 6, 7, 28];
 
-    let currentRowIdx = 1; // 第 0 行是表头，数据从第 1 行开始
+    let currentRowIdx = 1;
 
     for (const row of rows) {
       const parties = getContractPartiesList(row);
