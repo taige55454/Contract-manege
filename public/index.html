@@ -10,7 +10,7 @@
   <header class="app-header">
     <div>
       <h1>📄 企业合同台账管理系统</h1>
-      <p class="header-sub">按年断号重编序号 · 固定前缀/后缀灰显补全 · 智能日期与税率识别 · 多方独立履约合并</p>
+      <p class="header-sub">按年断号重编序号 · 固定前缀/后缀灰显补全 · 智能日期与税率识别 · 扫描件相对路径超链接导出</p>
     </div>
     <div class="header-actions">
       <!-- 合同编号固定前缀/后缀规则快捷设置栏 -->
@@ -19,7 +19,7 @@
         <strong id="display_no_rule">加载中...</strong>
         <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">修改编号规则</button>
       </div>
-      <!-- 默认我方主体快捷设置栏（改为自定义模态框，解决 Electron 下 prompt 无反应问题） -->
+      <!-- 默认我方主体快捷设置栏 -->
       <div class="default-entity-bar" title="新建合同时将自动带出此主体名称，也可在单份合同中修改">
         <span>🏢 默认我方主体：</span>
         <strong id="display_default_entity">加载中...</strong>
@@ -31,16 +31,20 @@
       <button type="button" class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
       <div class="dropdown">
         <button type="button" class="btn btn-success">导出美化 Excel ▾</button>
-        <div class="dropdown-menu">
-          <a href="javascript:void(0)" onclick="exportExcel('filtered')">导出当前筛选结果 (含斑马纹/会计格式)</a>
-          <a href="javascript:void(0)" onclick="exportExcel('all')">导出全部台账 (含斑马纹/会计格式)</a>
+        <div class="dropdown-menu" style="min-width: 310px;">
+          <div style="padding: 8px 12px; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: 11.5px; color: #92400e; line-height: 1.4;">
+            💡 <strong>扫描件超链接目录提示：</strong><br/>
+            导出表最后一列为相对路径超链接 (<code>uploads/...</code>)。请将导出的 Excel 放在 <strong><code>uploads</code> 文件夹同级目录</strong>下（可在右下角托盘菜单打开数据目录），点击超链接即可直接打开扫描件！
+          </div>
+          <a href="javascript:void(0)" onclick="exportExcel('filtered')">📥 导出当前筛选结果 (按序号001正序+超链接)</a>
+          <a href="javascript:void(0)" onclick="exportExcel('all')">📥 导出全部合同台账 (按序号001正序+超链接)</a>
         </div>
       </div>
     </div>
   </header>
 
   <main class="container">
-    <!-- 顶部多维筛选与排序工具栏（新增按年份筛选、按指定时间维度及起止时间段筛选） -->
+    <!-- 顶部多维筛选与排序工具栏 -->
     <section class="filter-bar">
       <input type="text" id="filter_no" placeholder="搜序号 / 合同编号 / 名称 / 摘要..." />
       <input type="text" id="filter_counterparty" placeholder="搜对方单位 / 信用代码 / 我方主体..." />
@@ -78,7 +82,7 @@
       </div>
 
       <select id="sort_by">
-        <option value="seq_no">按年度序号排序</option>
+        <option value="seq_no" selected>按年度序号排序</option>
         <option value="sign_date">按签订日期排序</option>
         <option value="start_date">按开始履约日排序</option>
         <option value="expiry_date">按合同到期日排序</option>
@@ -87,8 +91,8 @@
         <option value="created_at">按录入时间排序</option>
       </select>
       <select id="sort_order">
-        <option value="ASC">升序 (最早/001在前)</option>
-        <option value="DESC" selected>降序 (最新在前)</option>
+        <option value="ASC" selected>正序 (001、002往下排)</option>
+        <option value="DESC">倒序 (最新在前)</option>
       </select>
       <button type="button" class="btn btn-secondary" onclick="loadContracts()">🔍 查询</button>
       <button type="button" class="btn btn-outline" onclick="resetFilters()">重置</button>
@@ -132,7 +136,7 @@
     </section>
   </main>
 
-  <!-- 弹窗 A：修改默认我方签约主体（替代原失效的 window.prompt） -->
+  <!-- 弹窗 A：修改默认我方签约主体 -->
   <div id="our_entity_modal" class="modal hidden">
     <div class="modal-content" style="width: 480px; max-width: 95vw;">
       <div class="modal-header">
@@ -236,7 +240,6 @@
             <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">⚙️ 设置前缀/后缀规则</button>
           </div>
           <div class="form-grid-4">
-            <!-- 合同编号：新增时采用“灰色固定段 + 仅补全中间段”，编辑时开放完整自由修改 -->
             <div class="form-group span-2">
               <label style="display:flex;justify-content:space-between;align-items:center;">
                 <span>合同编号 * <small class="muted" id="no_mode_hint">(灰底固定段已锁定，仅需补全中间项)</small></span>
@@ -254,7 +257,7 @@
                 <span id="seg_suffix" class="seg-locked" title="固定后缀（灰色只读）"></span>
               </div>
 
-              <!-- 模式 B：完整自由输入框（编辑已有合同默认启用，或点击切换时启用） -->
+              <!-- 模式 B：完整自由输入框（编辑已有合同默认启用） -->
               <input type="text" name="contract_no" id="f_contract_no" class="hidden" placeholder="如：HT-2026-001" required />
             </div>
 
@@ -287,7 +290,6 @@
               <input type="text" name="our_entity" id="f_our_entity" required />
             </div>
 
-            <!-- 灵活日期输入组件（支持手敲 2026.3.5 / 6-3 自动识别，也可点右侧日历图标选日期） -->
             <div class="form-group">
               <label>签订日期 * <small class="muted">(如 2026.6.3 或 6.3)</small></label>
               <div class="smart-date-wrap">
