@@ -1,14 +1,9 @@
 /**
- * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.4.0 生产终极版)
- * 100% 匹配 main.js + test-smoke.js + 原版 public/index.html + public/app.js
- * 核心能力：
- * 1. 夹心式分段编号引擎（支持前缀 + 穿插自定义段 + 日期段 + 零空洞(Gap-Filling)流水号 + 后缀 + 并发撞号顺延）
- * 2. 顺序可逆的双向互锁引擎（无论先录采购预填合同号，还是先录合同后绑采购，均自动双向挂钩并穿透附件）
- * 3. 智能日期解析器（支持 Excel 序列号如 46099、点号 2026.3.18、斜杠、简写 3.18 自动转 YYYY-MM-DD）
- * 4. 合同到期状态自动流转引擎（基于本地时区零点：过期自动由“生效中”流转为“已到期”，续签延长自动恢复“生效中”，严格保护“草稿/已终止”等特殊状态）
- * 5. 自定义下拉选项与预设词库引擎（8大分类自由增删改、一键恢复默认、多机实时同步）
- * 6. 三大文件物理隔离归档 + 改名自动同步文件夹 + 孤儿文件清道夫 + 优雅退出零句柄残留
- * 7. 基于 xlsx-js-style 的专业双子表导出（黄金自适应列宽 + 隔行斑马纹 + 合同表 AE/AF/AG 三列超链接 + 采购表 R/S 两列超链接）
+ * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.4.1 生产终极完整版)
+ * 已内置：
+ * 1. 动态状态解耦引擎（支持自定义“履行中/已超期”等同义词自动流转 + 预设词库防漏保底）
+ * 2. 东八区本地时区零点精准判断（getLocalTodayStr）
+ * 3. 夹心式 4 段编号 + 零空洞流水号 + 顺序可逆双向互锁 + 三大资料库归档 + 双子表 Excel 导出
  */
 
 const express = require('express');
@@ -24,7 +19,7 @@ const app = express();
 const DEFAULT_PORT = Number(process.env.PORT) || 3000;
 const DEFAULT_HOST = process.env.HOST || '0.0.0.0';
 
-// ==================== 1. 目录与环境变量初始化（100% 兼容 main.js 与 test-smoke.js） ====================
+// ==================== 1. 目录与环境变量初始化 ====================
 const ROOT_DIR = __dirname;
 const DATA_ROOT = process.env.DATA_ROOT
   ? path.resolve(process.env.DATA_ROOT)
@@ -62,7 +57,7 @@ function triggerSafeGC() {
   }
 }
 
-// 获取本地时区（如北京时间）的 YYYY-MM-DD 字符串，避免 UTC 时差导致早上 8 点前日期滞后一天
+// 获取本地时区（北京时间）的 YYYY-MM-DD 字符串
 function getLocalTodayStr() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -71,7 +66,7 @@ function getLocalTodayStr() {
   return `${yyyy}-${mm}-${dd}`;
 }
 
-// ==================== 2. 智能日期解析引擎（支持 Excel 序列号 46099 与 2026.3.18） ====================
+// ==================== 2. 智能日期解析引擎 ====================
 function normalizeSmartDate(rawInput, fallbackToday = false) {
   if (rawInput === null || rawInput === undefined) {
     return fallbackToday ? getLocalTodayStr() : '';
@@ -81,43 +76,30 @@ function normalizeSmartDate(rawInput, fallbackToday = false) {
     return fallbackToday ? getLocalTodayStr() : '';
   }
 
-  // 1. Excel 日期序列号（如 46099 -> 2026-03-18）
   if (/^\d{5}$/.test(str)) {
     const serial = parseInt(str, 10);
     if (serial >= 20000 && serial <= 80000) {
       const utcDays = serial - 25569;
-      const utcValue = utcDays * 86400 * 1000;
-      const d = new Date(utcValue);
+      const d = new Date(utcDays * 86400 * 1000);
       if (!isNaN(d.getTime())) {
-        const yyyy = d.getUTCFullYear();
-        const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-        const dd = String(d.getUTCDate()).padStart(2, '0');
-        return `${yyyy}-${mm}-${dd}`;
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
       }
     }
   }
 
-  // 2. 纯 8 位数字 20260318
   if (/^\d{8}$/.test(str)) {
     return `${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}`;
   }
 
-  // 3. YYYY-M-D, YYYY.M.D, YYYY/M/D, YYYY年M月D日
   const fullMatch = str.match(/^(\d{4})[-./年](\d{1,2})[-./月](\d{1,2})日?$/);
   if (fullMatch) {
-    const yyyy = fullMatch[1];
-    const mm = String(parseInt(fullMatch[2], 10)).padStart(2, '0');
-    const dd = String(parseInt(fullMatch[3], 10)).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+    return `${fullMatch[1]}-${String(parseInt(fullMatch[2], 10)).padStart(2, '0')}-${String(parseInt(fullMatch[3], 10)).padStart(2, '0')}`;
   }
 
-  // 4. 简写 M.D 或 M-D 或 M/D（默认补当前年份）
   const shortMatch = str.match(/^(\d{1,2})[-./月](\d{1,2})日?$/);
   if (shortMatch) {
     const yyyy = new Date().getFullYear();
-    const mm = String(parseInt(shortMatch[1], 10)).padStart(2, '0');
-    const dd = String(parseInt(shortMatch[2], 10)).padStart(2, '0');
-    return `${yyyy}-${mm}-${dd}`;
+    return `${yyyy}-${String(parseInt(shortMatch[1], 10)).padStart(2, '0')}-${String(parseInt(shortMatch[2], 10)).padStart(2, '0')}`;
   }
 
   return str;
@@ -246,50 +228,10 @@ const STMTS = {
     INSERT INTO procurement_files (procurement_id, file_category, file_path, file_original_name, file_size, uploaded_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `),
-  deleteProcFileById: db.prepare(`DELETE FROM procurement_files WHERE id = ?`),
-
-  autoExpireContracts: db.prepare(`
-    UPDATE contracts
-    SET status = '已到期', updated_at = datetime('now', 'localtime')
-    WHERE status = '生效中'
-      AND expiry_date != ''
-      AND expiry_date < ?
-  `)
+  deleteProcFileById: db.prepare(`DELETE FROM procurement_files WHERE id = ?`)
 };
 
-/**
- * 合同到期状态自动流转引擎：
- * 1. 自动扫描数据库中所有 status = '生效中' 且 expiry_date < 今天(本地时区) 的合同，将其批量更新为 '已到期'
- * 2. 严格保护 '草稿'、'已终止'、'已解除' 等非生效状态，绝不误改
- */
-function autoRefreshExpiredContractStatus() {
-  try {
-    const today = getLocalTodayStr();
-    STMTS.autoExpireContracts.run(today);
-  } catch (e) {}
-}
-
-/**
- * 录入或编辑合同时，根据到期日智能校准合同状态：
- * - 若到期日已过（expiryDate < today）且状态选的是 '生效中' -> 自动转为 '已到期'
- * - 若续签/延长了到期日（expiryDate >= today）且原状态是 '已到期' -> 自动恢复为 '生效中'
- */
-function computeSmartContractStatus(rawStatus, expiryDateStr) {
-  const status = String(rawStatus || '生效中').trim();
-  const exp = String(expiryDateStr || '').trim();
-  if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return status;
-
-  const today = getLocalTodayStr();
-  if (exp < today && status === '生效中') {
-    return '已到期';
-  }
-  if (exp >= today && status === '已到期') {
-    return '生效中';
-  }
-  return status;
-}
-
-// ==================== 4. 夹心式编号引擎与自定义下拉预设引擎 ====================
+// ==================== 4. 夹心式编号、自定义下拉预设与动态到期流转引擎 ====================
 const DEFAULT_CONTRACT_RULE = {
   prefix: 'XSZY-黔-BJ-',
   default_mid: '',
@@ -308,7 +250,6 @@ const DEFAULT_PROC_RULE = {
   reset_yearly: true
 };
 
-// 100% 匹配原版 index.html 的默认下拉预设词库
 const DEFAULT_DROPDOWN_PRESETS = {
   contract_types: ['采购', '服务', '销售', '框架', '其他'],
   contract_statuses: ['草稿', '生效中', '已到期', '已终止'],
@@ -339,6 +280,18 @@ function normalizePresetArray(input, fallbackArr) {
   return cleaned.length > 0 ? cleaned : [...fallbackArr];
 }
 
+// 【改动点 1】确保合同状态预设列表中永远包含至少一个“生效态”和一个“到期态”，防止用户误删后无法筛选
+function ensureContractStatusPresetsIntegrity(statusArr) {
+  const arr = Array.isArray(statusArr) ? [...statusArr] : [...DEFAULT_DROPDOWN_PRESETS.contract_statuses];
+  if (!arr.some(s => /生效|履行|执行|正常|进行/.test(s))) {
+    arr.push('生效中');
+  }
+  if (!arr.some(s => /到期|过期|期满|超期|逾期/.test(s))) {
+    arr.push('已到期');
+  }
+  return arr;
+}
+
 function getDropdownPresets() {
   try {
     const row = STMTS.getSetting.get('dropdown_presets');
@@ -348,6 +301,7 @@ function getDropdownPresets() {
       for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
         result[key] = normalizePresetArray(parsed[key], DEFAULT_DROPDOWN_PRESETS[key]);
       }
+      result.contract_statuses = ensureContractStatusPresetsIntegrity(result.contract_statuses);
       return result;
     }
   } catch (e) {}
@@ -356,6 +310,47 @@ function getDropdownPresets() {
     copy[key] = [...DEFAULT_DROPDOWN_PRESETS[key]];
   }
   return copy;
+}
+
+// 【改动点 2】动态从当前自定义词库中解析“生效态”与“到期态”名称（例如用户改名为“履行中”和“已超期”也能自动识别）
+function resolveDynamicStatusLabels() {
+  const presets = getDropdownPresets();
+  const list = presets.contract_statuses || DEFAULT_DROPDOWN_PRESETS.contract_statuses;
+  const activeLabel = list.find(s => /生效|履行|执行|正常|进行/.test(s)) || '生效中';
+  const expiredLabel = list.find(s => /到期|过期|期满|超期|逾期/.test(s)) || '已到期';
+  return { activeLabel, expiredLabel, list };
+}
+
+// 自动将已过期的“生效态”合同刷新为“到期态”（严格保护草稿/已终止等其他状态）
+function autoRefreshExpiredContractStatus() {
+  try {
+    const today = getLocalTodayStr();
+    const { activeLabel, expiredLabel } = resolveDynamicStatusLabels();
+    db.prepare(`
+      UPDATE contracts
+      SET status = ?, updated_at = datetime('now', 'localtime')
+      WHERE (status = ? OR status = '生效中')
+        AND expiry_date != ''
+        AND expiry_date < ?
+    `).run(expiredLabel, activeLabel, today);
+  } catch (e) {}
+}
+
+// 录入或编辑合同时，根据到期日与当前自定义状态词库智能双向校准状态
+function computeSmartContractStatus(rawStatus, expiryDateStr) {
+  const { activeLabel, expiredLabel } = resolveDynamicStatusLabels();
+  const status = String(rawStatus || activeLabel).trim();
+  const exp = String(expiryDateStr || '').trim();
+  if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return status;
+
+  const today = getLocalTodayStr();
+  if (exp < today && (status === activeLabel || status === '生效中')) {
+    return expiredLabel;
+  }
+  if (exp >= today && (status === expiredLabel || status === '已到期')) {
+    return activeLabel;
+  }
+  return status;
 }
 
 function getContractNoRule() {
@@ -418,11 +413,6 @@ function formatDateSegment(fmt, rawDateStr) {
   }
 }
 
-/**
- * 零空洞（Gap-Filling）流水号查找器：
- * 查找当前前缀+穿插段+日期段下，第一个未被占用的正整数（1, 2, 3...）
- * 删掉中间记录自动补空缺；取消录入不占号；全满自动顺延！
- */
 function findSmallestMissingSeq(rows, colName, matchStart, suffix) {
   const used = new Set();
   const sfx = suffix || '';
@@ -452,15 +442,7 @@ function buildNextContractNo(rule, signDateStr, customMidParam) {
 
   if (digits <= 0) {
     const full = `${prefix}${mid}${dateStr}${suffix}`;
-    return {
-      prefix,
-      mid_custom: mid,
-      date_part: dateStr,
-      seq_part: '',
-      suffix,
-      next_no: full,
-      full_no: full
-    };
+    return { prefix, mid_custom: mid, date_part: dateStr, seq_part: '', suffix, next_no: full, full_no: full };
   }
 
   const matchStart = `${prefix}${mid}${dateStr}`;
@@ -469,15 +451,7 @@ function buildNextContractNo(rule, signDateStr, customMidParam) {
   const seqStr = String(nextNum).padStart(digits, '0');
   const full = `${matchStart}${seqStr}${suffix}`;
 
-  return {
-    prefix,
-    mid_custom: mid,
-    date_part: dateStr,
-    seq_part: seqStr,
-    suffix,
-    next_no: full,
-    full_no: full
-  };
+  return { prefix, mid_custom: mid, date_part: dateStr, seq_part: seqStr, suffix, next_no: full, full_no: full };
 }
 
 function buildNextProcNo(rule, approvalDateStr, customMidParam) {
@@ -489,15 +463,7 @@ function buildNextProcNo(rule, approvalDateStr, customMidParam) {
 
   if (digits <= 0) {
     const full = `${prefix}${mid}${dateStr}${suffix}`;
-    return {
-      prefix,
-      mid_custom: mid,
-      date_part: dateStr,
-      seq_part: '',
-      suffix,
-      next_no: full,
-      full_no: full
-    };
+    return { prefix, mid_custom: mid, date_part: dateStr, seq_part: '', suffix, next_no: full, full_no: full };
   }
 
   const matchStart = `${prefix}${mid}${dateStr}`;
@@ -506,15 +472,7 @@ function buildNextProcNo(rule, approvalDateStr, customMidParam) {
   const seqStr = String(nextNum).padStart(digits, '0');
   const full = `${matchStart}${seqStr}${suffix}`;
 
-  return {
-    prefix,
-    mid_custom: mid,
-    date_part: dateStr,
-    seq_part: seqStr,
-    suffix,
-    next_no: full,
-    full_no: full
-  };
+  return { prefix, mid_custom: mid, date_part: dateStr, seq_part: seqStr, suffix, next_no: full, full_no: full };
 }
 
 function resolveConflictNo(conflictNo, tableType) {
@@ -607,7 +565,6 @@ function syncBidirectionalLinkFromContract(contractId, contractNo, explicitProcI
   const cid = Number(contractId);
   let targetProcId = explicitProcId ? Number(explicitProcId) : null;
 
-  // 若未显式指定 procurement_id，自动检测是否有采购立项预先填写了相同的 contract_no_manual
   if (!targetProcId && contractNo) {
     const matchedProc = db.prepare(`
       SELECT id FROM procurements
@@ -619,7 +576,6 @@ function syncBidirectionalLinkFromContract(contractId, contractNo, explicitProcI
     }
   }
 
-  // 解绑旧立项
   db.prepare(`
     UPDATE procurements
     SET contract_id = NULL, updated_at = datetime('now', 'localtime')
@@ -649,7 +605,6 @@ function syncBidirectionalLinkFromProcurement(procId, explicitContractId, manual
   let targetContractId = explicitContractId ? Number(explicitContractId) : null;
   const cleanManualNo = String(manualContractNo || '').trim();
 
-  // 若未显式选择 contract_id，但填了 contract_no_manual，自动查找是否已有对应合同
   if (!targetContractId && cleanManualNo) {
     const matchedContract = STMTS.getContractByNo.get(cleanManualNo);
     if (matchedContract) {
@@ -657,7 +612,6 @@ function syncBidirectionalLinkFromProcurement(procId, explicitContractId, manual
     }
   }
 
-  // 解绑旧合同
   db.prepare(`
     UPDATE contracts
     SET procurement_id = NULL, updated_at = datetime('now', 'localtime')
@@ -807,7 +761,6 @@ function archiveProcurementFiles(procId, procNo, projectName, files, category = 
   return saved;
 }
 
-// 当修改合同编号或合同名称时，自动同步重命名主扫描件与 related 专属文件夹
 function syncContractFilesOnRename(contractId, oldNo, oldName, newNo, newName, currentAttachmentPath) {
   let finalAttachmentPath = currentAttachmentPath || '';
   if (oldNo === newNo && oldName === newName) return finalAttachmentPath;
@@ -857,7 +810,6 @@ function syncContractFilesOnRename(contractId, oldNo, oldName, newNo, newName, c
   return finalAttachmentPath;
 }
 
-// 当修改采购立项编号或项目名称时，自动同步重命名 procurement 专属文件夹
 function syncProcurementFilesOnRename(procId, oldNo, oldName, newNo, newName) {
   const oldFolder = buildFolderKey(oldNo, oldName);
   const newFolder = buildFolderKey(newNo, newName);
@@ -917,7 +869,6 @@ function cleanTmpDir() {
   } catch (e) {}
 }
 
-// 孤儿文件与空目录清道夫（确保磁盘与 SQLite 记录 100% 对齐，零垃圾残留）
 function sweepOrphanUploads() {
   try {
     if (!db || !db.open) return;
@@ -1151,6 +1102,7 @@ app.post('/api/settings/presets', (req, res) => {
         ? normalizePresetArray(incoming[key], DEFAULT_DROPDOWN_PRESETS[key])
         : current[key];
     }
+    updated.contract_statuses = ensureContractStatusPresetsIntegrity(updated.contract_statuses);
     STMTS.setSetting.run('dropdown_presets', JSON.stringify(updated));
     res.json({
       success: true,
@@ -1256,7 +1208,7 @@ app.get('/api/procurements/next-no', (req, res) => {
   });
 });
 
-// ==================== 10. 合同与采购详情组装器（跨模块附件穿透） ====================
+// ==================== 10. 合同与采购详情组装器 ====================
 function parseCounterparties(jsonStr, fallbackRow = {}) {
   let list = [];
   try {
@@ -1372,7 +1324,6 @@ function enrichProcurementRecord(row) {
 
 // ==================== 11. 合同台账 CRUD 路由 ====================
 function queryFilteredContracts(query = {}) {
-  // 每次查询或导出前，自动将已过期的“生效中”合同刷新为“已到期”
   autoRefreshExpiredContractStatus();
 
   const rows = db.prepare(`SELECT * FROM contracts`).all();
@@ -1659,7 +1610,6 @@ app.put('/api/contracts/:id', contractUploadMiddleware, (req, res) => {
   }
 });
 
-// 详情弹窗内直接补传/替换主合同扫描件
 app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -2051,7 +2001,7 @@ app.delete('/api/procurements/:id', (req, res) => {
   res.json({ success: true, message: '采购立项及关联资料已彻底删除' });
 });
 
-// ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎（黄金列宽 + 100% 匹配 test-smoke.js 断言） ====================
+// ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎 ====================
 function createContractWorksheet(contracts) {
   const headers = [
     '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
@@ -2072,7 +2022,7 @@ function createContractWorksheet(contracts) {
     { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
   ];
 
-  let currentRowIdx = 2; // Row 3 (0-based 2)，对应 AE3, AF3, AG3
+  let currentRowIdx = 2;
   const rowGroupParity = [];
   const formulaCells = [];
 
@@ -2131,17 +2081,17 @@ function createContractWorksheet(contracts) {
       if (pIdx === 0) {
         formulaCells.push({
           r: rIdx,
-          c: 30, // AE 列
+          c: 30,
           f: `HYPERLINK("${scanRelLink}","${c.attachment_path ? '📄 打开合同扫描件' : '未上传扫描件'}")`
         });
         formulaCells.push({
           r: rIdx,
-          c: 31, // AF 列
+          c: 31,
           f: `HYPERLINK("${procFolderRelLink}","${c.linked_procurement ? '📁 打开立项资料夹' : '未关联立项夹'}")`
         });
         formulaCells.push({
           r: rIdx,
-          c: 32, // AG 列
+          c: 32,
           f: `HYPERLINK("${relatedFolderRelLink}","📎 打开合同附件夹")`
         });
       }
@@ -2226,7 +2176,7 @@ function createProcurementWorksheet(procurements) {
   const formulaCells = [];
 
   procurements.forEach((p, idx) => {
-    const rIdx = idx + 2; // Row 3 (0-based 2)，对应 R3, S3
+    const rIdx = idx + 2;
     const procFolderLink = `uploads/procurement/${buildFolderKey(p.procurement_no, p.project_name)}`;
     const contractScanLink = (p.linked_contract && p.linked_contract.attachment_path)
       ? `uploads/${p.linked_contract.attachment_path}`
@@ -2256,12 +2206,12 @@ function createProcurementWorksheet(procurements) {
 
     formulaCells.push({
       r: rIdx,
-      c: 17, // R 列
+      c: 17,
       f: `HYPERLINK("${procFolderLink}","📁 打开立项资料夹")`
     });
     formulaCells.push({
       r: rIdx,
-      c: 18, // S 列
+      c: 18,
       f: `HYPERLINK("${contractScanLink}","${(p.linked_contract && p.linked_contract.attachment_path) ? '📄 打开关联合同扫描件' : '未上传合同扫描件'}")`
     });
   });
@@ -2372,7 +2322,6 @@ app.get('/api/export/combined', (req, res) => {
   }
 });
 
-// 全局异常兜底与临时文件零残留清理中间件
 app.use((err, req, res, next) => {
   cleanupReqTempFiles(req);
   if (err instanceof multer.MulterError) {
@@ -2387,11 +2336,10 @@ app.use((err, req, res, next) => {
   next();
 });
 
-// ==================== 14. 服务启动与优雅退出控制器（100% 兼容 main.js 与 test-smoke.js） ====================
+// ==================== 14. 服务启动与优雅退出控制器 ====================
 const activeSockets = new Set();
 let serverInstance = null;
 
-// 后台低频维护定时器（每 6 小时清理一次超时临时文件、孤儿附件、刷新过期合同状态并执行 WAL 截断）
 const maintenanceTimer = setInterval(() => {
   try {
     autoRefreshExpiredContractStatus();
