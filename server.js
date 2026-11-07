@@ -1,12 +1,13 @@
 /**
- * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.2.0 生产满血终极版)
- * 100% 匹配 main.js + test-smoke.js + public/index.html
+ * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.3.0 生产满血终极版)
+ * 100% 匹配 main.js + test-smoke.js + public/index.html + public/app.js
  * 核心能力：
  * 1. 夹心式分段编号引擎（支持前缀 + 穿插自定义段 + 日期段 + 零空洞(Gap-Filling)流水号 + 后缀 + 并发撞号顺延）
  * 2. 顺序可逆的双向互锁引擎（无论先录采购预填合同号，还是先录合同后绑采购，均自动双向挂钩并穿透附件）
  * 3. 智能日期解析器（支持 Excel 序列号如 46099、点号 2026.3.18、斜杠、简写 3.18 自动转 YYYY-MM-DD）
  * 4. 三大文件物理隔离归档 + 改名自动同步文件夹 + 孤儿文件清道夫 + 优雅退出零句柄残留
- * 5. 基于 xlsx-js-style 的专业双子表导出（隔行斑马纹 + 合同表 AE/AF/AG 三列超链接 + 采购表 R/S 两列超链接）
+ * 5. 自定义下拉选项与预设词库引擎（8大分类自由增删改、一键恢复默认、多机实时同步）
+ * 6. 基于 xlsx-js-style 的专业双子表导出（黄金自适应列宽 + 隔行斑马纹 + 合同表 AE/AF/AG 三列超链接 + 采购表 R/S 两列超链接）
  */
 
 const express = require('express');
@@ -238,7 +239,7 @@ const STMTS = {
   deleteProcFileById: db.prepare(`DELETE FROM procurement_files WHERE id = ?`)
 };
 
-// ==================== 4. 夹心式编号引擎（零空洞 Gap-Filling + 并发撞号顺延） ====================
+// ==================== 4. 夹心式编号引擎与自定义下拉预设引擎 ====================
 const DEFAULT_CONTRACT_RULE = {
   prefix: 'XSZY-黔-BJ-',
   default_mid: '',
@@ -256,6 +257,55 @@ const DEFAULT_PROC_RULE = {
   suffix: '',
   reset_yearly: true
 };
+
+const DEFAULT_DROPDOWN_PRESETS = {
+  contract_types: ['采购', '销售', '服务', '租赁', '劳动', '工程', '其他'],
+  contract_statuses: ['生效中', '履行完毕', '已解除', '待签署', '已归档'],
+  project_types: ['服务类项目', '物资采购类', '工程维保类', '信息化建设', '零星采购', '其他'],
+  cost_departments: ['综合部', '市场部', '财务部', '运营部', '揽投部', '寄递事业部', '渠道平台部', '安保部'],
+  procurement_types: ['小额零星采购', '分散采购', '集中采购', '单一来源采购', '紧急采购'],
+  procurement_methods: ['合作谈判', '询价采购', '竞争性磋商', '公开招标', '直接采购', '比选', '电商直购'],
+  budget_subjects: ['业务外包费', '办公费', '车辆运行维护费', '宣传营销费', '房屋租赁及物业费', '信息化运维费', '安全保卫费', '低值易耗品'],
+  invoice_types: ['增值税专用发票', '增值税普通发票', '免税普通发票', '财政票据/收据']
+};
+
+function normalizePresetArray(input, fallbackArr) {
+  let rawList = [];
+  if (Array.isArray(input)) {
+    rawList = input;
+  } else if (typeof input === 'string') {
+    rawList = input.split(/[\r\n,，、;；]+/);
+  }
+  const cleaned = [];
+  const seen = new Set();
+  for (const item of rawList) {
+    const s = String(item || '').trim();
+    if (s && !seen.has(s)) {
+      seen.add(s);
+      cleaned.push(s);
+    }
+  }
+  return cleaned.length > 0 ? cleaned : [...fallbackArr];
+}
+
+function getDropdownPresets() {
+  try {
+    const row = STMTS.getSetting.get('dropdown_presets');
+    if (row && row.setting_value) {
+      const parsed = JSON.parse(row.setting_value);
+      const result = {};
+      for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
+        result[key] = normalizePresetArray(parsed[key], DEFAULT_DROPDOWN_PRESETS[key]);
+      }
+      return result;
+    }
+  } catch (e) {}
+  const copy = {};
+  for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
+    copy[key] = [...DEFAULT_DROPDOWN_PRESETS[key]];
+  }
+  return copy;
+}
 
 function getContractNoRule() {
   try {
@@ -1012,7 +1062,7 @@ app.use('/uploads', (req, res) => {
   res.sendFile(absFile);
 });
 
-// ==================== 9. 编号规则、默认主体与夹心取号 API（100% 匹配 test-smoke.js） ====================
+// ==================== 9. 编号规则、默认主体、下拉预设与夹心取号 API ====================
 app.get(['/api/settings/our-entity', '/api/settings/default-entity'], (req, res) => {
   res.json({ success: true, our_entity: getDefaultOurEntity() });
 });
@@ -1021,6 +1071,44 @@ app.post(['/api/settings/our-entity', '/api/settings/default-entity'], (req, res
   const entity = String(req.body.our_entity || '').trim() || '毕节自营公司';
   STMTS.setSetting.run('default_our_entity', entity);
   res.json({ success: true, our_entity: entity, message: '默认我方签约主体已更新' });
+});
+
+// 自定义下拉选项与预设词库读写接口
+app.get('/api/settings/presets', (req, res) => {
+  res.json({
+    success: true,
+    presets: getDropdownPresets(),
+    defaults: DEFAULT_DROPDOWN_PRESETS
+  });
+});
+
+app.post('/api/settings/presets', (req, res) => {
+  try {
+    if (req.body && req.body.reset_defaults) {
+      STMTS.setSetting.run('dropdown_presets', JSON.stringify(DEFAULT_DROPDOWN_PRESETS));
+      return res.json({
+        success: true,
+        presets: getDropdownPresets(),
+        message: '已恢复出厂默认下拉选项预设'
+      });
+    }
+    const current = getDropdownPresets();
+    const incoming = req.body.presets || req.body || {};
+    const updated = {};
+    for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
+      updated[key] = incoming[key] !== undefined
+        ? normalizePresetArray(incoming[key], DEFAULT_DROPDOWN_PRESETS[key])
+        : current[key];
+    }
+    STMTS.setSetting.run('dropdown_presets', JSON.stringify(updated));
+    res.json({
+      success: true,
+      presets: updated,
+      message: '下拉选项与预设词库已保存'
+    });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message || '保存预设失败' });
+  }
 });
 
 app.get(['/api/settings/no-rule', '/api/settings/contract-no-rule'], (req, res) => {
@@ -1452,7 +1540,6 @@ app.put('/api/contracts/:id', contractUploadMiddleware, (req, res) => {
         throw new Error(`合同编号 ${finalNo} 已被其他记录占用`);
       }
 
-      // 优先同步重命名旧文件与 related 子文件夹
       const syncedOldAttachmentPath = syncContractFilesOnRename(
         id,
         existing.contract_no,
@@ -1794,7 +1881,6 @@ app.put('/api/procurements/:id', procUploadMiddleware, (req, res) => {
         throw new Error(`采购立项编号 ${finalProcNo} 已被占用`);
       }
 
-      // 优先同步重命名立项专属文件夹
       syncProcurementFilesOnRename(
         id,
         existing.procurement_no,
@@ -1909,7 +1995,7 @@ app.delete('/api/procurements/:id', (req, res) => {
   res.json({ success: true, message: '采购立项及关联资料已彻底删除' });
 });
 
-// ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎（100% 匹配 test-smoke.js 断言） ====================
+// ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎（黄金列宽 + 100% 匹配 test-smoke.js 断言） ====================
 function createContractWorksheet(contracts) {
   // 33 列设计：前 30 列 (A~AD) 为详细业务数据，第 31~33 列 (AE, AF, AG) 为三大资料超链接！
   const headers = [
@@ -2058,6 +2144,10 @@ function createContractWorksheet(contracts) {
     }
   }
 
+  ws['!cols'] = headers.map((h, i) => ({
+    wch: [10, 24, 28, 10, 18, 12, 12, 14, 10, 20, 22, 28, 22, 10, 14, 22, 22, 20, 14, 14, 9, 16, 8, 14, 10, 12, 14, 10, 12, 20, 20, 20, 20][i] || 15
+  }));
+
   return ws;
 }
 
@@ -2164,6 +2254,10 @@ function createProcurementWorksheet(procurements) {
       }
     }
   }
+
+  ws['!cols'] = headers.map((h, i) => ({
+    wch: [8, 22, 30, 14, 16, 14, 16, 14, 14, 12, 16, 12, 28, 14, 12, 24, 20, 20, 22][i] || 15
+  }));
 
   return ws;
 }
