@@ -1,13 +1,13 @@
 {
   "name": "contract-manager",
-  "version": "2.2.0",
-  "description": "Enterprise Contract Ledger Desktop Application (Single-Instance & System Tray)",
+  "version": "2.4.2",
+  "description": "Enterprise Contract & Procurement Ledger Desktop Application",
   "author": "Enterprise Contract Team",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "server": "node server.js",
-    "test": "electron test-smoke.js",
+    "test": "node test-smoke.js",
     "postinstall": "electron-builder install-app-deps",
     "dist:win": "electron-builder --win portable nsis --x64 --publish never",
     "dist:portable": "electron-builder --win portable --x64 --publish never",
