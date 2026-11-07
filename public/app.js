@@ -6,7 +6,7 @@ let currentTab = 'contract';
 let contractsCache = [];
 let procurementsCache = [];
 
-let defaultOurEntity = '毕节自营公司';
+let defaultOurEntity = 'ABC公司';
 let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
