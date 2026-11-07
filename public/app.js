@@ -1,6 +1,7 @@
 let currentContracts = [];
 let defaultOurEntity = '';
 let isFreeContractNoMode = false;
+let isSubmittingForm = false;
 let contractNoRule = {
   prefix: 'HT-',
   date_part: 'YYYY-',
@@ -8,6 +9,15 @@ let contractNoRule = {
   suffix: '',
   reset_yearly: true
 };
+
+// 获取本地时区当天日期 (YYYY-MM-DD)，修复 toISOString() 在北京时间 00:00~08:00 差一天的 Bug
+function getLocalTodayStr() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
@@ -66,6 +76,7 @@ function smartParseDateClient(rawVal) {
 }
 
 function normalizeDateInputElem(inputEl) {
+  if (!inputEl) return;
   const val = inputEl.value.trim();
   if (!val) {
     inputEl.style.borderColor = '#d1d5db';
@@ -94,6 +105,7 @@ function pickDateToInput(datePickerEl, targetInputId, isSignDate) {
   const target = document.getElementById(targetInputId);
   target.value = datePickerEl.value;
   target.style.borderColor = '#d1d5db';
+  datePickerEl.value = ''; // 释放原生日期选择器状态
   if (isSignDate) {
     onSignDateBlur(target);
   }
@@ -119,6 +131,7 @@ function smartFormatTaxRateClient(rawVal) {
 }
 
 function normalizeTaxInputElem(inputEl) {
+  if (!inputEl) return;
   inputEl.value = smartFormatTaxRateClient(inputEl.value);
 }
 
@@ -404,101 +417,105 @@ function populateYearFilterOptions(yearsFromDb = []) {
 }
 
 async function loadContracts() {
-  const params = getFilterParams();
-  const res = await fetch(`/api/contracts?${params.toString()}`);
-  const result = await res.json();
-  if (!result.success) return alert(result.message);
+  try {
+    const params = getFilterParams();
+    const res = await fetch(`/api/contracts?${params.toString()}`);
+    const result = await res.json();
+    if (!result.success) return alert(result.message);
 
-  currentContracts = result.data;
-  populateYearFilterOptions(result.years || []);
+    currentContracts = result.data;
+    populateYearFilterOptions(result.years || []);
 
-  const tbody = document.getElementById('contract_tbody');
-  if (currentContracts.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="24" style="text-align:center;color:#6b7280;padding:28px;">暂无匹配的合同台账记录</td></tr>`;
-    return;
-  }
+    const tbody = document.getElementById('contract_tbody');
+    if (currentContracts.length === 0) {
+      tbody.innerHTML = `<tr><td colspan="24" style="text-align:center;color:#6b7280;padding:28px;">暂无匹配的合同台账记录</td></tr>`;
+      return;
+    }
 
-  const htmlRows = [];
+    const htmlRows = [];
 
-  currentContracts.forEach((c, contractIndex) => {
-    const parties = parseContractParties(c);
-    const spanCount = parties.length;
-    const groupStripeClass = (contractIndex % 2 === 1) ? 'contract-group-odd' : 'contract-group-even';
+    currentContracts.forEach((c, contractIndex) => {
+      const parties = parseContractParties(c);
+      const spanCount = parties.length;
+      const groupStripeClass = (contractIndex % 2 === 1) ? 'contract-group-odd' : 'contract-group-even';
 
-    parties.forEach((p, idx) => {
-      const isFirstRow = idx === 0;
-      const isLastRow = idx === spanCount - 1;
+      parties.forEach((p, idx) => {
+        const isFirstRow = idx === 0;
+        const isLastRow = idx === spanCount - 1;
 
-      let perfBondHtml = '<span style="color:#9ca3af;">-</span>';
-      if ((p.perf_bond_amount !== null && p.perf_bond_amount !== undefined && p.perf_bond_amount !== '') || p.perf_bond_return_date) {
-        const amtStr = (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined && p.perf_bond_amount !== '') ? `¥${fmtMoney(p.perf_bond_amount)} ` : '';
-        const payStr = p.perf_bond_pay_date ? `<small style="color:#6b7280;">(缴:${escapeHtml(p.perf_bond_pay_date)})</small> ` : '';
-        const badge = p.perf_bond_return_date ? renderDueAlertBadge(p.perf_bond_return_date, c.status, '应退') : '';
-        perfBondHtml = `<div>${amtStr}${payStr}${badge}</div>`;
-      }
+        let perfBondHtml = '<span style="color:#9ca3af;">-</span>';
+        if ((p.perf_bond_amount !== null && p.perf_bond_amount !== undefined && p.perf_bond_amount !== '') || p.perf_bond_return_date) {
+          const amtStr = (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined && p.perf_bond_amount !== '') ? `¥${fmtMoney(p.perf_bond_amount)} ` : '';
+          const payStr = p.perf_bond_pay_date ? `<small style="color:#6b7280;">(缴:${escapeHtml(p.perf_bond_pay_date)})</small> ` : '';
+          const badge = p.perf_bond_return_date ? renderDueAlertBadge(p.perf_bond_return_date, c.status, '应退') : '';
+          perfBondHtml = `<div>${amtStr}${payStr}${badge}</div>`;
+        }
 
-      let warrantyHtml = '<span style="color:#9ca3af;">-</span>';
-      if ((p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined && p.warranty_bond_amount !== '') || p.warranty_bond_expiry_date) {
-        const amtStr = (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined && p.warranty_bond_amount !== '') ? `¥${fmtMoney(p.warranty_bond_amount)} ` : '';
-        const badge = p.warranty_bond_expiry_date ? renderDueAlertBadge(p.warranty_bond_expiry_date, c.status, '到期') : '';
-        warrantyHtml = `<div>${amtStr}${badge}</div>`;
-      }
+        let warrantyHtml = '<span style="color:#9ca3af;">-</span>';
+        if ((p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined && p.warranty_bond_amount !== '') || p.warranty_bond_expiry_date) {
+          const amtStr = (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined && p.warranty_bond_amount !== '') ? `¥${fmtMoney(p.warranty_bond_amount)} ` : '';
+          const badge = p.warranty_bond_expiry_date ? renderDueAlertBadge(p.warranty_bond_expiry_date, c.status, '到期') : '';
+          warrantyHtml = `<div>${amtStr}${badge}</div>`;
+        }
 
-      const contactStr = (p.contact_person || p.contact_phone)
-        ? `${escapeHtml(p.contact_person || '-')} ${escapeHtml(p.contact_phone || '')}`
-        : '-';
+        const contactStr = (p.contact_person || p.contact_phone)
+          ? `${escapeHtml(p.contact_person || '-')} ${escapeHtml(p.contact_phone || '')}`
+          : '-';
 
-      const bankParts = [];
-      if (p.bank_account_name) bankParts.push(`户名:${p.bank_account_name}`);
-      if (p.bank_account_no) bankParts.push(`账号:${p.bank_account_no}`);
-      if (p.bank_name) bankParts.push(`开户行:${p.bank_name}`);
-      if (p.bank_code) bankParts.push(`行号:${p.bank_code}`);
-      const bankSummary = bankParts.length > 0 ? bankParts.join(' | ') : '-';
+        const bankParts = [];
+        if (p.bank_account_name) bankParts.push(`户名:${p.bank_account_name}`);
+        if (p.bank_account_no) bankParts.push(`账号:${p.bank_account_no}`);
+        if (p.bank_name) bankParts.push(`开户行:${p.bank_name}`);
+        if (p.bank_code) bankParts.push(`行号:${p.bank_code}`);
+        const bankSummary = bankParts.length > 0 ? bankParts.join(' | ') : '-';
 
-      htmlRows.push(`
-        <tr class="${groupStripeClass} ${isLastRow ? 'contract-group-end' : ''}">
-          ${isFirstRow ? `
-            <td class="text-center" rowspan="${spanCount}"><span class="seq-badge">${escapeHtml(c.seq_label || c.seq_no)}</span></td>
-            <td rowspan="${spanCount}"><strong>${escapeHtml(c.contract_no)}</strong></td>
-            <td rowspan="${spanCount}">${escapeHtml(c.contract_name)}</td>
-            <td class="text-center" rowspan="${spanCount}">${escapeHtml(c.contract_type)}</td>
-            <td rowspan="${spanCount}">${escapeHtml(c.our_entity)}</td>
-            <td class="text-center" rowspan="${spanCount}">${escapeHtml(c.sign_date)}</td>
-            <td class="text-center" rowspan="${spanCount}">${escapeHtml(c.start_date || c.sign_date)}</td>
-            <td class="text-center" rowspan="${spanCount}">${renderDueAlertBadge(c.expiry_date, c.status)}</td>
-            <td class="text-center" rowspan="${spanCount}"><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
-          ` : ''}
-          <td class="summary-cell" title="${escapeHtml(p.item_summary || '')}">${escapeHtml(p.item_summary || '-')}</td>
-          <td><strong>${escapeHtml(p.company_name)}</strong></td>
-          <td>${escapeHtml(p.credit_code)}</td>
-          <td>${contactStr}</td>
-          <td class="summary-cell" title="${escapeHtml(bankSummary)}">${escapeHtml(bankSummary)}</td>
-          <td class="text-right"><strong>${fmtMoney(p.amount)}</strong></td>
-          <td class="text-right">${fmtMoney(p.amount_excl_tax)}</td>
-          <td class="text-center">${escapeHtml(p.tax_rate || '-')}</td>
-          <td class="text-center">${escapeHtml(p.invoice_type || '-')}</td>
-          <td class="text-center">${escapeHtml(p.currency || c.currency || 'CNY')}</td>
-          <td>${perfBondHtml}</td>
-          <td>${warrantyHtml}</td>
-          <td class="summary-cell" title="${escapeHtml(p.remark || '')}">${escapeHtml(p.remark || '-')}</td>
-          ${isFirstRow ? `
-            <td rowspan="${spanCount}">
-              ${c.attachment_path
-                ? `<a class="link-btn" onclick="openDetailModal(${c.id})" title="点击在线预览扫描件">📎 ${escapeHtml(c.attachment_original_name)}</a>`
-                : `<span style="color:#9ca3af;">无扫描件</span>`}
-            </td>
-            <td class="text-center" rowspan="${spanCount}">
-              <button type="button" class="btn btn-outline btn-sm" onclick="openDetailModal(${c.id})">详情 / 扫描件</button>
-              <button type="button" class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
-              <button type="button" class="btn btn-danger btn-sm" onclick="deleteContract(${c.id})">删除</button>
-            </td>
-          ` : ''}
-        </tr>
-      `);
+        htmlRows.push(`
+          <tr class="${groupStripeClass} ${isLastRow ? 'contract-group-end' : ''}">
+            ${isFirstRow ? `
+              <td class="text-center" rowspan="${spanCount}"><span class="seq-badge">${escapeHtml(c.seq_label || c.seq_no)}</span></td>
+              <td rowspan="${spanCount}"><strong>${escapeHtml(c.contract_no)}</strong></td>
+              <td rowspan="${spanCount}">${escapeHtml(c.contract_name)}</td>
+              <td class="text-center" rowspan="${spanCount}">${escapeHtml(c.contract_type)}</td>
+              <td rowspan="${spanCount}">${escapeHtml(c.our_entity)}</td>
+              <td class="text-center" rowspan="${spanCount}">${escapeHtml(c.sign_date)}</td>
+              <td class="text-center" rowspan="${spanCount}">${escapeHtml(c.start_date || c.sign_date)}</td>
+              <td class="text-center" rowspan="${spanCount}">${renderDueAlertBadge(c.expiry_date, c.status)}</td>
+              <td class="text-center" rowspan="${spanCount}"><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
+            ` : ''}
+            <td class="summary-cell" title="${escapeHtml(p.item_summary || '')}">${escapeHtml(p.item_summary || '-')}</td>
+            <td><strong>${escapeHtml(p.company_name)}</strong></td>
+            <td>${escapeHtml(p.credit_code)}</td>
+            <td>${contactStr}</td>
+            <td class="summary-cell" title="${escapeHtml(bankSummary)}">${escapeHtml(bankSummary)}</td>
+            <td class="text-right"><strong>${fmtMoney(p.amount)}</strong></td>
+            <td class="text-right">${fmtMoney(p.amount_excl_tax)}</td>
+            <td class="text-center">${escapeHtml(p.tax_rate || '-')}</td>
+            <td class="text-center">${escapeHtml(p.invoice_type || '-')}</td>
+            <td class="text-center">${escapeHtml(p.currency || c.currency || 'CNY')}</td>
+            <td>${perfBondHtml}</td>
+            <td>${warrantyHtml}</td>
+            <td class="summary-cell" title="${escapeHtml(p.remark || '')}">${escapeHtml(p.remark || '-')}</td>
+            ${isFirstRow ? `
+              <td rowspan="${spanCount}">
+                ${c.attachment_path
+                  ? `<a class="link-btn" onclick="openDetailModal(${c.id})" title="点击在线预览扫描件">📎 ${escapeHtml(c.attachment_original_name)}</a>`
+                  : `<span style="color:#9ca3af;">无扫描件</span>`}
+              </td>
+              <td class="text-center" rowspan="${spanCount}">
+                <button type="button" class="btn btn-outline btn-sm" onclick="openDetailModal(${c.id})">详情 / 扫描件</button>
+                <button type="button" class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
+                <button type="button" class="btn btn-danger btn-sm" onclick="deleteContract(${c.id})">删除</button>
+              </td>
+            ` : ''}
+          </tr>
+        `);
+      });
     });
-  });
 
-  tbody.innerHTML = htmlRows.join('');
+    tbody.innerHTML = htmlRows.join('');
+  } catch (err) {
+    console.error('加载台账异常:', err);
+  }
 }
 
 function resetFilters() {
@@ -537,6 +554,22 @@ document.addEventListener('DOMContentLoaded', async () => {
       startDateInput.dataset.autoSync = 'false';
     });
   }
+
+  // 支持按键盘 ESC 键优雅关闭当前打开的弹窗并释放预览内存
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      if (!document.getElementById('detail_modal').classList.contains('hidden')) {
+        closeDetailModal();
+      } else if (!document.getElementById('no_rule_modal').classList.contains('hidden')) {
+        closeNoRuleModal();
+      } else if (!document.getElementById('our_entity_modal').classList.contains('hidden')) {
+        closeOurEntityModal();
+      } else if (!document.getElementById('form_modal').classList.contains('hidden')) {
+        closeFormModal();
+      }
+    }
+  });
+
   await loadContractNoRule();
   await loadDefaultOurEntity();
   await loadContracts();
@@ -624,14 +657,14 @@ function addCounterpartyCard(data = {}) {
         <label>保证金缴纳时间 <small class="muted">(可留空)</small></label>
         <div class="smart-date-wrap">
           <input type="text" class="p_perf_bond_pay_date" value="${escapeHtml(data.perf_bond_pay_date || '')}" placeholder="如 2026.6.3 或 6.3" onblur="normalizeDateInputElem(this)" />
-          <input type="date" class="native-date-Helper" tabindex="-1" onchange="this.previousElementSibling.value=this.value" />
+          <input type="date" class="native-date-Helper" tabindex="-1" onchange="this.previousElementSibling.value=this.value;this.value='';" />
         </div>
       </div>
       <div class="form-group">
         <label>保证金应退时间 <small class="muted">(预警)</small></label>
         <div class="smart-date-wrap">
           <input type="text" class="p_perf_bond_return_date" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="如 2026.12.1" onblur="normalizeDateInputElem(this)" />
-          <input type="date" class="native-date-Helper" tabindex="-1" onchange="this.previousElementSibling.value=this.value" />
+          <input type="date" class="native-date-Helper" tabindex="-1" onchange="this.previousElementSibling.value=this.value;this.value='';" />
         </div>
       </div>
       <div class="form-group">
@@ -642,7 +675,7 @@ function addCounterpartyCard(data = {}) {
         <label>质保金到期时间 <small class="muted">(预警)</small></label>
         <div class="smart-date-wrap">
           <input type="text" class="p_warranty_bond_expiry_date" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="如 2027.6.1" onblur="normalizeDateInputElem(this)" />
-          <input type="date" class="native-date-Helper" tabindex="-1" onchange="this.previousElementSibling.value=this.value" />
+          <input type="date" class="native-date-Helper" tabindex="-1" onchange="this.previousElementSibling.value=this.value;this.value='';" />
         </div>
       </div>
       <div class="form-group span-2">
@@ -713,6 +746,7 @@ function collectCounterpartiesFromDOM() {
 async function openFormModal(id = null) {
   const form = document.getElementById('contract_form');
   form.reset();
+  document.getElementById('f_attachment').value = '';
   document.getElementById('form_id').value = id || '';
   document.getElementById('form_modal_title').innerText = id ? '编辑合同台账' : '新增合同台账';
   const container = document.getElementById('counterparties_container');
@@ -739,7 +773,7 @@ async function openFormModal(id = null) {
     }
   } else {
     setContractNoEditorMode(false);
-    const todayStr = new Date().toISOString().slice(0, 10);
+    const todayStr = getLocalTodayStr();
     document.getElementById('f_our_entity').value = defaultOurEntity;
     document.getElementById('f_sign_date').value = todayStr;
     document.getElementById('f_start_date').value = todayStr;
@@ -752,10 +786,13 @@ async function openFormModal(id = null) {
 
 function closeFormModal() {
   document.getElementById('form_modal').classList.add('hidden');
+  document.getElementById('counterparties_container').innerHTML = '';
+  document.getElementById('f_attachment').value = '';
 }
 
 async function submitContractForm(e) {
   e.preventDefault();
+  if (isSubmittingForm) return;
 
   if (!isFreeContractNoMode) {
     syncSegmentedContractNo();
@@ -775,21 +812,32 @@ async function submitContractForm(e) {
     return alert(err.message);
   }
 
-  const id = document.getElementById('form_id').value;
-  const formData = new FormData(document.getElementById('contract_form'));
-  formData.set('contract_no', document.getElementById('f_contract_no').value.trim());
-  formData.set('counterparties_json', JSON.stringify(parties));
+  const submitBtn = document.getElementById('btn_submit_contract');
+  isSubmittingForm = true;
+  if (submitBtn) submitBtn.disabled = true;
 
-  const url = id ? `/api/contracts/${id}` : '/api/contracts';
-  const method = id ? 'PUT' : 'POST';
+  try {
+    const id = document.getElementById('form_id').value;
+    const formData = new FormData(document.getElementById('contract_form'));
+    formData.set('contract_no', document.getElementById('f_contract_no').value.trim());
+    formData.set('counterparties_json', JSON.stringify(parties));
 
-  const res = await fetch(url, { method, body: formData });
-  const result = await res.json();
-  if (!result.success) return alert(result.message);
+    const url = id ? `/api/contracts/${id}` : '/api/contracts';
+    const method = id ? 'PUT' : 'POST';
 
-  closeFormModal();
-  await loadContractNoRule();
-  await loadContracts();
+    const res = await fetch(url, { method, body: formData });
+    const result = await res.json();
+    if (!result.success) return alert(result.message);
+
+    closeFormModal();
+    await loadContractNoRule();
+    await loadContracts();
+  } catch (err) {
+    alert('提交失败，请检查数据后重试: ' + err.message);
+  } finally {
+    isSubmittingForm = false;
+    if (submitBtn) submitBtn.disabled = false;
+  }
 }
 
 async function deleteContract(id) {
@@ -801,7 +849,25 @@ async function deleteContract(id) {
   await loadContracts();
 }
 
+// 彻底销毁预览容器内的 iframe / img 节点，防止 Chromium 插件内存驻留
+function releasePreviewDOM() {
+  const preview = document.getElementById('preview_container');
+  if (!preview) return;
+  const iframe = preview.querySelector('iframe');
+  if (iframe) {
+    try { iframe.src = 'about:blank'; } catch (e) {}
+    iframe.remove();
+  }
+  const img = preview.querySelector('img');
+  if (img) {
+    img.src = '';
+    img.remove();
+  }
+  preview.innerHTML = '';
+}
+
 async function openDetailModal(id) {
+  releasePreviewDOM();
   const res = await fetch(`/api/contracts/${id}`);
   const result = await res.json();
   if (!result.success) return alert(result.message);
@@ -877,18 +943,15 @@ async function openDetailModal(id) {
 
 function closeDetailModal() {
   document.getElementById('detail_modal').classList.add('hidden');
-  const preview = document.getElementById('preview_container');
-  const iframe = preview.querySelector('iframe');
-  if (iframe) {
-    iframe.src = 'about:blank';
-  }
-  preview.innerHTML = '';
+  releasePreviewDOM();
+  document.getElementById('detail_fields').innerHTML = '';
 }
 
 async function uploadAttachmentInDetail(id, fileInput) {
   if (!fileInput.files.length) return;
   const formData = new FormData();
   formData.append('attachment', fileInput.files[0]);
+  fileInput.value = ''; // 立即释放浏览器文件选择器句柄
 
   const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'POST', body: formData });
   const result = await res.json();
