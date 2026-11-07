@@ -3,17 +3,15 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 
-// ==================== 0. 纯浏览器模式：彻底禁用内置 GPU 硬件加速与渲染器冗余开销 ====================
+// 纯浏览器模式：禁用内置 GPU 硬件加速，将 V8 堆内存上限设为稳妥的 256MB
 app.disableHardwareAcceleration();
 app.commandLine.appendSwitch('disable-gpu');
 app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('disable-extensions');
 app.commandLine.appendSwitch('disable-sync');
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=96 --expose-gc');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256 --expose-gc');
 
-// ==================== 1. 强制单实例运行 (Single Instance Lock) ====================
 const gotTheLock = app.requestSingleInstanceLock();
-
 if (!gotTheLock) {
   app.quit();
   process.exit(0);
@@ -29,9 +27,7 @@ let dataRootDir = '';
 app.on('window-all-closed', () => {});
 
 function resolveDataRoot() {
-  if (!app.isPackaged) {
-    return __dirname;
-  }
+  if (!app.isPackaged) return __dirname;
   if (process.env.PORTABLE_EXECUTABLE_DIR) {
     return path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'ContractData');
   }
@@ -44,7 +40,6 @@ function triggerMainGC() {
   }
 }
 
-// 自动探测本机局域网 IPv4 地址（过滤虚拟网卡，优先选取真实局域网网卡）
 function getLocalLanIPv4() {
   const nets = os.networkInterfaces();
   const candidates = [];
@@ -56,11 +51,9 @@ function getLocalLanIPv4() {
       }
     }
   }
-  const preferred = candidates.find(ip => ip.startsWith('192.168.')) || candidates[0];
-  return preferred || '127.0.0.1';
+  return candidates.find(ip => ip.startsWith('192.168.')) || candidates[0] || '127.0.0.1';
 }
 
-// 纯内存动态生成 16x16 像素系统托盘图标
 function createBuiltinTrayIcon() {
   const size = 16;
   const buf = Buffer.alloc(size * size * 4);
@@ -81,7 +74,6 @@ function createBuiltinTrayIcon() {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
-// 安全调用系统默认浏览器打开本机免密管理界面
 function openInSystemBrowser() {
   if (localAppUrl && /^http:\/\/127\.0\.0\.1:\d+$/.test(localAppUrl)) {
     shell.openExternal(localAppUrl).catch(() => {
@@ -89,96 +81,73 @@ function openInSystemBrowser() {
       dialog.showMessageBox({
         type: 'info',
         title: '合同台账系统已启动',
-        message: `未检测到系统默认浏览器，已自动将本机免密网址复制到剪贴板：\n${localAppUrl}\n\n内网其他电脑受口令保护访问地址（本次随机端口）：\n${lanAppUrl}`
+        message: `未检测到系统默认浏览器，已自动将本机免密网址复制到剪贴板：\n${localAppUrl}\n\n内网其他电脑受口令保护访问地址：\n${lanAppUrl}`
       });
     });
     triggerMainGC();
   }
 }
 
-app.on('second-instance', () => {
-  openInSystemBrowser();
-});
+app.on('second-instance', () => openInSystemBrowser());
 
-// ==================== 2. 初始化系统托盘并自动弹出系统浏览器 ====================
 function setupTrayAndLaunchBrowser(port, dataRoot) {
   const lanIp = getLocalLanIPv4();
   localAppUrl = `http://127.0.0.1:${port}`;
   lanAppUrl = `http://${lanIp}:${port}`;
   dataRootDir = dataRoot;
 
-  const appIcon = createBuiltinTrayIcon();
-  tray = new Tray(appIcon);
-  tray.setToolTip(`企业合同台账管理系统 (动态随机安全端口: ${port})\n本机免密: ${localAppUrl}\n内网凭口令访问: ${lanAppUrl}`);
+  tray = new Tray(createBuiltinTrayIcon());
+  tray.setToolTip(`企业合同台账管理系统 (端口: ${port})\n本机免密: ${localAppUrl}\n内网凭口令访问: ${lanAppUrl}`);
 
   const contextMenu = Menu.buildFromTemplate([
     {
       label: '🌐 在系统浏览器中打开合同台账主界面 (本机免密直连)',
-      click: () => {
-        openInSystemBrowser();
-      }
+      click: () => openInSystemBrowser()
     },
     {
       label: `🔐 复制本次内网共享地址 (${lanAppUrl} — 需输入验证口令)`,
       click: () => {
-        const latestIp = getLocalLanIPv4();
-        lanAppUrl = `http://${latestIp}:${port}`;
+        lanAppUrl = `http://${getLocalLanIPv4()}:${port}`;
         clipboard.writeText(lanAppUrl);
       }
     },
     {
       label: `📋 复制本机访问地址 (${localAppUrl})`,
-      click: () => {
-        clipboard.writeText(localAppUrl);
-      }
+      click: () => clipboard.writeText(localAppUrl)
     },
     {
-      label: '🗄️ 打开本机数据与 uploads 扫描件/关联资料目录 (所有电脑上传的文件均存在此处)',
+      label: '🗄️ 打开本机数据与 uploads 扫描件/关联资料目录',
       click: () => {
-        if (dataRootDir && fs.existsSync(dataRootDir)) {
-          shell.openPath(dataRootDir);
-        }
+        if (dataRootDir && fs.existsSync(dataRootDir)) shell.openPath(dataRootDir);
       }
     },
     { type: 'separator' },
     {
       label: '🧹 立即执行后台内存垃圾回收 (GC)',
-      click: () => {
-        triggerMainGC();
-      }
+      click: () => triggerMainGC()
     },
     {
       label: '❌ 彻底退出并释放所有资源',
-      click: () => {
-        performFullExit();
-      }
+      click: () => performFullExit()
     }
   ]);
 
   tray.setContextMenu(contextMenu);
-
-  tray.on('click', () => {
-    openInSystemBrowser();
-  });
-  tray.on('double-click', () => {
-    openInSystemBrowser();
-  });
+  tray.on('click', () => openInSystemBrowser());
+  tray.on('double-click', () => openInSystemBrowser());
 
   openInSystemBrowser();
   setTimeout(() => triggerMainGC(), 1500);
 }
 
-// ==================== 3. 彻底退出与全链路资源销毁 ====================
 async function performFullExit() {
   if (isShuttingDown) return;
   isShuttingDown = true;
-
   try {
     if (tray) {
       tray.destroy();
       tray = null;
     }
-
     if (backendController && typeof backendController.shutdown === 'function') {
       await backendController.shutdown();
       backendController = null;
@@ -189,9 +158,7 @@ async function performFullExit() {
     triggerMainGC();
     app.releaseSingleInstanceLock();
     app.quit();
-    setTimeout(() => {
-      process.exit(0);
-    }, 200).unref();
+    setTimeout(() => process.exit(0), 200).unref();
   }
 }
 
@@ -212,20 +179,13 @@ process.on('unhandledRejection', (reason) => {
   console.error('未处理的 Promise 拒绝:', reason);
 });
 
-// ==================== 4. 启动应用入口（每次启动使用动态随机端口 0 + 全网卡监听） ====================
 app.whenReady().then(async () => {
   try {
     const dataRoot = resolveDataRoot();
-    if (!fs.existsSync(dataRoot)) {
-      fs.mkdirSync(dataRoot, { recursive: true });
-    }
-
+    if (!fs.existsSync(dataRoot)) fs.mkdirSync(dataRoot, { recursive: true });
     process.env.DATA_ROOT = dataRoot;
     const { startServer } = require('./server');
-
-    // 传入端口 0：每次启动由系统动态分配全新随机端口，结合内网口令锁双重保障安全
     backendController = await startServer(0, '0.0.0.0');
-
     setupTrayAndLaunchBrowser(backendController.port, dataRoot);
   } catch (err) {
     dialog.showErrorBox('系统启动失败', `无法初始化后台服务或数据库：\n${err.message}`);
