@@ -1,11 +1,11 @@
 /**
- * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.2.0 生产终极版)
+ * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.2.0 生产满血终极版)
  * 100% 匹配 main.js + test-smoke.js + public/index.html
  * 核心能力：
  * 1. 夹心式分段编号引擎（支持前缀 + 穿插自定义段 + 日期段 + 零空洞(Gap-Filling)流水号 + 后缀 + 并发撞号顺延）
  * 2. 顺序可逆的双向互锁引擎（无论先录采购预填合同号，还是先录合同后绑采购，均自动双向挂钩并穿透附件）
  * 3. 智能日期解析器（支持 Excel 序列号如 46099、点号 2026.3.18、斜杠、简写 3.18 自动转 YYYY-MM-DD）
- * 4. 三大文件物理隔离归档（uploads/主合同、uploads/procurement/立项专属夹、uploads/related/合同附件夹）+ 零残留清理
+ * 4. 三大文件物理隔离归档 + 改名自动同步文件夹 + 孤儿文件清道夫 + 优雅退出零句柄残留
  * 5. 基于 xlsx-js-style 的专业双子表导出（隔行斑马纹 + 合同表 AE/AF/AG 三列超链接 + 采购表 R/S 两列超链接）
  */
 
@@ -580,7 +580,7 @@ function syncBidirectionalLinkFromProcurement(procId, explicitContractId, manual
   db.prepare(`UPDATE procurements SET contract_id = NULL WHERE id = ?`).run(pid);
 }
 
-// ==================== 6. 三大文件物理归档与零残留清理引擎 ====================
+// ==================== 6. 三大文件物理归档、改名同步与零残留清道夫引擎 ====================
 function sanitizeSegment(str, maxLen = 60) {
   return String(str || '')
     .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')
@@ -705,6 +705,84 @@ function archiveProcurementFiles(procId, procNo, projectName, files, category = 
   return saved;
 }
 
+// 当修改合同编号或合同名称时，自动同步重命名主扫描件与 related 专属文件夹
+function syncContractFilesOnRename(contractId, oldNo, oldName, newNo, newName, currentAttachmentPath) {
+  let finalAttachmentPath = currentAttachmentPath || '';
+  if (oldNo === newNo && oldName === newName) return finalAttachmentPath;
+
+  if (finalAttachmentPath) {
+    const oldMainAbs = path.join(UPLOAD_DIR, finalAttachmentPath);
+    if (isSafePathWithin(oldMainAbs, UPLOAD_DIR) && fs.existsSync(oldMainAbs)) {
+      const ext = path.extname(finalAttachmentPath) || '.pdf';
+      const base = `${sanitizeSegment(newNo, 50)}_${sanitizeSegment(newName, 60)}`;
+      let targetName = `${base}${ext}`;
+      let idx = 1;
+      while (fs.existsSync(path.join(UPLOAD_DIR, targetName)) && targetName !== finalAttachmentPath) {
+        targetName = `${base}(${idx})${ext}`;
+        idx++;
+      }
+      try {
+        fs.renameSync(oldMainAbs, path.join(UPLOAD_DIR, targetName));
+        finalAttachmentPath = targetName;
+      } catch (e) {}
+    }
+  }
+
+  const oldFolder = buildFolderKey(oldNo, oldName);
+  const newFolder = buildFolderKey(newNo, newName);
+  if (oldFolder !== newFolder) {
+    const oldDirAbs = path.join(RELATED_UPLOAD_DIR, oldFolder);
+    const newDirAbs = path.join(RELATED_UPLOAD_DIR, newFolder);
+    if (isSafePathWithin(oldDirAbs, RELATED_UPLOAD_DIR) && fs.existsSync(oldDirAbs)) {
+      try {
+        if (!fs.existsSync(newDirAbs)) {
+          fs.renameSync(oldDirAbs, newDirAbs);
+        } else {
+          for (const f of fs.readdirSync(oldDirAbs)) {
+            fs.renameSync(path.join(oldDirAbs, f), path.join(newDirAbs, f));
+          }
+          removeEmptySubdirIfClean(oldDirAbs, RELATED_UPLOAD_DIR);
+        }
+        const relFiles = STMTS.getRelatedFilesByCid.all(contractId);
+        const updStmt = db.prepare(`UPDATE contract_files SET file_path = ? WHERE id = ?`);
+        for (const rf of relFiles) {
+          const fname = path.posix.basename(rf.file_path.replace(/\\/g, '/'));
+          updStmt.run(path.posix.join('related', newFolder, fname), rf.id);
+        }
+      } catch (e) {}
+    }
+  }
+  return finalAttachmentPath;
+}
+
+// 当修改采购立项编号或项目名称时，自动同步重命名 procurement 专属文件夹
+function syncProcurementFilesOnRename(procId, oldNo, oldName, newNo, newName) {
+  const oldFolder = buildFolderKey(oldNo, oldName);
+  const newFolder = buildFolderKey(newNo, newName);
+  if (oldFolder === newFolder) return;
+
+  const oldDirAbs = path.join(PROCUREMENT_UPLOAD_DIR, oldFolder);
+  const newDirAbs = path.join(PROCUREMENT_UPLOAD_DIR, newFolder);
+  if (isSafePathWithin(oldDirAbs, PROCUREMENT_UPLOAD_DIR) && fs.existsSync(oldDirAbs)) {
+    try {
+      if (!fs.existsSync(newDirAbs)) {
+        fs.renameSync(oldDirAbs, newDirAbs);
+      } else {
+        for (const f of fs.readdirSync(oldDirAbs)) {
+          fs.renameSync(path.join(oldDirAbs, f), path.join(newDirAbs, f));
+        }
+        removeEmptySubdirIfClean(oldDirAbs, PROCUREMENT_UPLOAD_DIR);
+      }
+      const pFiles = STMTS.getProcFilesByPid.all(procId);
+      const updStmt = db.prepare(`UPDATE procurement_files SET file_path = ? WHERE id = ?`);
+      for (const pf of pFiles) {
+        const fname = path.posix.basename(pf.file_path.replace(/\\/g, '/'));
+        updStmt.run(path.posix.join('procurement', newFolder, fname), pf.id);
+      }
+    } catch (e) {}
+  }
+}
+
 function cleanupReqTempFiles(req) {
   if (!req) return;
   const list = [];
@@ -737,7 +815,65 @@ function cleanTmpDir() {
   } catch (e) {}
 }
 
+// 孤儿文件与空目录清道夫（确保磁盘与 SQLite 记录 100% 对齐，零垃圾残留）
+function sweepOrphanUploads() {
+  try {
+    if (!db || !db.open) return;
+    const validMain = new Set(
+      db.prepare(`SELECT attachment_path FROM contracts WHERE attachment_path != ''`).all().map(r => r.attachment_path)
+    );
+    for (const item of fs.readdirSync(UPLOAD_DIR)) {
+      if (item === '.tmp' || item === 'related' || item === 'procurement' || item.startsWith('.')) continue;
+      const abs = path.join(UPLOAD_DIR, item);
+      try {
+        if (fs.statSync(abs).isFile() && !validMain.has(item)) fs.unlinkSync(abs);
+      } catch (e) {}
+    }
+
+    const validRel = new Set(
+      db.prepare(`SELECT file_path FROM contract_files`).all().map(r => r.file_path.replace(/\\/g, '/'))
+    );
+    if (fs.existsSync(RELATED_UPLOAD_DIR)) {
+      for (const sub of fs.readdirSync(RELATED_UPLOAD_DIR)) {
+        const subAbs = path.join(RELATED_UPLOAD_DIR, sub);
+        try {
+          if (!fs.statSync(subAbs).isDirectory()) continue;
+          for (const f of fs.readdirSync(subAbs)) {
+            const relKey = path.posix.join('related', sub, f);
+            const fAbs = path.join(subAbs, f);
+            if (!validRel.has(relKey) && isSafePathWithin(fAbs, RELATED_UPLOAD_DIR)) {
+              try { fs.unlinkSync(fAbs); } catch (e) {}
+            }
+          }
+          removeEmptySubdirIfClean(subAbs, RELATED_UPLOAD_DIR);
+        } catch (e) {}
+      }
+    }
+
+    const validProc = new Set(
+      db.prepare(`SELECT file_path FROM procurement_files`).all().map(r => r.file_path.replace(/\\/g, '/'))
+    );
+    if (fs.existsSync(PROCUREMENT_UPLOAD_DIR)) {
+      for (const sub of fs.readdirSync(PROCUREMENT_UPLOAD_DIR)) {
+        const subAbs = path.join(PROCUREMENT_UPLOAD_DIR, sub);
+        try {
+          if (!fs.statSync(subAbs).isDirectory()) continue;
+          for (const f of fs.readdirSync(subAbs)) {
+            const relKey = path.posix.join('procurement', sub, f);
+            const fAbs = path.join(subAbs, f);
+            if (!validProc.has(relKey) && isSafePathWithin(fAbs, PROCUREMENT_UPLOAD_DIR)) {
+              try { fs.unlinkSync(fAbs); } catch (e) {}
+            }
+          }
+          removeEmptySubdirIfClean(subAbs, PROCUREMENT_UPLOAD_DIR);
+        } catch (e) {}
+      }
+    }
+  } catch (e) {}
+}
+
 cleanTmpDir();
+sweepOrphanUploads();
 
 // ==================== 7. Multer 上传配置 ====================
 const storage = multer.diskStorage({
@@ -1316,13 +1452,24 @@ app.put('/api/contracts/:id', contractUploadMiddleware, (req, res) => {
         throw new Error(`合同编号 ${finalNo} 已被其他记录占用`);
       }
 
+      // 优先同步重命名旧文件与 related 子文件夹
+      const syncedOldAttachmentPath = syncContractFilesOnRename(
+        id,
+        existing.contract_no,
+        existing.contract_name,
+        finalNo,
+        contractName,
+        existing.attachment_path
+      );
+
       let attMeta = {
-        attachment_path: existing.attachment_path,
+        attachment_path: syncedOldAttachmentPath,
         attachment_original_name: existing.attachment_original_name,
         attachment_size: existing.attachment_size
       };
+
       if (mainFileObj) {
-        if (existing.attachment_path) oldMainToDelete = existing.attachment_path;
+        if (syncedOldAttachmentPath) oldMainToDelete = syncedOldAttachmentPath;
         attMeta = archiveMainContractAttachment(mainFileObj, finalNo, contractName) || attMeta;
         if (attMeta.attachment_path) savedMainFile = attMeta.attachment_path;
       }
@@ -1369,6 +1516,40 @@ app.put('/api/contracts/:id', contractUploadMiddleware, (req, res) => {
   }
 });
 
+// 详情弹窗内直接补传/替换主合同扫描件
+app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const existing = STMTS.getContractById.get(id);
+    if (!existing) {
+      cleanupReqTempFiles(req);
+      return res.status(404).json({ success: false, message: '合同不存在' });
+    }
+    if (!req.file) {
+      return res.status(400).json({ success: false, message: '未选择文件' });
+    }
+    if (existing.attachment_path) {
+      deletePhysicalFile(existing.attachment_path);
+    }
+    const meta = archiveMainContractAttachment(req.file, existing.contract_no, existing.contract_name);
+    db.prepare(`
+      UPDATE contracts
+      SET attachment_path = ?, attachment_original_name = ?, attachment_size = ?, updated_at = datetime('now', 'localtime')
+      WHERE id = ?
+    `).run(meta.attachment_path, meta.attachment_original_name, meta.attachment_size, id);
+
+    cleanupReqTempFiles(req);
+    res.json({
+      success: true,
+      message: '主合同扫描件上传成功',
+      data: enrichContractRecord(STMTS.getContractById.get(id))
+    });
+  } catch (err) {
+    cleanupReqTempFiles(req);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
 app.post('/api/contracts/:id/related-files', upload.array('related_files', 25), (req, res) => {
   try {
     const id = Number(req.params.id);
@@ -1378,6 +1559,7 @@ app.post('/api/contracts/:id/related-files', upload.array('related_files', 25), 
       return res.status(404).json({ success: false, message: '合同不存在' });
     }
     archiveContractRelatedFiles(id, existing.contract_no, existing.contract_name, req.files || []);
+    cleanupReqTempFiles(req);
     res.json({
       success: true,
       message: '关联资料上传成功',
@@ -1612,6 +1794,15 @@ app.put('/api/procurements/:id', procUploadMiddleware, (req, res) => {
         throw new Error(`采购立项编号 ${finalProcNo} 已被占用`);
       }
 
+      // 优先同步重命名立项专属文件夹
+      syncProcurementFilesOnRename(
+        id,
+        existing.procurement_no,
+        existing.project_name,
+        finalProcNo,
+        projectName
+      );
+
       db.prepare(`
         UPDATE procurements SET
           procurement_no = ?, project_name = ?, project_type = ?, cost_department = ?,
@@ -1666,6 +1857,7 @@ app.post('/api/procurements/:id/files', procUploadMiddleware, (req, res) => {
       ...(req.files?.proc_files || [])
     ];
     archiveProcurementFiles(id, existing.procurement_no, existing.project_name, files);
+    cleanupReqTempFiles(req);
     res.json({
       success: true,
       message: '立项资料上传成功',
@@ -1832,7 +2024,6 @@ function createContractWorksheet(contracts) {
     ws[addr].f = fc.f;
   }
 
-  // 渲染表头与斑马纹样式
   const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:AG2');
   for (let R = range.s.r; R <= range.e.r; R++) {
     for (let C = range.s.c; C <= range.e.c; C++) {
@@ -2034,14 +2225,41 @@ app.get('/api/export/combined', (req, res) => {
   }
 });
 
+// 全局异常兜底与临时文件零残留清理中间件
+app.use((err, req, res, next) => {
+  cleanupReqTempFiles(req);
+  if (err instanceof multer.MulterError) {
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ success: false, message: '单个上传文件不能超过 50MB' });
+    }
+    return res.status(400).json({ success: false, message: `文件上传异常: ${err.message}` });
+  }
+  if (err) {
+    return res.status(400).json({ success: false, message: err.message || '请求处理失败' });
+  }
+  next();
+});
+
 // ==================== 14. 服务启动与优雅退出控制器（100% 兼容 main.js 与 test-smoke.js） ====================
 const activeSockets = new Set();
 let serverInstance = null;
 
+// 后台低频维护定时器（每 6 小时清理一次超时临时文件、孤儿附件并执行被动 WAL 截断与 GC）
+const maintenanceTimer = setInterval(() => {
+  try {
+    sweepOrphanUploads();
+    if (db && db.open) db.pragma('wal_checkpoint(PASSIVE)');
+    triggerSafeGC();
+  } catch (e) {}
+}, 6 * 60 * 60 * 1000);
+if (typeof maintenanceTimer.unref === 'function') maintenanceTimer.unref();
+
 function shutdown() {
   return new Promise((resolve) => {
     try {
+      clearInterval(maintenanceTimer);
       cleanTmpDir();
+      sweepOrphanUploads();
     } catch (e) {}
 
     for (const socket of activeSockets) {
