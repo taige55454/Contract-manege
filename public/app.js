@@ -1,22 +1,15 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.4.0 终极版)
- * 特性：
- * 1. 100% 适配原版精美 UI 结构与 CSS 类名
- * 2. 夹心式 4 段自定义分段编号器（[灰底前缀] + [穿插段] + [灰底日期段] + [零空洞流水号] + [灰底后缀]）
- * 3. 自定义下拉选项与预设词库引擎（8 大分类自由定制 + 历史老数据自动兜底防丢保护 + 一键恢复默认）
- * 4. 合同到期状态实时联动引擎（本地时区零点精准比对：手输或日历选择到期日时，自动在“生效中”与“已到期”间双向切换，保护“草稿/已终止”等特殊状态）
- * 5. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan) + 详情弹窗内三大资料直接补传/删除
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.4.1 完整无截断终极版)
  */
 
-let currentTab = 'contract'; // 'contract' | 'procurement'
+let currentTab = 'contract';
 let contractsCache = [];
 let procurementsCache = [];
 
-let defaultOurEntity = '毕节自营公司';
+let defaultOurEntity = 'ABC公司';
 let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
-// 默认值 100% 匹配原版 index.html 中的选项
 let dropdownPresets = {
   contract_types: ['采购', '服务', '销售', '框架', '其他'],
   contract_statuses: ['草稿', '生效中', '已到期', '已终止'],
@@ -35,16 +28,20 @@ let isSilentSyncing = false;
 
 const LAN_TOKEN_KEY = 'cm_lan_session_token';
 
-// 获取本地时区（北京时间）的 YYYY-MM-DD 字符串
 function getLocalTodayStr() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// ==================== 1. 鉴权请求封装与通用安全转义工具 ====================
+// 动态获取当前自定义预设中的“生效态”与“到期态”名称（支持用户改名为“履行中/已超期”等）
+function getDynamicContractStatusPair() {
+  const list = dropdownPresets.contract_statuses || ['草稿', '生效中', '已到期', '已终止'];
+  const activeLabel = list.find(s => /生效|履行|执行|正常|进行/.test(s)) || '生效中';
+  const expiredLabel = list.find(s => /到期|过期|期满|超期|逾期/.test(s)) || '已到期';
+  return { activeLabel, expiredLabel };
+}
+
+// ==================== 1. 鉴权请求封装与安全转义工具 ====================
 function getLanToken() {
   return localStorage.getItem(LAN_TOKEN_KEY) || '';
 }
@@ -121,7 +118,7 @@ function parseSmartDateString(raw) {
   return str;
 }
 
-// 当修改合同表单的“合同到期日”时，实时联动“合同状态”下拉框
+// 修改“合同到期日”时，自动根据当前预设词库中的“生效态/到期态”双向联动
 function syncContractStatusByExpiryDate(expiryDateVal) {
   const exp = String(expiryDateVal || '').trim();
   if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return;
@@ -129,10 +126,12 @@ function syncContractStatusByExpiryDate(expiryDateVal) {
   if (!statusSel) return;
 
   const today = getLocalTodayStr();
-  if (exp < today && statusSel.value === '生效中') {
-    setSelectValueWithFallback('f_status', '已到期');
-  } else if (exp >= today && statusSel.value === '已到期') {
-    setSelectValueWithFallback('f_status', '生效中');
+  const { activeLabel, expiredLabel } = getDynamicContractStatusPair();
+
+  if (exp < today && (statusSel.value === activeLabel || statusSel.value === '生效中')) {
+    setSelectValueWithFallback('f_status', expiredLabel);
+  } else if (exp >= today && (statusSel.value === expiredLabel || statusSel.value === '已到期')) {
+    setSelectValueWithFallback('f_status', activeLabel);
   }
 }
 
@@ -208,14 +207,22 @@ function setSelectValueWithFallback(selectId, val) {
 }
 
 function applyDropdownPresetsToDOM() {
+  // 保底确保 contract_statuses 里至少有一个“生效态”和“到期态”，防止筛选框缺失“已到期”
+  const rawStatuses = dropdownPresets.contract_statuses || ['草稿', '生效中', '已到期', '已终止'];
+  if (!rawStatuses.some(s => /生效|履行|执行|正常|进行/.test(s))) rawStatuses.push('生效中');
+  if (!rawStatuses.some(s => /到期|过期|期满|超期|逾期/.test(s))) rawStatuses.push('已到期');
+  dropdownPresets.contract_statuses = rawStatuses;
+
+  const { activeLabel } = getDynamicContractStatusPair();
+
   populateSelectWithOptions('filter_type', dropdownPresets.contract_types, '全部类型');
   populateSelectWithOptions('filter_status', dropdownPresets.contract_statuses, '全部状态');
   populateSelectWithOptions('proc_filter_type', dropdownPresets.project_types, '全部立项类型');
 
-  populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null, '采购');
-  populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null, '生效中');
-  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null, '服务类项目');
-  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null, '小额零星采购');
+  populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null, dropdownPresets.contract_types[0] || '采购');
+  populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null, activeLabel);
+  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null, dropdownPresets.project_types[0] || '服务类项目');
+  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null, dropdownPresets.procurement_types[0] || '小额零星采购');
 
   populateDatalistWithOptions('dept_list', dropdownPresets.cost_departments);
   populateDatalistWithOptions('budget_subject_list', dropdownPresets.budget_subjects);
@@ -252,10 +259,15 @@ function closePresetsModal() {
 
 async function savePresetsForm(e) {
   e.preventDefault();
+  let statusInput = document.getElementById('preset_contract_statuses').value;
+  const statusItems = statusInput.split(/[\r\n,，、;；]+/).map(s => s.trim()).filter(Boolean);
+  if (!statusItems.some(s => /生效|履行|执行|正常|进行/.test(s))) statusItems.push('生效中');
+  if (!statusItems.some(s => /到期|过期|期满|超期|逾期/.test(s))) statusItems.push('已到期');
+
   const payload = {
     presets: {
       contract_types: document.getElementById('preset_contract_types').value,
-      contract_statuses: document.getElementById('preset_contract_statuses').value,
+      contract_statuses: statusItems,
       project_types: document.getElementById('preset_project_types').value,
       cost_departments: document.getElementById('preset_cost_departments').value,
       procurement_types: document.getElementById('preset_procurement_types').value,
@@ -274,6 +286,7 @@ async function savePresetsForm(e) {
     dropdownPresets = json.presets;
     applyDropdownPresetsToDOM();
     closePresetsModal();
+    await loadContracts();
   }
 }
 
@@ -305,13 +318,10 @@ function initYearDropdowns() {
 
 async function switchModuleTab(tab) {
   currentTab = tab === 'procurement' ? 'procurement' : 'contract';
-
   document.getElementById('tab_btn_contract')?.classList.toggle('active', currentTab === 'contract');
   document.getElementById('tab_btn_procurement')?.classList.toggle('active', currentTab === 'procurement');
-
   document.getElementById('header_group_contract')?.classList.toggle('hidden', currentTab !== 'contract');
   document.getElementById('header_group_procurement')?.classList.toggle('hidden', currentTab !== 'procurement');
-
   document.getElementById('view_contract')?.classList.toggle('hidden', currentTab !== 'contract');
   document.getElementById('view_procurement')?.classList.toggle('hidden', currentTab !== 'procurement');
 
@@ -846,7 +856,6 @@ function addCounterpartyCard(data = {}) {
         <label>履约摘要(各写各的)</label>
         <input type="text" class="cp-summary" value="${escapeHtml(data.summary || '')}" placeholder="本单位负责标的内容" />
       </div>
-
       <div class="form-group">
         <label>联系人</label>
         <input type="text" class="cp-person" value="${escapeHtml(data.contact_person || '')}" />
@@ -863,7 +872,6 @@ function addCounterpartyCard(data = {}) {
         <label>收款银行账号 & 开户行</label>
         <input type="text" class="cp-bank-no" value="${escapeHtml(data.bank_account_no || '')}" placeholder="账号 / 开户行" />
       </div>
-
       <div class="form-group">
         <label>含税金额 (元)</label>
         <input type="number" step="0.01" class="cp-amount" value="${data.amount ?? ''}" oninput="calcExclTaxForCard(this)" />
@@ -880,7 +888,6 @@ function addCounterpartyCard(data = {}) {
         <label>发票类型</label>
         <input type="text" class="cp-invoice" list="invoice_type_list" value="${escapeHtml(data.invoice_type || defaultInv)}" />
       </div>
-
       <div class="form-group">
         <label>履约保证金 (元)</label>
         <input type="number" step="0.01" class="cp-perf-amt" value="${data.perf_bond_amount || 0}" />
@@ -982,6 +989,7 @@ async function openFormModal(editId = null) {
   document.getElementById('counterparties_container').innerHTML = '';
 
   const today = getLocalTodayStr();
+  const { activeLabel } = getDynamicContractStatusPair();
 
   if (!editId) {
     document.getElementById('form_id').value = '';
@@ -990,7 +998,7 @@ async function openFormModal(editId = null) {
     document.getElementById('f_sign_date').value = today;
     document.getElementById('f_start_date').value = today;
     document.getElementById('f_expiry_date').value = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
-    setSelectValueWithFallback('f_status', '生效中');
+    setSelectValueWithFallback('f_status', activeLabel);
     document.getElementById('seg_mid_custom_input').value = contractRule.default_mid || '';
     toggleFreeContractNoMode(false);
     addCounterpartyCard();
@@ -1050,9 +1058,7 @@ async function submitContractForm(e) {
     fd.append('counterparties_json', JSON.stringify(collectCounterpartiesFromDOM()));
 
     const attInput = document.getElementById('f_attachment');
-    if (attInput && attInput.files[0]) {
-      fd.append('attachment', attInput.files[0]);
-    }
+    if (attInput && attInput.files[0]) fd.append('attachment', attInput.files[0]);
     const relInput = document.getElementById('f_related_files');
     if (relInput && relInput.files.length > 0) {
       for (const f of relInput.files) fd.append('related_files', f);
@@ -1540,4 +1546,98 @@ async function openDetailModal(mode, id) {
 }
 
 function previewFileInBox(relPath, title) {
-  const box = document.getElementById('preview_container我已准备好提供更多信息，但已达到回答词元数上限。您有任何具体问题希望我解答吗？
+  const box = document.getElementById('preview_container');
+  if (!box) return;
+  box.innerHTML = '';
+  const url = withTokenUrl(`/uploads/${encodeURI(relPath)}`);
+  const dlUrl = withTokenUrl(`/uploads/${encodeURI(relPath)}?download=1&filename=${encodeURIComponent(title)}`);
+  const ext = (relPath.split('.').pop() || '').toLowerCase();
+
+  if (ext === 'pdf') {
+    box.innerHTML = `<iframe src="${url}"></iframe>`;
+  } else if (['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(ext)) {
+    box.innerHTML = `<img src="${url}" alt="${escapeHtml(title)}" />`;
+  } else {
+    box.innerHTML = `
+      <div class="empty-preview">
+        <p>文件 <strong>${escapeHtml(title)}</strong> (${ext.toUpperCase()}) 不支持直接内嵌预览</p>
+        <p style="margin-top:12px;"><a class="btn btn-primary" href="${dlUrl}">📥 点击下载到本地查看</a></p>
+      </div>
+    `;
+  }
+}
+
+function closeDetailModal() {
+  document.getElementById('detail_modal').classList.remove('hidden');
+  document.getElementById('detail_modal').classList.add('hidden');
+  const box = document.getElementById('preview_container');
+  if (box) box.innerHTML = '';
+}
+
+// ==================== 11. Excel 导出动作绑定 ====================
+function exportExcel(mode) {
+  const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildContractQueryParams();
+  window.location.href = withTokenUrl(`/api/export/excel?${params.toString()}`);
+}
+
+function exportProcurementExcel(mode) {
+  const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildProcQueryParams();
+  window.location.href = withTokenUrl(`/api/procurements/export?${params.toString()}`);
+}
+
+function exportCombinedWorkbook() {
+  window.location.href = withTokenUrl('/api/export/combined');
+}
+
+// ==================== 12. 多机局域网协同：静默同步（带弹窗防打扰锁） ====================
+function hasOpenModal() {
+  const ids = [
+    'lan_auth_overlay', 'lan_security_modal', 'presets_modal',
+    'our_entity_modal', 'no_rule_modal', 'proc_no_rule_modal',
+    'form_modal', 'proc_form_modal', 'detail_modal'
+  ];
+  return ids.some(id => {
+    const el = document.getElementById(id);
+    return el && !el.classList.contains('hidden');
+  });
+}
+
+async function silentSyncAll() {
+  if (isSilentSyncing || isSubmitting || hasOpenModal()) return;
+  isSilentSyncing = true;
+  try {
+    await loadDropdownPresets();
+    if (currentTab === 'procurement') {
+      await loadProcNoRuleSettings();
+      await loadProcurements();
+    } else {
+      await loadContractNoRuleSettings();
+      await loadContracts();
+    }
+  } catch (e) {
+  } finally {
+    isSilentSyncing = false;
+  }
+}
+
+window.addEventListener('focus', () => silentSyncAll());
+setInterval(() => {
+  if (!document.hidden) silentSyncAll();
+}, 30000);
+
+// ==================== 13. 应用启动初始化 ====================
+async function initAppData() {
+  await loadDropdownPresets();
+  await loadOurEntitySetting();
+  await loadContractNoRuleSettings();
+  await loadProcNoRuleSettings();
+  await loadContracts();
+}
+
+window.addEventListener('DOMContentLoaded', async () => {
+  initYearDropdowns();
+  const ok = await checkLanAuthStatus();
+  if (ok) {
+    await initAppData();
+  }
+});
