@@ -14,6 +14,7 @@ const { startServer } = require('./server');
   console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (v2.4.2)...');
   const { port, shutdown } = await startServer(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${port}`;
+  let exitCode = 0;
 
   try {
     // 1. 验证采购立项夹心式编号生成
@@ -39,7 +40,7 @@ const { startServer } = require('./server');
     // 3. 先录入采购立项（含 Excel 序列号日期 46099 与预填合同号 XSZY-黔-BJ-202603003）+ 上传立项资料
     const pForm = new FormData();
     pForm.append('procurement_no', 'LX20260318002');
-    pForm.append('project_name', 'ABC产品邮寄配送服务采购');
+    pForm.append('project_name', '毕节自营公司产品邮寄配送服务采购');
     pForm.append('project_type', '服务类项目');
     pForm.append('cost_department', '省区费用预算');
     pForm.append('budget_amount', '300000');
@@ -47,7 +48,7 @@ const { startServer } = require('./server');
     pForm.append('approval_date', '46099');
     pForm.append('decision_date', '46100');
     pForm.append('completion_date', '46103');
-    pForm.append('supplier_name', '中国邮政速递物流股份有限公司');
+    pForm.append('supplier_name', '中国邮政速递物流股份有限公司毕节市分公司');
     pForm.append('deal_amount', '300000');
     pForm.append('has_contract', '是');
     pForm.append('contract_no_manual', 'XSZY-黔-BJ-202603003');
@@ -60,19 +61,19 @@ const { startServer } = require('./server');
     // 4. 后录入同编号合同 XSZY-黔-BJ-202603003（测试开户行、保证金、质保金、公共备注及双向自动挂钩）
     const cForm = new FormData();
     cForm.append('contract_no', 'XSZY-黔-BJ-202603003');
-    cForm.append('contract_name', 'ABC公司产品邮寄配送服务合同');
+    cForm.append('contract_name', '毕节自营公司产品邮寄配送服务合同');
     cForm.append('contract_type', '服务');
     cForm.append('status', '履行中');
-    cForm.append('our_entity', 'ABC公司');
+    cForm.append('our_entity', '毕节自营公司');
     cForm.append('sign_date', '2026.3.20');
     cForm.append('start_date', '2026.3.20');
-    cForm.append('expiry_date', '2020-01-01'); // 故意传过去日期，测试是否自动流转为自定义到期态“已超期”
+    cForm.append('expiry_date', '2020-01-01');
     cForm.append('remark', '主表整份合同公共备注');
     cForm.append('counterparties_json', JSON.stringify([{
-      company_name: '中国邮政速递物流股份有限公司',
+      company_name: '中国邮政速递物流股份有限公司毕节市分公司',
       credit_code: '91522400MA6XXXXXXX',
       bank_account_no: '52001658800052500000',
-      bank_name: '中国邮政储蓄银行xx市分行',
+      bank_name: '中国邮政储蓄银行毕节市分行',
       amount: 300000,
       tax_rate: '6',
       currency: 'CNY',
@@ -114,16 +115,20 @@ const { startServer } = require('./server');
     const wsContract = wb.Sheets['合同台账'];
     const wsProc = wb.Sheets['采购项目台账'];
 
-    assert.strictEqual(wsContract['R3'].v, '中国邮政储蓄银行xx市分行', 'Excel R列应独立导出开户银行');
+    assert.strictEqual(wsContract['R3'].v, '中国邮政储蓄银行毕节市分行', 'Excel R列应独立导出开户银行');
     assert.strictEqual(wsContract['AA3'].v, 9000, 'Excel AA列应导出质保金金额');
     assert.ok(wsContract['AD3'].v.includes('分项履约备注；主表整份合同公共备注'), 'Excel AD列应合并导出分项与主表备注');
     assert.ok(wsContract['AE3'].f.includes('HYPERLINK("uploads/'));
     assert.ok(wsProc['R3'].f.includes('HYPERLINK("uploads/procurement/'));
     console.log('✅ [通过] 双子表同时导出 + 开户行/质保金/合并备注 + 相对路径超链接公式验证成功');
 
+  } catch (err) {
+    console.error('❌ 冒烟测试失败:', err);
+    exitCode = 1;
   } finally {
     await shutdown();
     fs.rmSync(tempDir, { recursive: true, force: true });
-    console.log('🧹 测试环境与数据库句柄已 100% 释放完毕！全部测试通过！');
+    console.log('🧹 测试环境与数据库句柄已 100% 释放完毕！');
+    process.exit(exitCode);
   }
 })();
