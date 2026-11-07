@@ -9,19 +9,45 @@ const app = express();
 app.disable('x-powered-by');
 app.set('etag', false);
 
+// 安全响应头加固
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  next();
+});
+
 // 1. 解析可读写的数据根目录
-const DATA_ROOT = process.env.DATA_ROOT || __dirname;
+const DATA_ROOT = path.resolve(process.env.DATA_ROOT || __dirname);
 const UPLOAD_DIR = path.join(DATA_ROOT, 'uploads');
 const TMP_UPLOAD_DIR = path.join(UPLOAD_DIR, '.tmp');
 
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(TMP_UPLOAD_DIR)) fs.mkdirSync(TMP_UPLOAD_DIR, { recursive: true });
 
+// 主动触发安全 GC（当启动参数含 --expose-gc 时生效）
+function triggerSafeGC() {
+  if (typeof global.gc === 'function') {
+    setImmediate(() => {
+      try { global.gc(); } catch (e) {}
+    });
+  }
+}
+
+// 获取本地时区当天日期字符串 (YYYY-MM-DD)，修复 toISOString() 在早上 8 点前差一天的时区 Bug
+function getLocalTodayStr() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+// 清理临时上传目录 .tmp
 function cleanTmpDir() {
   if (!fs.existsSync(TMP_UPLOAD_DIR)) return;
   try {
     for (const file of fs.readdirSync(TMP_UPLOAD_DIR)) {
-      fs.unlinkSync(path.join(TMP_UPLOAD_DIR, file));
+      try { fs.unlinkSync(path.join(TMP_UPLOAD_DIR, file)); } catch (e) {}
     }
   } catch (e) {}
 }
@@ -40,15 +66,15 @@ app.use('/uploads', express.static(UPLOAD_DIR, {
   }
 }));
 
-// 3. 初始化 SQLite 数据库（配置极低内存占用 PRAGMA）
+// 3. 初始化 SQLite 数据库（配置极低内存占用与外键级联保护）
 const dbPath = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
 const db = new Database(dbPath);
+db.pragma('foreign_keys = ON');
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('temp_store = MEMORY');
-db.pragma('cache_size = -4000'); // 限制页缓存为 4MB，降低常驻内存
-db.pragma('mmap_size = 0');      // 关闭 mmap 映射，防止操作系统计入进程私有工作集内存
-db.pragma('foreign_keys = ON');
+db.pragma('cache_size = -4000'); // 严格限制页缓存为 4MB
+db.pragma('mmap_size = 0');      // 关闭 mmap 映射，防止虚增进程工作集内存
 
 const DEFAULT_NO_RULE = JSON.stringify({
   prefix: 'HT-',
@@ -165,8 +191,56 @@ function ensureSchemaUpgraded() {
   addPartyColIfMissing('warranty_bond_amount', 'REAL DEFAULT NULL');
   addPartyColIfMissing('warranty_bond_expiry_date', "TEXT DEFAULT ''");
   addPartyColIfMissing('remark', "TEXT DEFAULT ''");
+
+  // 清理可能因为历史版本遗留的无主子表记录
+  db.exec(`DELETE FROM contract_parties WHERE contract_id NOT IN (SELECT id FROM contracts)`);
 }
 ensureSchemaUpgraded();
+
+// ==================== 高频 SQL 预编译缓存池 (Prepared Statements) ====================
+const STMTS = {
+  getSetting: db.prepare(`SELECT value FROM app_settings WHERE key = ?`),
+  upsertSetting: db.prepare(`INSERT INTO app_settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`),
+  getAllContractNos: db.prepare(`SELECT contract_no FROM contracts`),
+  getAllForSeq: db.prepare(`SELECT id, sign_date FROM contracts ORDER BY sign_date ASC, id ASC`),
+  updateSeq: db.prepare(`UPDATE contracts SET seq_year = ?, seq_no = ?, seq_label = ? WHERE id = ?`),
+  getDistinctYears: db.prepare(`SELECT DISTINCT seq_year FROM contracts WHERE seq_year IS NOT NULL ORDER BY seq_year DESC`),
+  getContractById: db.prepare(`SELECT * FROM contracts WHERE id = ?`),
+  deleteContractById: db.prepare(`DELETE FROM contracts WHERE id = ?`),
+  deletePartiesByContractId: db.prepare(`DELETE FROM contract_parties WHERE contract_id = ?`),
+  insertParty: db.prepare(`
+    INSERT INTO contract_parties (
+      contract_id, party_index, company_name, credit_code, contact_person, contact_phone,
+      bank_account_name, bank_account_no, bank_name, bank_code,
+      item_summary, amount, amount_excl_tax, tax_rate, invoice_type, currency,
+      perf_bond_amount, perf_bond_pay_date, perf_bond_return_date,
+      warranty_bond_amount, warranty_bond_expiry_date, remark
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `),
+  getAllAttachmentPaths: db.prepare(`SELECT attachment_path FROM contracts WHERE attachment_path IS NOT NULL AND attachment_path != ''`)
+};
+
+/**
+ * 自动清扫孤儿扫描件（防止异常中断或历史操作导致的磁盘垃圾文件堆积）
+ */
+function sweepOrphanUploads() {
+  if (!fs.existsSync(UPLOAD_DIR)) return;
+  try {
+    const referencedSet = new Set(
+      STMTS.getAllAttachmentPaths.all()
+        .map(r => path.basename(String(r.attachment_path)).toLowerCase())
+    );
+    const entries = fs.readdirSync(UPLOAD_DIR, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.isFile()) {
+        if (!referencedSet.has(entry.name.toLowerCase())) {
+          try { fs.unlinkSync(path.join(UPLOAD_DIR, entry.name)); } catch (e) {}
+        }
+      }
+    }
+  } catch (e) {}
+}
+sweepOrphanUploads();
 
 // ==================== 智能日期、智能税率与按年断号重编核心函数 ====================
 
@@ -248,7 +322,7 @@ function validateAndNormalizeTaxRate(taxRateRaw) {
 }
 
 function getContractNoRule() {
-  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'contract_no_rule'`).get();
+  const row = STMTS.getSetting.get('contract_no_rule');
   let parsed = {};
   try {
     parsed = row ? JSON.parse(row.value) : {};
@@ -266,11 +340,10 @@ function getContractNoRule() {
   };
 }
 
-const updateSeqStmt = db.prepare(`UPDATE contracts SET seq_year = ?, seq_no = ?, seq_label = ? WHERE id = ?`);
 const recalculateAllSequences = db.transaction(() => {
   const rule = getContractNoRule();
   const resetYearly = rule.reset_yearly !== false;
-  const rows = db.prepare(`SELECT id, sign_date FROM contracts ORDER BY sign_date ASC, id ASC`).all();
+  const rows = STMTS.getAllForSeq.all();
 
   const yearCounters = {};
   let globalCounter = 0;
@@ -283,11 +356,11 @@ const recalculateAllSequences = db.transaction(() => {
       yearCounters[year] = (yearCounters[year] || 0) + 1;
       const seqNo = yearCounters[year];
       const seqLabel = `${year}-${String(seqNo).padStart(3, '0')}`;
-      updateSeqStmt.run(year, seqNo, seqLabel, r.id);
+      STMTS.updateSeq.run(year, seqNo, seqLabel, r.id);
     } else {
       globalCounter += 1;
       const seqLabel = String(globalCounter).padStart(3, '0');
-      updateSeqStmt.run(year, globalCounter, seqLabel, r.id);
+      STMTS.updateSeq.run(year, globalCounter, seqLabel, r.id);
     }
   }
 });
@@ -326,7 +399,7 @@ function generateNextContractNoParts(customRule = null, signDateStr = '') {
   const tail = suffix;
   const digits = Number(rule.seq_digits || 0);
 
-  const allNos = db.prepare(`SELECT contract_no FROM contracts`).all().map(r => r.contract_no);
+  const allNos = STMTS.getAllContractNos.all().map(r => r.contract_no);
   let maxSeq = 0;
 
   for (const no of allNos) {
@@ -383,24 +456,33 @@ function buildStandardAttachmentName(contractNo, contractName, signDate, ext) {
   return `${safeNo}+${safeName}+${safeDate}${cleanExt}`;
 }
 
+// 严格边界校验的物理文件安全删除
 function removeFileIfExists(relativePath) {
   if (!relativePath) return;
   const fullPath = path.resolve(DATA_ROOT, relativePath);
-  if (!fullPath.startsWith(UPLOAD_DIR)) return;
+  const uploadDirWithSep = UPLOAD_DIR.endsWith(path.sep) ? UPLOAD_DIR : UPLOAD_DIR + path.sep;
+  if (fullPath !== UPLOAD_DIR && !fullPath.startsWith(uploadDirWithSep)) return;
   if (fs.existsSync(fullPath)) {
     try { fs.unlinkSync(fullPath); } catch (err) { console.error('删除文件失败:', err.message); }
   }
 }
 
+// 安全移动文件（防止 Windows 大小写不敏感文件系统下同路径误删）
 function moveFileSafe(srcPath, destPath) {
-  if (fs.existsSync(destPath)) {
-    try { fs.unlinkSync(destPath); } catch (e) {}
+  const absSrc = path.resolve(srcPath);
+  const absDest = path.resolve(destPath);
+  if (absSrc === absDest) return;
+
+  const isSameFileIgnoreCase = process.platform === 'win32' && absSrc.toLowerCase() === absDest.toLowerCase();
+
+  if (!isSameFileIgnoreCase && fs.existsSync(absDest)) {
+    try { fs.unlinkSync(absDest); } catch (e) {}
   }
   try {
-    fs.renameSync(srcPath, destPath);
+    fs.renameSync(absSrc, absDest);
   } catch (err) {
-    fs.copyFileSync(srcPath, destPath);
-    fs.unlinkSync(srcPath);
+    fs.copyFileSync(absSrc, absDest);
+    try { fs.unlinkSync(absSrc); } catch (e) {}
   }
 }
 
@@ -598,20 +680,10 @@ function buildQuery(queryParams, defaultSortOrder = 'ASC') {
   return { sql, params };
 }
 
-const syncPartiesStmt = db.prepare(`
-  INSERT INTO contract_parties (
-    contract_id, party_index, company_name, credit_code, contact_person, contact_phone,
-    bank_account_name, bank_account_no, bank_name, bank_code,
-    item_summary, amount, amount_excl_tax, tax_rate, invoice_type, currency,
-    perf_bond_amount, perf_bond_pay_date, perf_bond_return_date,
-    warranty_bond_amount, warranty_bond_expiry_date, remark
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-`);
-
 function syncContractParties(contractId, partiesList) {
-  db.prepare(`DELETE FROM contract_parties WHERE contract_id = ?`).run(contractId);
+  STMTS.deletePartiesByContractId.run(contractId);
   for (const p of partiesList) {
-    syncPartiesStmt.run(
+    STMTS.insertParty.run(
       contractId, p.party_index, p.company_name, p.credit_code, p.contact_person, p.contact_phone,
       p.bank_account_name, p.bank_account_no, p.bank_name, p.bank_code,
       p.item_summary ? String(p.item_summary).trim() : '',
@@ -653,10 +725,6 @@ function getContractPartiesList(row) {
   return parties;
 }
 
-/**
- * 将 "YYYY-MM-DD" 转换为 Excel 原生纯整数日期序列号（不含任何小数位，彻底根除 12:00:43 等时分秒显示）
- * Excel 1900 日期系统基准：1970-01-01 对应序列号 25569
- */
 function dateStrToExcelSerialInt(dateStr) {
   if (!dateStr || !String(dateStr).trim()) return null;
   const m = String(dateStr).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
@@ -671,14 +739,14 @@ function dateStrToExcelSerialInt(dateStr) {
 // ==================== API 路由 ====================
 
 app.get('/api/settings/our-entity', (req, res) => {
-  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
+  const row = STMTS.getSetting.get('default_our_entity');
   res.json({ success: true, default_our_entity: row ? row.value : '' });
 });
 
 app.put('/api/settings/our-entity', (req, res) => {
   const val = String(req.body.default_our_entity || '').trim();
   if (!val) return res.status(400).json({ success: false, message: '默认我方主体名称不能为空' });
-  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('default_our_entity', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(val);
+  STMTS.upsertSetting.run('default_our_entity', val);
   res.json({ success: true, default_our_entity: val, message: '默认我方主体已更新' });
 });
 
@@ -700,8 +768,7 @@ app.put('/api/settings/contract-no-rule', (req, res) => {
   const reset_yearly = req.body.reset_yearly !== false && req.body.reset_yearly !== 'false';
 
   const newRule = { prefix, date_part, seq_digits, suffix, reset_yearly };
-  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('contract_no_rule', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
-    .run(JSON.stringify(newRule));
+  STMTS.upsertSetting.run('contract_no_rule', JSON.stringify(newRule));
 
   recalculateAllSequences();
   const parts = generateNextContractNoParts(newRule);
@@ -718,21 +785,21 @@ app.get('/api/contracts', (req, res) => {
   try {
     const { sql, params } = buildQuery(req.query, 'ASC');
     const rows = db.prepare(sql).all(...params);
-    const yearsRows = db.prepare(`SELECT DISTINCT seq_year FROM contracts WHERE seq_year IS NOT NULL ORDER BY seq_year DESC`).all();
-    const years = yearsRows.map(r => r.seq_year);
+    const years = STMTS.getDistinctYears.all().map(r => r.seq_year);
     res.json({ success: true, data: rows, years });
   } catch (err) {
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-// ==================== [GET] 导出深度美化的 Excel 台账 ====================
-// 1. 强制按照序号 001、002 往下正序排列
-// 2. 日期采用纯整数 Excel Serial Number (yyyy-mm-dd)，彻底消除 12:00:43 时分秒
-// 3. 最后一列改为相对路径超链接 (uploads/xxx.pdf)，并在第1行生成醒目的目录结构说明横幅
+// ==================== [GET] 导出深度美化的 Excel 台账（带主动内存释放） ====================
 app.get('/api/contracts/export', (req, res) => {
+  let aoa = null;
+  let worksheet = null;
+  let workbook = null;
+  let buffer = null;
+
   try {
-    // 导出时强制按年度序号 001、002 往下正序排列 (ASC)
     const exportQuery = req.query.scope === 'all'
       ? { sort_by: 'seq_no', sort_order: 'ASC' }
       : { ...req.query, sort_by: 'seq_no', sort_order: 'ASC' };
@@ -788,7 +855,6 @@ app.get('/api/contracts/export', (req, res) => {
       right:  { style: 'thin', color: { rgb: 'CBD5E1' } }
     };
 
-    // 第 0 行（Excel 第1行）：醒目的扫描件超链接必要目录结构说明横幅
     const bannerText = '💡 【扫描件超链接使用说明】最后一列为相对路径超链接（指向 ./uploads/ 文件夹）。请将本 Excel 表放置在与【uploads】文件夹同级的目录下（例如直接放入程序数据目录 ContractData 下，或将本表与 uploads 文件夹一起打包拷贝），即可直接点击最后一列蓝色超链接打开合同扫描件！';
     const bannerRow = headers.map((_, idx) => ({
       v: idx === 0 ? bannerText : '',
@@ -801,7 +867,6 @@ app.get('/api/contracts/export', (req, res) => {
       }
     }));
 
-    // 第 1 行（Excel 第2行）：深蓝商务表头
     const headerRow = headers.map(h => ({
       v: h,
       t: 's',
@@ -813,8 +878,7 @@ app.get('/api/contracts/export', (req, res) => {
       }
     }));
 
-    const aoa = [bannerRow, headerRow];
-    // 合并第 0 行说明横幅（跨全部 30 列：c:0 -> c:29）
+    aoa = [bannerRow, headerRow];
     const merges = [
       { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
     ];
@@ -830,7 +894,6 @@ app.get('/api/contracts/export', (req, res) => {
         border: thinBorder
       };
 
-      // 1. 扫描件相对路径超链接列
       if (spec.type === 'link') {
         if (linkMeta && linkMeta.relPath) {
           baseStyle.font = {
@@ -853,7 +916,6 @@ app.get('/api/contracts/export', (req, res) => {
         return { v: '未上传', t: 's', s: baseStyle };
       }
 
-      // 2. 长数字编号/账号/信用代码：强制文本 '@'，严防科学计数法
       if (spec.type === 'code') {
         baseStyle.numFmt = '@';
         return {
@@ -863,7 +925,6 @@ app.get('/api/contracts/export', (req, res) => {
         };
       }
 
-      // 3. 金额列：会计数字格式 #,##0.00
       if (spec.type === 'money') {
         if (rawVal === null || rawVal === undefined || rawVal === '') {
           return { v: '', t: 's', s: baseStyle };
@@ -876,7 +937,6 @@ app.get('/api/contracts/export', (req, res) => {
         return { v: String(rawVal), t: 's', s: baseStyle };
       }
 
-      // 4. 日期列：使用纯整数 Excel 日期序列号 (t: 'n', numFmt: 'yyyy-mm-dd')，彻底杜绝时分秒
       if (spec.type === 'date') {
         if (!rawVal || !String(rawVal).trim()) {
           return { v: '', t: 's', s: baseStyle };
@@ -889,7 +949,6 @@ app.get('/api/contracts/export', (req, res) => {
         return { v: String(rawVal).trim(), t: 's', s: baseStyle };
       }
 
-      // 5. 普通文本列
       return {
         v: rawVal !== null && rawVal !== undefined ? String(rawVal) : '',
         t: 's',
@@ -897,7 +956,6 @@ app.get('/api/contracts/export', (req, res) => {
       };
     }
 
-    // 数据行从索引 2 开始（因为 0 是横幅说明，1 是表头）
     let currentRowIdx = 2;
 
     rows.forEach((row, contractIndex) => {
@@ -943,7 +1001,7 @@ app.get('/api/contracts/export', (req, res) => {
           p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined ? p.warranty_bond_amount : '',
           p.warranty_bond_expiry_date || '',
           p.remark || row.remark || '',
-          '' // 第 29 列通过 linkMeta 专门渲染超链接
+          ''
         ];
 
         const styledRow = rawValues.map((val, colIdx) => buildStyledCell(val, colIdx, bgRgb, colIdx === 29 ? linkMeta : null));
@@ -963,27 +1021,42 @@ app.get('/api/contracts/export', (req, res) => {
       }
     });
 
-    const worksheet = XLSX.utils.aoa_to_sheet(aoa);
+    worksheet = XLSX.utils.aoa_to_sheet(aoa);
     worksheet['!merges'] = merges;
     worksheet['!cols'] = colSpecs.map(c => ({ wch: c.wch }));
     worksheet['!rows'] = rowHeights;
 
-    const workbook = XLSX.utils.book_new();
+    workbook = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(workbook, worksheet, '合同台账');
 
-    const buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
-    const fileName = encodeURIComponent(`合同台账_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    buffer = XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' });
+    const fileName = encodeURIComponent(`合同台账_${getLocalTodayStr()}.xlsx`);
+
+    // 立即解除大型中间对象引用，协助 V8 垃圾回收器释放内存
+    aoa = null;
+    worksheet = null;
+    workbook = null;
+
+    res.on('finish', () => {
+      buffer = null;
+      triggerSafeGC();
+    });
 
     res.setHeader('Content-Disposition', `attachment; filename="${fileName}"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.send(buffer);
   } catch (err) {
+    aoa = null;
+    worksheet = null;
+    workbook = null;
+    buffer = null;
+    triggerSafeGC();
     res.status(500).json({ success: false, message: '导出失败: ' + err.message });
   }
 });
 
 app.get('/api/contracts/:id', (req, res) => {
-  const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+  const row = STMTS.getContractById.get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该合同记录' });
   res.json({ success: true, data: row });
 });
@@ -1050,6 +1123,7 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
     });
 
     const newId = createTx();
+    if (req.file) triggerSafeGC();
     res.json({ success: true, id: newId, message: '合同新增成功' });
   } catch (err) {
     if (req.file && fs.existsSync(req.file.path)) {
@@ -1067,9 +1141,11 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
 app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
   let newlyArchivedFile = null;
   try {
-    const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+    const existing = STMTS.getContractById.get(req.params.id);
     if (!existing) {
-      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      if (req.file && fs.existsSync(req.file.path)) {
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+      }
       return res.status(404).json({ success: false, message: '合同不存在' });
     }
 
@@ -1145,6 +1221,7 @@ app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
     });
 
     updateTx();
+    if (req.file) triggerSafeGC();
     res.json({ success: true, message: '合同更新成功' });
   } catch (err) {
     if (req.file && fs.existsSync(req.file.path)) {
@@ -1158,20 +1235,27 @@ app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
 });
 
 app.delete('/api/contracts/:id', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+  const existing = STMTS.getContractById.get(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: '合同不存在' });
 
+  const deleteTx = db.transaction(() => {
+    STMTS.deletePartiesByContractId.run(req.params.id);
+    STMTS.deleteContractById.run(req.params.id);
+    recalculateAllSequences();
+  });
+  deleteTx();
   removeFileIfExists(existing.attachment_path);
-  db.prepare(`DELETE FROM contracts WHERE id = ?`).run(req.params.id);
-  recalculateAllSequences();
+
   res.json({ success: true, message: '合同及关联扫描件已删除' });
 });
 
 app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res) => {
   try {
-    const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+    const existing = STMTS.getContractById.get(req.params.id);
     if (!existing) {
-      if (req.file && fs.existsSync(req.file.path)) fs.unlinkSync(req.file.path);
+      if (req.file && fs.existsSync(req.file.path)) {
+        try { fs.unlinkSync(req.file.path); } catch (e) {}
+      }
       return res.status(404).json({ success: false, message: '合同不存在' });
     }
     if (!req.file) return res.status(400).json({ success: false, message: '请选择要上传的扫描件' });
@@ -1190,6 +1274,7 @@ app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res
       WHERE id = ?
     `).run(archived.attachment_path, archived.attachment_original_name, req.params.id);
 
+    triggerSafeGC();
     res.json({ success: true, message: '扫描件已按规范命名归档', data: archived });
   } catch (err) {
     if (req.file && fs.existsSync(req.file.path)) {
@@ -1200,7 +1285,7 @@ app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res
 });
 
 app.delete('/api/contracts/:id/attachment', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+  const existing = STMTS.getContractById.get(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: '合同不存在' });
 
   removeFileIfExists(existing.attachment_path);
@@ -1214,18 +1299,22 @@ app.delete('/api/contracts/:id/attachment', (req, res) => {
 });
 
 app.get('/api/contracts/:id/download', (req, res) => {
-  const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+  const existing = STMTS.getContractById.get(req.params.id);
   if (!existing || !existing.attachment_path) {
     return res.status(404).send('该合同尚未上传扫描件');
   }
   const fullPath = path.resolve(DATA_ROOT, existing.attachment_path);
-  if (!fullPath.startsWith(UPLOAD_DIR) || !fs.existsSync(fullPath)) {
+  const uploadDirWithSep = UPLOAD_DIR.endsWith(path.sep) ? UPLOAD_DIR : UPLOAD_DIR + path.sep;
+  if (!fullPath.startsWith(uploadDirWithSep) || !fs.existsSync(fullPath)) {
     return res.status(404).send('扫描件物理文件不存在');
   }
   res.download(fullPath, existing.attachment_original_name);
 });
 
 app.use((err, req, res, next) => {
+  if (req.file && req.file.path && fs.existsSync(req.file.path)) {
+    try { fs.unlinkSync(req.file.path); } catch (e) {}
+  }
   if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
     return res.status(400).json({ success: false, message: '扫描件大小不能超过 20MB' });
   }
@@ -1243,6 +1332,7 @@ function startServer(port = 0, host = '127.0.0.1') {
         server,
         shutdown: async () => {
           cleanTmpDir();
+          sweepOrphanUploads();
           if (typeof server.closeAllConnections === 'function') {
             server.closeAllConnections();
           }
@@ -1253,6 +1343,7 @@ function startServer(port = 0, host = '127.0.0.1') {
           await new Promise((resClose) => server.close(() => resClose()));
           if (db && db.open) {
             try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (e) {}
+            try { db.pragma('optimize'); } catch (e) {}
             try { db.close(); } catch (e) {}
           }
         }
@@ -1277,4 +1368,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { app, db, startServer };
+module.exports = { app, db, startServer, sweepOrphanUploads };
