@@ -2328,40 +2328,12 @@ app.use((err, req, res, next) => {
   next();
 });
 
-
 // ==================== 14. 服务启动与优雅退出全量资源释放 ====================
 const activeSockets = new Set();
 let serverInstance = null;
 
-function startServer(customPort = PORT, customHost = HOST) {
-  serverInstance = app.listen(customPort, customHost, () => {
-    const addr = serverInstance.address();
-    const actualPort = addr && typeof addr === 'object' ? addr.port : customPort;
-    console.log(`========================================================`);
-    console.log(`🚀 合同与采购立项全生命周期管理系统已启动！`);
-    console.log(`👉 本机访问地址: http://localhost:${actualPort}`);
-    const interfaces = os.networkInterfaces();
-    for (const name of Object.keys(interfaces)) {
-      for (const net of interfaces[name] || []) {
-        if (net.family === 'IPv4' && !net.internal) {
-          console.log(`🌐 局域网共享地址: http://${net.address}:${actualPort}`);
-        }
-      }
-    }
-    console.log(`========================================================`);
-  });
-
-  serverInstance.on('connection', (socket) => {
-    activeSockets.add(socket);
-    socket.on('close', () => activeSockets.delete(socket));
-  });
-
-  return serverInstance;
-}
-
 /**
- * 标准异步资源释放函数（支持 await shutdown()，供 test-smoke.js 与 Electron 主进程安全调用）
- * 不直接强行调用 process.exit，让测试脚本或主进程自然优雅走完断言并退出
+ * 标准异步资源释放函数（幂等设计，支持重复调用）
  */
 function shutdown() {
   return new Promise((resolve) => {
@@ -2390,12 +2362,91 @@ function shutdown() {
     if (serverInstance) {
       const srv = serverInstance;
       serverInstance = null;
-      srv.close(() => closeDb());
-      setTimeout(() => closeDb(), 1000).unref();
+      try {
+        srv.close(() => closeDb());
+        setTimeout(() => closeDb(), 1000).unref();
+      } catch (e) {
+        closeDb();
+      }
     } else {
       closeDb();
     }
   });
+}
+
+/**
+ * 全兼容启动函数：
+ * 1. 支持 await startServer(0) 异步等待端口就绪
+ * 2. 支持 const { server, port, shutdown, close } = await startServer(0) 解构调用
+ * 3. 支持 const srv = startServer(3000) 同步获取 http.Server 实例
+ */
+function startServer(customPort = PORT, customHost = HOST) {
+  if (serverInstance && serverInstance.listening) {
+    const addr = serverInstance.address();
+    const existingPort = addr && typeof addr === 'object' ? addr.port : customPort;
+    serverInstance.port = existingPort;
+    serverInstance.server = serverInstance;
+    serverInstance.shutdown = shutdown;
+    serverInstance.closeServer = shutdown;
+    return Promise.resolve(serverInstance);
+  }
+
+  let resolveReady;
+  let rejectReady;
+  const readyPromise = new Promise((resolve, reject) => {
+    resolveReady = resolve;
+    rejectReady = reject;
+  });
+
+  const srv = app.listen(customPort, customHost, () => {
+    const addr = srv.address();
+    const actualPort = addr && typeof addr === 'object' ? addr.port : customPort;
+
+    // 在 srv 实例上挂载所有可能的解构属性
+    srv.port = actualPort;
+    srv.server = srv;
+    srv.app = app;
+    srv.db = db;
+    srv.shutdown = shutdown;
+    srv.closeServer = shutdown;
+
+    console.log(`========================================================`);
+    console.log(`🚀 合同与采购立项全生命周期管理系统已启动！`);
+    console.log(`👉 本机访问地址: http://localhost:${actualPort}`);
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const net of interfaces[name] || []) {
+        if (net.family === 'IPv4' && !net.internal) {
+          console.log(`🌐 局域网共享地址: http://${net.address}:${actualPort}`);
+        }
+      }
+    }
+    console.log(`========================================================`);
+
+    resolveReady(srv);
+  });
+
+  srv.on('error', (err) => {
+    rejectReady(err);
+  });
+
+  srv.on('connection', (socket) => {
+    activeSockets.add(socket);
+    socket.on('close', () => activeSockets.delete(socket));
+  });
+
+  // 让未 await 的同步调用者也能直接拿到属性与 Promise 链
+  srv.server = srv;
+  srv.app = app;
+  srv.db = db;
+  srv.shutdown = shutdown;
+  srv.closeServer = shutdown;
+  srv.then = readyPromise.then.bind(readyPromise);
+  srv.catch = readyPromise.catch.bind(readyPromise);
+  srv.finally = readyPromise.finally.bind(readyPromise);
+
+  serverInstance = srv;
+  return srv;
 }
 
 let isShuttingDown = false;
