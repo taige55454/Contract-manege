@@ -1,13 +1,14 @@
 /**
- * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.3.0 生产满血终极版)
- * 100% 匹配 main.js + test-smoke.js + public/index.html + public/app.js
+ * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.4.0 生产终极版)
+ * 100% 匹配 main.js + test-smoke.js + 原版 public/index.html + public/app.js
  * 核心能力：
  * 1. 夹心式分段编号引擎（支持前缀 + 穿插自定义段 + 日期段 + 零空洞(Gap-Filling)流水号 + 后缀 + 并发撞号顺延）
  * 2. 顺序可逆的双向互锁引擎（无论先录采购预填合同号，还是先录合同后绑采购，均自动双向挂钩并穿透附件）
  * 3. 智能日期解析器（支持 Excel 序列号如 46099、点号 2026.3.18、斜杠、简写 3.18 自动转 YYYY-MM-DD）
- * 4. 三大文件物理隔离归档 + 改名自动同步文件夹 + 孤儿文件清道夫 + 优雅退出零句柄残留
+ * 4. 合同到期状态自动流转引擎（基于本地时区零点：过期自动由“生效中”流转为“已到期”，续签延长自动恢复“生效中”，严格保护“草稿/已终止”等特殊状态）
  * 5. 自定义下拉选项与预设词库引擎（8大分类自由增删改、一键恢复默认、多机实时同步）
- * 6. 基于 xlsx-js-style 的专业双子表导出（黄金自适应列宽 + 隔行斑马纹 + 合同表 AE/AF/AG 三列超链接 + 采购表 R/S 两列超链接）
+ * 6. 三大文件物理隔离归档 + 改名自动同步文件夹 + 孤儿文件清道夫 + 优雅退出零句柄残留
+ * 7. 基于 xlsx-js-style 的专业双子表导出（黄金自适应列宽 + 隔行斑马纹 + 合同表 AE/AF/AG 三列超链接 + 采购表 R/S 两列超链接）
  */
 
 const express = require('express');
@@ -61,14 +62,23 @@ function triggerSafeGC() {
   }
 }
 
+// 获取本地时区（如北京时间）的 YYYY-MM-DD 字符串，避免 UTC 时差导致早上 8 点前日期滞后一天
+function getLocalTodayStr() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
+
 // ==================== 2. 智能日期解析引擎（支持 Excel 序列号 46099 与 2026.3.18） ====================
 function normalizeSmartDate(rawInput, fallbackToday = false) {
   if (rawInput === null || rawInput === undefined) {
-    return fallbackToday ? new Date().toISOString().slice(0, 10) : '';
+    return fallbackToday ? getLocalTodayStr() : '';
   }
   const str = String(rawInput).trim();
   if (!str) {
-    return fallbackToday ? new Date().toISOString().slice(0, 10) : '';
+    return fallbackToday ? getLocalTodayStr() : '';
   }
 
   // 1. Excel 日期序列号（如 46099 -> 2026-03-18）
@@ -236,8 +246,48 @@ const STMTS = {
     INSERT INTO procurement_files (procurement_id, file_category, file_path, file_original_name, file_size, uploaded_at)
     VALUES (?, ?, ?, ?, ?, ?)
   `),
-  deleteProcFileById: db.prepare(`DELETE FROM procurement_files WHERE id = ?`)
+  deleteProcFileById: db.prepare(`DELETE FROM procurement_files WHERE id = ?`),
+
+  autoExpireContracts: db.prepare(`
+    UPDATE contracts
+    SET status = '已到期', updated_at = datetime('now', 'localtime')
+    WHERE status = '生效中'
+      AND expiry_date != ''
+      AND expiry_date < ?
+  `)
 };
+
+/**
+ * 合同到期状态自动流转引擎：
+ * 1. 自动扫描数据库中所有 status = '生效中' 且 expiry_date < 今天(本地时区) 的合同，将其批量更新为 '已到期'
+ * 2. 严格保护 '草稿'、'已终止'、'已解除' 等非生效状态，绝不误改
+ */
+function autoRefreshExpiredContractStatus() {
+  try {
+    const today = getLocalTodayStr();
+    STMTS.autoExpireContracts.run(today);
+  } catch (e) {}
+}
+
+/**
+ * 录入或编辑合同时，根据到期日智能校准合同状态：
+ * - 若到期日已过（expiryDate < today）且状态选的是 '生效中' -> 自动转为 '已到期'
+ * - 若续签/延长了到期日（expiryDate >= today）且原状态是 '已到期' -> 自动恢复为 '生效中'
+ */
+function computeSmartContractStatus(rawStatus, expiryDateStr) {
+  const status = String(rawStatus || '生效中').trim();
+  const exp = String(expiryDateStr || '').trim();
+  if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return status;
+
+  const today = getLocalTodayStr();
+  if (exp < today && status === '生效中') {
+    return '已到期';
+  }
+  if (exp >= today && status === '已到期') {
+    return '生效中';
+  }
+  return status;
+}
 
 // ==================== 4. 夹心式编号引擎与自定义下拉预设引擎 ====================
 const DEFAULT_CONTRACT_RULE = {
@@ -258,15 +308,16 @@ const DEFAULT_PROC_RULE = {
   reset_yearly: true
 };
 
+// 100% 匹配原版 index.html 的默认下拉预设词库
 const DEFAULT_DROPDOWN_PRESETS = {
-  contract_types: ['采购', '销售', '服务', '租赁', '劳动', '工程', '其他'],
-  contract_statuses: ['生效中', '履行完毕', '已解除', '待签署', '已归档'],
-  project_types: ['服务类项目', '物资采购类', '工程维保类', '信息化建设', '零星采购', '其他'],
-  cost_departments: ['综合部', '市场部', '财务部', '运营部', '揽投部', '寄递事业部', '渠道平台部', '安保部'],
-  procurement_types: ['小额零星采购', '分散采购', '集中采购', '单一来源采购', '紧急采购'],
-  procurement_methods: ['合作谈判', '询价采购', '竞争性磋商', '公开招标', '直接采购', '比选', '电商直购'],
-  budget_subjects: ['业务外包费', '办公费', '车辆运行维护费', '宣传营销费', '房屋租赁及物业费', '信息化运维费', '安全保卫费', '低值易耗品'],
-  invoice_types: ['增值税专用发票', '增值税普通发票', '免税普通发票', '财政票据/收据']
+  contract_types: ['采购', '服务', '销售', '框架', '其他'],
+  contract_statuses: ['草稿', '生效中', '已到期', '已终止'],
+  project_types: ['服务类项目', '货物类项目', '设备采购', '工程类项目', '其他'],
+  cost_departments: ['综合管理部', '省区费用预算', '市场营销部', '运营管理部', '财务部', '毕节自营店'],
+  procurement_types: ['小额零星采购', '二级集中采购', '一级集中采购', '分散采购', '其他'],
+  procurement_methods: ['合作谈判', '邀请竞争谈判', '公开竞争谈判', '邀请询比', '公开询比', '单一来源采购'],
+  budget_subjects: ['办公费', '运输费', '其他固定资产采购', '日常安全费用', '其他外包项目', '租赁费', '中介费', '装修费', '其他福利费'],
+  invoice_types: ['增值税专用发票', '增值税普通发票', '数电专票', '数电普票']
 };
 
 function normalizePresetArray(input, fallbackArr) {
@@ -549,6 +600,7 @@ const recalculateProcSeqNos = db.transaction(() => {
 
 recalculateContractSeqNos();
 recalculateProcSeqNos();
+autoRefreshExpiredContractStatus();
 
 // ==================== 5. 顺序可逆的双向互锁引擎 ====================
 function syncBidirectionalLinkFromContract(contractId, contractNo, explicitProcId) {
@@ -644,7 +696,7 @@ function decodeOriginalFilename(rawName) {
   try {
     if (/[\u4e00-\u9fa5]/.test(rawName)) return rawName;
     const decoded = Buffer.from(rawName, 'latin1').toString('utf8');
-    if (/[\u4e00-\u9fa5]/.test(decoded) || !decoded.includes('')) {
+    if (/[\u4e00-\u9fa5]/.test(decoded) || !decoded.includes('\ufffd')) {
       return decoded;
     }
   } catch (e) {}
@@ -1073,7 +1125,6 @@ app.post(['/api/settings/our-entity', '/api/settings/default-entity'], (req, res
   res.json({ success: true, our_entity: entity, message: '默认我方签约主体已更新' });
 });
 
-// 自定义下拉选项与预设词库读写接口
 app.get('/api/settings/presets', (req, res) => {
   res.json({
     success: true,
@@ -1089,7 +1140,7 @@ app.post('/api/settings/presets', (req, res) => {
       return res.json({
         success: true,
         presets: getDropdownPresets(),
-        message: '已恢复出厂默认下拉选项预设'
+        message: '已恢复默认下拉选项预设'
       });
     }
     const current = getDropdownPresets();
@@ -1148,7 +1199,7 @@ app.post(['/api/settings/no-rule', '/api/settings/contract-no-rule'], (req, res)
 
 app.get('/api/contracts/next-no', (req, res) => {
   const rule = getContractNoRule();
-  const signDate = req.query.sign_date || new Date().toISOString().slice(0, 10);
+  const signDate = req.query.sign_date || getLocalTodayStr();
   const midCustom = req.query.mid_custom !== undefined ? req.query.mid_custom : rule.default_mid;
   const parts = buildNextContractNo(rule, signDate, midCustom);
   res.json({
@@ -1193,10 +1244,9 @@ app.post(['/api/settings/proc-no-rule', '/api/settings/procurement-no-rule'], (r
   });
 });
 
-// test-smoke.js 第 1 步直接调用的核心接口：/api/procurements/next-no
 app.get('/api/procurements/next-no', (req, res) => {
   const rule = getProcNoRule();
-  const approvalDate = req.query.approval_date || new Date().toISOString().slice(0, 10);
+  const approvalDate = req.query.approval_date || getLocalTodayStr();
   const midCustom = req.query.mid_custom !== undefined ? req.query.mid_custom : rule.default_mid;
   const parts = buildNextProcNo(rule, approvalDate, midCustom);
   res.json({
@@ -1322,6 +1372,9 @@ function enrichProcurementRecord(row) {
 
 // ==================== 11. 合同台账 CRUD 路由 ====================
 function queryFilteredContracts(query = {}) {
+  // 每次查询或导出前，自动将已过期的“生效中”合同刷新为“已到期”
+  autoRefreshExpiredContractStatus();
+
   const rows = db.prepare(`SELECT * FROM contracts`).all();
   let list = rows.map(r => enrichContractRecord(r));
 
@@ -1396,6 +1449,7 @@ app.get('/api/contracts', (req, res) => {
 });
 
 app.get('/api/contracts/:id', (req, res) => {
+  autoRefreshExpiredContractStatus();
   const row = STMTS.getContractById.get(Number(req.params.id));
   if (!row) return res.status(404).json({ success: false, message: '合同不存在' });
   res.json({ success: true, data: enrichContractRecord(row) });
@@ -1415,11 +1469,12 @@ app.post('/api/contracts', contractUploadMiddleware, (req, res) => {
     let finalNo = String(req.body.contract_no || '').trim();
     const contractName = String(req.body.contract_name || '').trim();
     const contractType = String(req.body.contract_type || '采购').trim();
-    const status = String(req.body.status || '生效中').trim();
+    const rawStatus = String(req.body.status || '生效中').trim();
     const ourEntity = String(req.body.our_entity || req.body.party_a || getDefaultOurEntity()).trim();
     const signDate = normalizeSmartDate(req.body.sign_date, true);
     const startDate = normalizeSmartDate(req.body.start_date || signDate);
     const expiryDate = normalizeSmartDate(req.body.expiry_date || req.body.end_date || '');
+    const status = computeSmartContractStatus(rawStatus, expiryDate);
     const explicitProcId = req.body.procurement_id ? Number(req.body.procurement_id) : null;
     const remark = String(req.body.remark || '').trim();
 
@@ -1516,11 +1571,12 @@ app.put('/api/contracts/:id', contractUploadMiddleware, (req, res) => {
     const finalNo = String(req.body.contract_no || existing.contract_no).trim();
     const contractName = String(req.body.contract_name || existing.contract_name).trim();
     const contractType = String(req.body.contract_type || existing.contract_type).trim();
-    const status = String(req.body.status || existing.status).trim();
+    const rawStatus = String(req.body.status || existing.status).trim();
     const ourEntity = String(req.body.our_entity || existing.our_entity).trim();
     const signDate = normalizeSmartDate(req.body.sign_date || existing.sign_date, true);
     const startDate = normalizeSmartDate(req.body.start_date || existing.start_date);
-    const expiryDate = normalizeSmartDate(req.body.expiry_date || existing.expiry_date);
+    const expiryDate = normalizeSmartDate(req.body.expiry_date !== undefined ? req.body.expiry_date : existing.expiry_date);
+    const status = computeSmartContractStatus(rawStatus, expiryDate);
     const explicitProcId = req.body.procurement_id !== undefined
       ? (req.body.procurement_id ? Number(req.body.procurement_id) : null)
       : existing.procurement_id;
@@ -1997,7 +2053,6 @@ app.delete('/api/procurements/:id', (req, res) => {
 
 // ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎（黄金列宽 + 100% 匹配 test-smoke.js 断言） ====================
 function createContractWorksheet(contracts) {
-  // 33 列设计：前 30 列 (A~AD) 为详细业务数据，第 31~33 列 (AE, AF, AG) 为三大资料超链接！
   const headers = [
     '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
     '签订日期', '开始履约日', '合同到期日', '合同状态', '关联采购立项号',
@@ -2017,7 +2072,7 @@ function createContractWorksheet(contracts) {
     { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
   ];
 
-  let currentRowIdx = 2; // 第3行（0-based index = 2，即 Excel 的 Row 3，对应 AE3, AF3, AG3）
+  let currentRowIdx = 2; // Row 3 (0-based 2)，对应 AE3, AF3, AG3
   const rowGroupParity = [];
   const formulaCells = [];
 
@@ -2152,7 +2207,6 @@ function createContractWorksheet(contracts) {
 }
 
 function createProcurementWorksheet(procurements) {
-  // 19 列设计：前 17 列 (A~Q) 为采购台账核心列，第 18 列 (R) 为立项相关资料夹超链接，第 19 列 (S) 为关联合同扫描件超链接！
   const headers = [
     '序号', '采购立项编号', '采购项目名称', '立项类型', '费用承担部门',
     '采购预算(元)', '预算科目', '采购类型', '采购方式', '立项时间',
@@ -2172,7 +2226,7 @@ function createProcurementWorksheet(procurements) {
   const formulaCells = [];
 
   procurements.forEach((p, idx) => {
-    const rIdx = idx + 2; // 第一条数据在 Row 3 (rIdx = 2)，对应 R3, S3
+    const rIdx = idx + 2; // Row 3 (0-based 2)，对应 R3, S3
     const procFolderLink = `uploads/procurement/${buildFolderKey(p.procurement_no, p.project_name)}`;
     const contractScanLink = (p.linked_contract && p.linked_contract.attachment_path)
       ? `uploads/${p.linked_contract.attachment_path}`
@@ -2202,12 +2256,12 @@ function createProcurementWorksheet(procurements) {
 
     formulaCells.push({
       r: rIdx,
-      c: 17, // R 列 (0-based index 17)
+      c: 17, // R 列
       f: `HYPERLINK("${procFolderLink}","📁 打开立项资料夹")`
     });
     formulaCells.push({
       r: rIdx,
-      c: 18, // S 列 (0-based index 18)
+      c: 18, // S 列
       f: `HYPERLINK("${contractScanLink}","${(p.linked_contract && p.linked_contract.attachment_path) ? '📄 打开关联合同扫描件' : '未上传合同扫描件'}")`
     });
   });
@@ -2270,7 +2324,7 @@ app.get(['/api/export/excel', '/api/contracts/export'], (req, res) => {
     XLSX.utils.book_append_sheet(wb, ws, '合同台账');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
-    const fname = encodeURIComponent(`合同管理台账_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const fname = encodeURIComponent(`合同管理台账_${getLocalTodayStr()}.xlsx`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fname}`);
     res.send(buf);
@@ -2287,7 +2341,7 @@ app.get(['/api/procurements/export', '/api/export/procurements'], (req, res) => 
     XLSX.utils.book_append_sheet(wb, ws, '采购项目台账');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
-    const fname = encodeURIComponent(`采购项目台账_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const fname = encodeURIComponent(`采购项目台账_${getLocalTodayStr()}.xlsx`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fname}`);
     res.send(buf);
@@ -2296,7 +2350,6 @@ app.get(['/api/procurements/export', '/api/export/procurements'], (req, res) => 
   }
 });
 
-// test-smoke.js 第 5 步直接校验的双子表总台账导出接口
 app.get('/api/export/combined', (req, res) => {
   try {
     const contractList = queryFilteredContracts({});
@@ -2310,7 +2363,7 @@ app.get('/api/export/combined', (req, res) => {
     XLSX.utils.book_append_sheet(wb, wsProc, '采购项目台账');
 
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    const fname = encodeURIComponent(`企业合同与采购项目总台账_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    const fname = encodeURIComponent(`企业合同与采购项目总台账_${getLocalTodayStr()}.xlsx`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fname}`);
     res.send(buf);
@@ -2338,9 +2391,10 @@ app.use((err, req, res, next) => {
 const activeSockets = new Set();
 let serverInstance = null;
 
-// 后台低频维护定时器（每 6 小时清理一次超时临时文件、孤儿附件并执行被动 WAL 截断与 GC）
+// 后台低频维护定时器（每 6 小时清理一次超时临时文件、孤儿附件、刷新过期合同状态并执行 WAL 截断）
 const maintenanceTimer = setInterval(() => {
   try {
+    autoRefreshExpiredContractStatus();
     sweepOrphanUploads();
     if (db && db.open) db.pragma('wal_checkpoint(PASSIVE)');
     triggerSafeGC();
