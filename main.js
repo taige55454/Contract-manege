@@ -2,9 +2,17 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('
 const path = require('path');
 const fs = require('fs');
 
-// ==================== 0. 铬内核轻量化与低内存占用优化 ====================
+// ==================== 0. 铬内核深度轻量化与内存压降优化（稳定优先） ====================
 app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
+app.commandLine.appendSwitch('disable-background-timer-throttling');
+app.commandLine.appendSwitch('disable-extensions');
+app.commandLine.appendSwitch('disable-component-extensions-with-background-pages');
+app.commandLine.appendSwitch('disable-sync');
+app.commandLine.appendSwitch('disable-translate');
+app.commandLine.appendSwitch(' mute-audio');
+app.commandLine.appendSwitch('disk-cache-size', '1048576'); // 限制磁盘缓存 1MB，本地回环无需重复缓存
+app.commandLine.appendSwitch('media-cache-size', '1048576');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=128 --expose-gc');
 
 // ==================== 1. 强制单实例运行 (Single Instance Lock) ====================
 const gotTheLock = app.requestSingleInstanceLock();
@@ -75,19 +83,24 @@ async function createWindowAndTray(port, dataRoot) {
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      spellcheck: false, // 关闭英文拼写检查器以节省内存与 CPU
-      plugins: true      // 启用内置 PDF 扫描件预览插件
+      spellcheck: false,
+      enableWebSQL: false,
+      v8CacheOptions: 'none',
+      plugins: true // 保持内置 PDF 扫描件预览支持
     }
   });
 
   await mainWindow.loadURL(localUrl);
 
-  // 点击右上角 [X] 时隐藏到系统托盘，并清理多余渲染缓存降低后台内存
+  // 点击右上角 [X] 时隐藏到系统托盘，并主动回收内存
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
       mainWindow.hide();
       mainWindow.webContents.session.clearCache().catch(() => {});
+      if (typeof global.gc === 'function') {
+        try { global.gc(); } catch (e) {}
+      }
     }
   });
 
@@ -96,11 +109,11 @@ async function createWindowAndTray(port, dataRoot) {
   });
 
   tray = new Tray(appIcon);
-  tray.setToolTip('企业合同台账管理系统 (双击打开主窗口)');
+  tray.setToolTip('企业合同台账管理系统 (单击唤醒窗口)');
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '📂 打开合同台账桌面主界面',
+      label: '📂 打开合同台账主界面',
       click: () => {
         if (mainWindow) {
           mainWindow.show();
@@ -110,15 +123,15 @@ async function createWindowAndTray(port, dataRoot) {
       }
     },
     {
-      label: '🌐 在系统浏览器中打开网页版',
+      label: '🗄️ 打开数据与 uploads 扫描件目录 (Excel放此目录即可点击超链接)',
       click: () => {
-        shell.openExternal(localUrl);
+        shell.openPath(dataRoot);
       }
     },
     {
-      label: '🗄️ 打开本地数据与扫描件存储目录',
+      label: '🌐 在系统浏览器中打开网页版',
       click: () => {
-        shell.openPath(dataRoot);
+        shell.openExternal(localUrl);
       }
     },
     { type: 'separator' },
