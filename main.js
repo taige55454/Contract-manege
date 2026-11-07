@@ -1,6 +1,7 @@
 const { app, Tray, Menu, nativeImage, dialog, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 
 // ==================== 0. 纯浏览器模式：彻底禁用内置 GPU 硬件加速与渲染器冗余开销 ====================
 app.disableHardwareAcceleration();
@@ -22,9 +23,9 @@ let tray = null;
 let isShuttingDown = false;
 let backendController = null;
 let localAppUrl = '';
+let lanAppUrl = '';
 let dataRootDir = '';
 
-// 阻止无窗口时自动退出，保持后台超轻量级托盘服务常驻
 app.on('window-all-closed', () => {});
 
 function resolveDataRoot() {
@@ -41,6 +42,22 @@ function triggerMainGC() {
   if (typeof global.gc === 'function') {
     try { global.gc(); } catch (e) {}
   }
+}
+
+// 自动探测本机局域网 IPv4 地址（过滤虚拟网卡，优先选取真实局域网网卡）
+function getLocalLanIPv4() {
+  const nets = os.networkInterfaces();
+  const candidates = [];
+  for (const name of Object.keys(nets)) {
+    if (/vmware|virtualbox|vbox|hyper-v|wsl|docker|vethernet|loopback/i.test(name)) continue;
+    for (const net of nets[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        candidates.push(net.address);
+      }
+    }
+  }
+  const preferred = candidates.find(ip => ip.startsWith('192.168.')) || candidates[0];
+  return preferred || '127.0.0.1';
 }
 
 // 纯内存动态生成 16x16 像素系统托盘图标
@@ -64,7 +81,7 @@ function createBuiltinTrayIcon() {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
-// 安全调用系统默认浏览器打开合同台账页面（若系统未关联默认浏览器则自动复制网址并提示）
+// 安全调用系统默认浏览器打开本机免密管理界面
 function openInSystemBrowser() {
   if (localAppUrl && /^http:\/\/127\.0\.0\.1:\d+$/.test(localAppUrl)) {
     shell.openExternal(localAppUrl).catch(() => {
@@ -72,46 +89,55 @@ function openInSystemBrowser() {
       dialog.showMessageBox({
         type: 'info',
         title: '合同台账系统已启动',
-        message: `未检测到系统默认浏览器，已自动将系统网址复制到剪贴板：\n${localAppUrl}\n\n请打开任意浏览器粘贴访问。`
+        message: `未检测到系统默认浏览器，已自动将本机免密网址复制到剪贴板：\n${localAppUrl}\n\n内网其他电脑受口令保护访问地址（本次随机端口）：\n${lanAppUrl}`
       });
     });
     triggerMainGC();
   }
 }
 
-// 当用户再次双击 .exe 图标时，自动在系统浏览器中唤醒页面
 app.on('second-instance', () => {
   openInSystemBrowser();
 });
 
 // ==================== 2. 初始化系统托盘并自动弹出系统浏览器 ====================
 function setupTrayAndLaunchBrowser(port, dataRoot) {
+  const lanIp = getLocalLanIPv4();
   localAppUrl = `http://127.0.0.1:${port}`;
+  lanAppUrl = `http://${lanIp}:${port}`;
   dataRootDir = dataRoot;
 
   const appIcon = createBuiltinTrayIcon();
   tray = new Tray(appIcon);
-  tray.setToolTip(`企业合同台账管理系统 (纯浏览器极速模式: ${localAppUrl})`);
+  tray.setToolTip(`企业合同台账管理系统 (动态随机安全端口: ${port})\n本机免密: ${localAppUrl}\n内网凭口令访问: ${lanAppUrl}`);
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '🌐 在系统浏览器中打开合同台账主界面 (单击托盘图标亦可)',
+      label: '🌐 在系统浏览器中打开合同台账主界面 (本机免密直连)',
       click: () => {
         openInSystemBrowser();
       }
     },
     {
-      label: '🗄️ 打开数据与 uploads 扫描件/关联资料目录 (Excel放此目录可点超链接)',
+      label: `🔐 复制本次内网共享地址 (${lanAppUrl} — 需输入验证口令)`,
+      click: () => {
+        const latestIp = getLocalLanIPv4();
+        lanAppUrl = `http://${latestIp}:${port}`;
+        clipboard.writeText(lanAppUrl);
+      }
+    },
+    {
+      label: `📋 复制本机访问地址 (${localAppUrl})`,
+      click: () => {
+        clipboard.writeText(localAppUrl);
+      }
+    },
+    {
+      label: '🗄️ 打开本机数据与 uploads 扫描件/关联资料目录 (所有电脑上传的文件均存在此处)',
       click: () => {
         if (dataRootDir && fs.existsSync(dataRootDir)) {
           shell.openPath(dataRootDir);
         }
-      }
-    },
-    {
-      label: `📋 复制本地访问地址 (${localAppUrl})`,
-      click: () => {
-        clipboard.writeText(localAppUrl);
       }
     },
     { type: 'separator' },
@@ -186,7 +212,7 @@ process.on('unhandledRejection', (reason) => {
   console.error('未处理的 Promise 拒绝:', reason);
 });
 
-// ==================== 4. 启动应用入口 ====================
+// ==================== 4. 启动应用入口（每次启动使用动态随机端口 0 + 全网卡监听） ====================
 app.whenReady().then(async () => {
   try {
     const dataRoot = resolveDataRoot();
@@ -196,7 +222,9 @@ app.whenReady().then(async () => {
 
     process.env.DATA_ROOT = dataRoot;
     const { startServer } = require('./server');
-    backendController = await startServer(0, '127.0.0.1');
+
+    // 传入端口 0：每次启动由系统动态分配全新随机端口，结合内网口令锁双重保障安全
+    backendController = await startServer(0, '0.0.0.0');
 
     setupTrayAndLaunchBrowser(backendController.port, dataRoot);
   } catch (err) {
