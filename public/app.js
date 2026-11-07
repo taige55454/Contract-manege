@@ -1,12 +1,12 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.4.1 完整无截断终极版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.4.2 终极无瑕完整版)
  */
 
 let currentTab = 'contract';
 let contractsCache = [];
 let procurementsCache = [];
 
-let defaultOurEntity = 'ABC公司';
+let defaultOurEntity = '毕节自营公司';
 let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
@@ -33,12 +33,19 @@ function getLocalTodayStr() {
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// 动态获取当前自定义预设中的“生效态”与“到期态”名称（支持用户改名为“履行中/已超期”等）
 function getDynamicContractStatusPair() {
   const list = dropdownPresets.contract_statuses || ['草稿', '生效中', '已到期', '已终止'];
   const activeLabel = list.find(s => /生效|履行|执行|正常|进行/.test(s)) || '生效中';
   const expiredLabel = list.find(s => /到期|过期|期满|超期|逾期/.test(s)) || '已到期';
   return { activeLabel, expiredLabel };
+}
+
+function getStatusBadgeClass(statusStr) {
+  const s = String(statusStr || '').trim();
+  if (/生效|履行|执行|正常|进行/.test(s)) return 'badge-active';
+  if (/到期|过期|期满|超期|逾期/.test(s)) return 'badge-expired';
+  if (/终止|解除|作废|违约|取消/.test(s)) return 'badge-terminated';
+  return 'badge-draft';
 }
 
 // ==================== 1. 鉴权请求封装与安全转义工具 ====================
@@ -118,7 +125,6 @@ function parseSmartDateString(raw) {
   return str;
 }
 
-// 修改“合同到期日”时，自动根据当前预设词库中的“生效态/到期态”双向联动
 function syncContractStatusByExpiryDate(expiryDateVal) {
   const exp = String(expiryDateVal || '').trim();
   if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return;
@@ -207,7 +213,6 @@ function setSelectValueWithFallback(selectId, val) {
 }
 
 function applyDropdownPresetsToDOM() {
-  // 保底确保 contract_statuses 里至少有一个“生效态”和“到期态”，防止筛选框缺失“已到期”
   const rawStatuses = dropdownPresets.contract_statuses || ['草稿', '生效中', '已到期', '已终止'];
   if (!rawStatuses.some(s => /生效|履行|执行|正常|进行/.test(s))) rawStatuses.push('生效中');
   if (!rawStatuses.some(s => /到期|过期|期满|超期|逾期/.test(s))) rawStatuses.push('已到期');
@@ -259,7 +264,7 @@ function closePresetsModal() {
 
 async function savePresetsForm(e) {
   e.preventDefault();
-  let statusInput = document.getElementById('preset_contract_statuses').value;
+  const statusInput = document.getElementById('preset_contract_statuses').value;
   const statusItems = statusInput.split(/[\r\n,，、;；]+/).map(s => s.trim()).filter(Boolean);
   if (!statusItems.some(s => /生效|履行|执行|正常|进行/.test(s))) statusItems.push('生效中');
   if (!statusItems.some(s => /到期|过期|期满|超期|逾期/.test(s))) statusItems.push('已到期');
@@ -768,6 +773,8 @@ function renderContractLedgerTable(list) {
       ? `<a class="related-badge-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">📎 资料×${relCount}</a>`
       : `<a class="link-btn" style="font-size:12px;" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">+ 补传</a>`;
 
+    const statusBadgeClass = getStatusBadgeClass(c.status);
+
     parties.forEach((cp, pIdx) => {
       const isLastInGroup = pIdx === span - 1;
       const trClass = `${parityClass} ${isLastInGroup ? 'contract-group-end' : ''}`;
@@ -781,7 +788,7 @@ function renderContractLedgerTable(list) {
         <td rowspan="${span}" class="text-center">${escapeHtml(c.sign_date)}</td>
         <td rowspan="${span}" class="text-center">${escapeHtml(c.start_date)}</td>
         <td rowspan="${span}" class="text-center">${renderDueChip(c.expiry_date)}</td>
-        <td rowspan="${span}" class="text-center"><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
+        <td rowspan="${span}" class="text-center"><span class="badge ${statusBadgeClass}">${escapeHtml(c.status)}</span></td>
       ` : '';
 
       const mergedRightCells = pIdx === 0 ? `
@@ -796,12 +803,15 @@ function renderContractLedgerTable(list) {
       ` : '';
 
       const perfInfo = Number(cp.perf_bond_amount || 0) > 0
-        ? `<div>¥${Number(cp.perf_bond_amount).toLocaleString()} (${escapeHtml(cp.perf_bond_status)})</div><div>${renderDueChip(cp.perf_bond_return_date)}</div>`
+        ? `<div>¥${Number(cp.perf_bond_amount).toLocaleString()} (${escapeHtml(cp.perf_bond_status || '未退')})</div><div>${renderDueChip(cp.perf_bond_return_date)}</div>`
         : '<span style="color:#9ca3af;">无</span>';
 
       const warrantyInfo = Number(cp.warranty_bond_amount || 0) > 0
-        ? `<div>¥${Number(cp.warranty_bond_amount).toLocaleString()} (${escapeHtml(cp.warranty_bond_status)})</div><div>${renderDueChip(cp.warranty_bond_expiry_date)}</div>`
+        ? `<div>¥${Number(cp.warranty_bond_amount).toLocaleString()} (${escapeHtml(cp.warranty_bond_status || '未退')})</div><div>${renderDueChip(cp.warranty_bond_expiry_date)}</div>`
         : '<span style="color:#9ca3af;">无</span>';
+
+      const bankText = [cp.bank_account_no, cp.bank_name].filter(Boolean).join(' ') || '-';
+      const remarkText = [cp.remark, c.remark].filter(Boolean).join('；') || '-';
 
       htmlRows.push(`
         <tr class="${trClass}">
@@ -810,9 +820,7 @@ function renderContractLedgerTable(list) {
           <td><strong>${escapeHtml(cp.company_name || '-')}</strong></td>
           <td>${escapeHtml(cp.credit_code || '-')}</td>
           <td>${escapeHtml(cp.contact_person || '')} ${escapeHtml(cp.contact_phone || '')}</td>
-          <td class="summary-cell" title="${escapeHtml(cp.bank_account_name || '')} ${escapeHtml(cp.bank_account_no || '')} ${escapeHtml(cp.bank_name || '')}">
-            ${escapeHtml(cp.bank_account_no || '-')} ${escapeHtml(cp.bank_name || '')}
-          </td>
+          <td class="summary-cell" title="${escapeHtml(cp.bank_account_name || '')} ${escapeHtml(bankText)}">${escapeHtml(bankText)}</td>
           <td class="text-right"><strong>${formatMoney(cp.amount)}</strong></td>
           <td class="text-right">${formatMoney(cp.amount_excl_tax)}</td>
           <td class="text-center">${cp.tax_rate ? escapeHtml(cp.tax_rate) + '%' : '-'}</td>
@@ -820,7 +828,7 @@ function renderContractLedgerTable(list) {
           <td class="text-center">${escapeHtml(cp.currency || 'CNY')}</td>
           <td>${perfInfo}</td>
           <td>${warrantyInfo}</td>
-          <td class="summary-cell">${escapeHtml(cp.remark || c.remark || '-')}</td>
+          <td class="summary-cell" title="${escapeHtml(remarkText)}">${escapeHtml(remarkText)}</td>
           ${mergedRightCells}
         </tr>
       `);
@@ -831,17 +839,30 @@ function renderContractLedgerTable(list) {
 }
 
 // ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片 ====================
+function removeCounterpartyCard(btnEl) {
+  const container = document.getElementById('counterparties_container');
+  if (!container) return;
+  if (container.querySelectorAll('.party-card').length <= 1) {
+    alert('每份合同至少需保留 1 个对方单位履约行！');
+    return;
+  }
+  btnEl.closest('.party-card')?.remove();
+}
+
 function addCounterpartyCard(data = {}) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
   const idx = container.children.length + 1;
   const defaultInv = (dropdownPresets.invoice_types && dropdownPresets.invoice_types[0]) || '增值税专用发票';
+  const pStatus = data.perf_bond_status || '无';
+  const wStatus = data.warranty_bond_status || '无';
+
   const card = document.createElement('div');
   card.className = 'party-card';
   card.innerHTML = `
     <div class="party-card-header">
       <span>🏢 对方单位履约明细 #${idx}</span>
-      <button type="button" class="btn btn-danger btn-sm" onclick="this.closest('.party-card').remove()">移除该行</button>
+      <button type="button" class="btn btn-danger btn-sm" onclick="removeCounterpartyCard(this)">移除该行</button>
     </div>
     <div class="form-grid-4">
       <div class="form-group span-2">
@@ -870,7 +891,10 @@ function addCounterpartyCard(data = {}) {
       </div>
       <div class="form-group">
         <label>收款银行账号 & 开户行</label>
-        <input type="text" class="cp-bank-no" value="${escapeHtml(data.bank_account_no || '')}" placeholder="账号 / 开户行" />
+        <div style="display:flex;gap:4px;">
+          <input type="text" class="cp-bank-no" style="flex:1.2;min-width:0;" value="${escapeHtml(data.bank_account_no || '')}" placeholder="银行账号" />
+          <input type="text" class="cp-bank-name" style="flex:1;min-width:0;" value="${escapeHtml(data.bank_name || '')}" placeholder="开户银行" />
+        </div>
       </div>
       <div class="form-group">
         <label>含税金额 (元)</label>
@@ -885,20 +909,38 @@ function addCounterpartyCard(data = {}) {
         <input type="number" step="0.01" class="cp-amount-excl" value="${data.amount_excl_tax ?? ''}" />
       </div>
       <div class="form-group">
-        <label>发票类型</label>
-        <input type="text" class="cp-invoice" list="invoice_type_list" value="${escapeHtml(data.invoice_type || defaultInv)}" />
+        <label>发票类型 & 币种</label>
+        <div style="display:flex;gap:4px;">
+          <input type="text" class="cp-invoice" style="flex:1;min-width:0;" list="invoice_type_list" value="${escapeHtml(data.invoice_type || defaultInv)}" />
+          <input type="text" class="cp-currency" style="width:58px;text-align:center;" value="${escapeHtml(data.currency || 'CNY')}" placeholder="币种" />
+        </div>
       </div>
       <div class="form-group">
-        <label>履约保证金 (元)</label>
-        <input type="number" step="0.01" class="cp-perf-amt" value="${data.perf_bond_amount || 0}" />
+        <label>履约保证金 (元) & 状态</label>
+        <div style="display:flex;gap:4px;">
+          <input type="number" step="0.01" class="cp-perf-amt" style="flex:1;min-width:0;" value="${data.perf_bond_amount || 0}" placeholder="金额" />
+          <select class="cp-perf-status" style="width:72px;padding:4px;">
+            <option value="无" ${pStatus === '无' ? 'selected' : ''}>无</option>
+            <option value="未退" ${pStatus === '未退' ? 'selected' : ''}>未退</option>
+            <option value="已退" ${pStatus === '已退' ? 'selected' : ''}>已退</option>
+          </select>
+        </div>
       </div>
       <div class="form-group">
-        <label>保证金状态 & 应退日</label>
+        <label>保证金应退日</label>
         <input type="text" class="cp-perf-date" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
       </div>
       <div class="form-group">
-        <label>质保金 (元) & 到期日</label>
-        <input type="text" class="cp-warranty-date" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
+        <label>质保金 (元) / 状态 / 到期日</label>
+        <div style="display:flex;gap:4px;">
+          <input type="number" step="0.01" class="cp-warranty-amt" style="width:76px;" value="${data.warranty_bond_amount || 0}" placeholder="质保金" />
+          <select class="cp-warranty-status" style="width:66px;padding:4px;">
+            <option value="无" ${wStatus === '无' ? 'selected' : ''}>无</option>
+            <option value="未退" ${wStatus === '未退' ? 'selected' : ''}>未退</option>
+            <option value="已退" ${wStatus === '已退' ? 'selected' : ''}>已退</option>
+          </select>
+          <input type="text" class="cp-warranty-date" style="flex:1;min-width:0;" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="到期日" onblur="normalizeDateInputElem(this)" />
+        </div>
       </div>
       <div class="form-group">
         <label>分项备注</label>
@@ -924,6 +966,14 @@ function collectCounterpartiesFromDOM() {
   const cards = document.querySelectorAll('#counterparties_container .party-card');
   const arr = [];
   cards.forEach(card => {
+    const perfAmt = Number(card.querySelector('.cp-perf-amt')?.value || 0);
+    let perfStatus = card.querySelector('.cp-perf-status')?.value || '无';
+    if (perfAmt > 0 && perfStatus === '无') perfStatus = '未退';
+
+    const warAmt = Number(card.querySelector('.cp-warranty-amt')?.value || 0);
+    let warStatus = card.querySelector('.cp-warranty-status')?.value || '无';
+    if (warAmt > 0 && warStatus === '无') warStatus = '未退';
+
     arr.push({
       company_name: card.querySelector('.cp-company')?.value.trim() || '',
       credit_code: card.querySelector('.cp-credit')?.value.trim() || '',
@@ -932,12 +982,17 @@ function collectCounterpartiesFromDOM() {
       contact_phone: card.querySelector('.cp-phone')?.value.trim() || '',
       bank_account_name: card.querySelector('.cp-bank-user')?.value.trim() || '',
       bank_account_no: card.querySelector('.cp-bank-no')?.value.trim() || '',
+      bank_name: card.querySelector('.cp-bank-name')?.value.trim() || '',
       amount: Number(card.querySelector('.cp-amount')?.value || 0),
       tax_rate: card.querySelector('.cp-tax-rate')?.value.trim() || '',
       amount_excl_tax: Number(card.querySelector('.cp-amount-excl')?.value || 0),
       invoice_type: card.querySelector('.cp-invoice')?.value.trim() || '增值税专用发票',
-      perf_bond_amount: Number(card.querySelector('.cp-perf-amt')?.value || 0),
+      currency: card.querySelector('.cp-currency')?.value.trim() || 'CNY',
+      perf_bond_amount: perfAmt,
+      perf_bond_status: perfStatus,
       perf_bond_return_date: parseSmartDateString(card.querySelector('.cp-perf-date')?.value || ''),
+      warranty_bond_amount: warAmt,
+      warranty_bond_status: warStatus,
       warranty_bond_expiry_date: parseSmartDateString(card.querySelector('.cp-warranty-date')?.value || ''),
       remark: card.querySelector('.cp-remark')?.value.trim() || ''
     });
@@ -986,6 +1041,10 @@ async function openFormModal(editId = null) {
   applyDropdownPresetsToDOM();
   const form = document.getElementById('contract_form');
   form.reset();
+  const attEl = document.getElementById('f_attachment');
+  if (attEl) attEl.value = '';
+  const relEl = document.getElementById('f_related_files');
+  if (relEl) relEl.value = '';
   document.getElementById('counterparties_container').innerHTML = '';
 
   const today = getLocalTodayStr();
@@ -998,6 +1057,8 @@ async function openFormModal(editId = null) {
     document.getElementById('f_sign_date').value = today;
     document.getElementById('f_start_date').value = today;
     document.getElementById('f_expiry_date').value = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
+    const rmkEl = document.getElementById('f_remark');
+    if (rmkEl) rmkEl.value = '';
     setSelectValueWithFallback('f_status', activeLabel);
     document.getElementById('seg_mid_custom_input').value = contractRule.default_mid || '';
     toggleFreeContractNoMode(false);
@@ -1020,6 +1081,8 @@ async function openFormModal(editId = null) {
     document.getElementById('f_sign_date').value = c.sign_date;
     document.getElementById('f_start_date').value = c.start_date;
     document.getElementById('f_expiry_date').value = c.expiry_date;
+    const rmkEl = document.getElementById('f_remark');
+    if (rmkEl) rmkEl.value = c.remark || '';
     syncContractStatusByExpiryDate(c.expiry_date);
     await populateProcDropdownInContractForm(c.procurement_id);
     (c.counterparties || [{}]).forEach(cp => addCounterpartyCard(cp));
@@ -1055,6 +1118,7 @@ async function submitContractForm(e) {
     fd.append('start_date', parseSmartDateString(document.getElementById('f_start_date').value));
     fd.append('expiry_date', cleanExpiry);
     fd.append('procurement_id', document.getElementById('f_procurement_id').value || '');
+    fd.append('remark', document.getElementById('f_remark')?.value.trim() || '');
     fd.append('counterparties_json', JSON.stringify(collectCounterpartiesFromDOM()));
 
     const attInput = document.getElementById('f_attachment');
@@ -1204,6 +1268,8 @@ async function openProcurementFormModal(editId = null) {
   applyDropdownPresetsToDOM();
   const form = document.getElementById('procurement_form');
   form.reset();
+  const pfEl = document.getElementById('p_procurement_files');
+  if (pfEl) pfEl.value = '';
   const today = getLocalTodayStr();
   const defaultMethod = (dropdownPresets.procurement_methods && dropdownPresets.procurement_methods[0]) || '合作谈判';
 
@@ -1320,9 +1386,11 @@ async function quickUploadContractMainScan(contractId, inputEl) {
     const res = await apiFetch(`/api/contracts/${contractId}/attachment`, { method: 'POST', body: fd });
     const json = await res.json();
     if (!json.success) throw new Error(json.message);
+    inputEl.value = '';
     await openDetailModal('contract', contractId);
     await loadContracts();
   } catch (err) {
+    inputEl.value = '';
     alert(err.message || '上传失败');
   }
 }
@@ -1335,9 +1403,11 @@ async function quickUploadContractRelated(contractId, inputEl) {
     const res = await apiFetch(`/api/contracts/${contractId}/related-files`, { method: 'POST', body: fd });
     const json = await res.json();
     if (!json.success) throw new Error(json.message);
+    inputEl.value = '';
     await openDetailModal('contract', contractId);
     await loadContracts();
   } catch (err) {
+    inputEl.value = '';
     alert(err.message || '上传失败');
   }
 }
@@ -1360,10 +1430,12 @@ async function quickUploadProcFilesInDetail(procId, inputEl, refreshMode = 'proc
     const res = await apiFetch(`/api/procurements/${procId}/files`, { method: 'POST', body: fd });
     const json = await res.json();
     if (!json.success) throw new Error(json.message);
+    inputEl.value = '';
     await openDetailModal(refreshMode, refreshId || procId);
     if (refreshMode === 'contract') await loadContracts();
     else await loadProcurements();
   } catch (err) {
+    inputEl.value = '';
     alert(err.message || '上传立项资料失败');
   }
 }
@@ -1403,6 +1475,7 @@ async function openDetailModal(mode, id) {
         <div class="detail-row"><span class="label">合同类型 / 状态</span><span class="val">${escapeHtml(c.contract_type)} / ${escapeHtml(c.status)}</span></div>
         <div class="detail-row"><span class="label">我方签约主体</span><span class="val">${escapeHtml(c.our_entity)}</span></div>
         <div class="detail-row"><span class="label">签订 / 履约 / 到期日</span><span class="val">${escapeHtml(c.sign_date)} / ${escapeHtml(c.start_date)} / ${escapeHtml(c.expiry_date)}</span></div>
+        ${c.remark ? `<div class="detail-row"><span class="label">合同公共备注</span><span class="val">${escapeHtml(c.remark)}</span></div>` : ''}
       </div>
 
       <div class="detail-card">
@@ -1497,6 +1570,7 @@ async function openDetailModal(mode, id) {
         <div class="detail-row"><span class="label">采购类型 / 采购方式</span><span class="val">${escapeHtml(p.procurement_type || '-')} / ${escapeHtml(p.procurement_method || '-')}</span></div>
         <div class="detail-row"><span class="label">预算金额 / 成交金额</span><span class="val">${formatMoney(p.budget_amount)} / ${formatMoney(p.deal_amount)}</span></div>
         <div class="detail-row"><span class="label">成交供应商</span><span class="val">${escapeHtml(p.supplier_name || '-')}</span></div>
+        ${p.remark ? `<div class="detail-row"><span class="label">备注</span><span class="val">${escapeHtml(p.remark)}</span></div>` : ''}
       </div>
 
       <div class="detail-card">
@@ -1568,7 +1642,6 @@ function previewFileInBox(relPath, title) {
 }
 
 function closeDetailModal() {
-  document.getElementById('detail_modal').classList.remove('hidden');
   document.getElementById('detail_modal').classList.add('hidden');
   const box = document.getElementById('preview_container');
   if (box) box.innerHTML = '';
