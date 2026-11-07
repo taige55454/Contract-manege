@@ -1,6 +1,6 @@
 let currentContracts = [];
+let defaultOurEntity = '';
 
-// HTML 转义防止 XSS
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
   return String(str).replace(/[&<>"']/g, m => ({
@@ -8,18 +8,13 @@ function escapeHtml(str) {
   }[m]));
 }
 
-// 格式化金额
 function fmtMoney(val) {
   if (val === null || val === undefined || val === '') return '-';
   const num = Number(val);
   return Number.isFinite(num) ? num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-';
 }
 
-/**
- * 核心特性：到期日由绿到红平滑光谱颜色计算（越接近到期日颜色越红越深）
- * @param {string} dateStr - YYYY-MM-DD
- * @param {string} contractStatus - 合同状态（已终止则置灰不告警）
- */
+// 到期日由绿到红平滑光谱颜色计算（越接近到期日颜色越红越深）
 function renderDueAlertBadge(dateStr, contractStatus = '生效中', prefixLabel = '') {
   if (!dateStr || !String(dateStr).trim()) return '<span style="color:#9ca3af;">-</span>';
   if (contractStatus === '已终止') {
@@ -32,27 +27,22 @@ function renderDueAlertBadge(dateStr, contractStatus = '生效中', prefixLabel 
   if (isNaN(target.getTime())) return escapeHtml(dateStr);
 
   const diffDays = Math.ceil((target - today) / (1000 * 60 * 60 * 24));
-
-  // 90天以上为安全翠绿(Hue=130)，0天为正红(Hue=0)，逾期为深暗红
   const maxSafeDays = 90;
   let bg = '';
   let fg = '#ffffff';
   let tip = '';
 
   if (diffDays < 0) {
-    // 已逾期：深暗红警报
     bg = 'hsl(0, 82%, 30%)';
     tip = `已逾期 ${Math.abs(diffDays)} 天`;
   } else if (diffDays <= maxSafeDays) {
-    // 0 ~ 90天：Hue 从 0 (红) 线性平滑插值到 130 (绿)；越接近0天，Lightness 越深(34% -> 42%)
-    const ratio = diffDays / maxSafeDays; // 0(今天) ~ 1(90天后)
+    const ratio = diffDays / maxSafeDays;
     const hue = Math.round(ratio * 130);
-    const saturation = Math.round(80 - ratio * 15); // 越临近饱和度越高
-    const lightness = Math.round(35 + ratio * 8);   // 越临近颜色越深
+    const saturation = Math.round(80 - ratio * 15);
+    const lightness = Math.round(35 + ratio * 8);
     bg = `hsl(${hue}, ${saturation}%, ${lightness}%)`;
     tip = diffDays === 0 ? '今日到期!' : `剩 ${diffDays} 天`;
   } else {
-    // 超过 90 天：清爽浅绿底深绿字
     bg = 'hsl(135, 55%, 90%)';
     fg = 'hsl(135, 75%, 22%)';
     tip = `剩 ${diffDays} 天`;
@@ -64,7 +54,65 @@ function renderDueAlertBadge(dateStr, contractStatus = '生效中', prefixLabel 
   </span>`;
 }
 
-// 收集筛选与排序条件
+// ==================== 默认我方签约主体管理 ====================
+async function loadDefaultOurEntity() {
+  try {
+    const res = await fetch('/api/settings/our-entity');
+    const result = await res.json();
+    if (result.success) {
+      defaultOurEntity = result.default_our_entity;
+      document.getElementById('display_default_entity').innerText = defaultOurEntity;
+    }
+  } catch (e) {}
+}
+
+async function changeDefaultOurEntity() {
+  const newVal = prompt('请输入本台账默认带出的【我方签约主体】全称（后续新增合同时将自动填入，且允许单次修改）：', defaultOurEntity);
+  if (newVal === null) return;
+  if (!newVal.trim()) return alert('默认我方主体名称不能为空！');
+
+  const res = await fetch('/api/settings/our-entity', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ default_our_entity: newVal.trim() })
+  });
+  const result = await res.json();
+  if (!result.success) return alert(result.message);
+  defaultOurEntity = result.default_our_entity;
+  document.getElementById('display_default_entity').innerText = defaultOurEntity;
+}
+
+// 解析单条合同的多方履约行列表
+function parseContractParties(c) {
+  let parties = [];
+  try { parties = JSON.parse(c.counterparties_json || '[]'); } catch (e) {}
+  if (!Array.isArray(parties) || parties.length === 0) {
+    parties = [{
+      company_name: c.counterparty || '-',
+      credit_code: '-',
+      contact_person: '',
+      contact_phone: '',
+      bank_account_name: '',
+      bank_account_no: '',
+      bank_name: '',
+      bank_code: '',
+      item_summary: c.contract_summary || '',
+      amount: c.amount,
+      amount_excl_tax: c.amount_excl_tax,
+      tax_rate: c.tax_rate || '',
+      invoice_type: c.invoice_type || '',
+      currency: c.currency || 'CNY',
+      perf_bond_amount: c.perf_bond_amount,
+      perf_bond_pay_date: c.perf_bond_pay_date || '',
+      perf_bond_return_date: c.perf_bond_return_date || '',
+      warranty_bond_amount: c.warranty_bond_amount,
+      warranty_bond_expiry_date: c.warranty_bond_expiry_date || '',
+      remark: c.remark || ''
+    }];
+  }
+  return parties;
+}
+
 function getFilterParams() {
   return new URLSearchParams({
     contract_no: document.getElementById('filter_no').value.trim(),
@@ -76,7 +124,7 @@ function getFilterParams() {
   });
 }
 
-// 加载台账列表
+// 加载台账列表（支持多对方单位拆分为多行 + 公共字段自动 rowspan 合并单元格）
 async function loadContracts() {
   const params = getFilterParams();
   const res = await fetch(`/api/contracts?${params.toString()}`);
@@ -86,66 +134,92 @@ async function loadContracts() {
   currentContracts = result.data;
   const tbody = document.getElementById('contract_tbody');
   if (currentContracts.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="20" style="text-align:center;color:#6b7280;padding:28px;">暂无匹配的合同台账记录</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="23" style="text-align:center;color:#6b7280;padding:28px;">暂无匹配的合同台账记录</td></tr>`;
     return;
   }
 
-  tbody.innerHTML = currentContracts.map(c => {
-    let parties = [];
-    try { parties = JSON.parse(c.counterparties_json || '[]'); } catch (e) {}
-    const partiesHtml = parties.length > 0
-      ? parties.map(p => `<span class="party-tag" title="信用代码: ${escapeHtml(p.credit_code)} | 联系人: ${escapeHtml(p.contact_person || '-')} ${escapeHtml(p.contact_phone || '')}">${escapeHtml(p.company_name)}</span>`).join('')
-      : escapeHtml(c.counterparty);
+  const htmlRows = [];
 
-    // 履约保证金列展示
-    let perfBondHtml = '<span style="color:#9ca3af;">-</span>';
-    if (c.perf_bond_amount !== null || c.perf_bond_return_date) {
-      const amtStr = c.perf_bond_amount !== null ? `¥${fmtMoney(c.perf_bond_amount)} ` : '';
-      const badge = c.perf_bond_return_date ? renderDueAlertBadge(c.perf_bond_return_date, c.status, '应退') : '';
-      perfBondHtml = `<div>${amtStr}${badge}</div>`;
-    }
+  for (const c of currentContracts) {
+    const parties = parseContractParties(c);
+    const spanCount = parties.length;
 
-    // 质保金列展示
-    let warrantyHtml = '<span style="color:#9ca3af;">-</span>';
-    if (c.warranty_bond_amount !== null || c.warranty_bond_expiry_date) {
-      const amtStr = c.warranty_bond_amount !== null ? `¥${fmtMoney(c.warranty_bond_amount)} ` : '';
-      const badge = c.warranty_bond_expiry_date ? renderDueAlertBadge(c.warranty_bond_expiry_date, c.status, '到期') : '';
-      warrantyHtml = `<div>${amtStr}${badge}</div>`;
-    }
+    parties.forEach((p, idx) => {
+      const isFirstRow = idx === 0;
+      const isLastRow = idx === spanCount - 1;
 
-    return `
-      <tr>
-        <td><strong>${escapeHtml(c.contract_no)}</strong></td>
-        <td>${escapeHtml(c.contract_name)}</td>
-        <td class="summary-cell" title="${escapeHtml(c.contract_summary || '')}">${escapeHtml(c.contract_summary || '-')}</td>
-        <td>${escapeHtml(c.contract_type)}</td>
-        <td>${escapeHtml(c.our_entity)}</td>
-        <td>${partiesHtml}</td>
-        <td>${escapeHtml(c.sign_date)}</td>
-        <td>${escapeHtml(c.start_date || c.sign_date)}</td>
-        <td>${renderDueAlertBadge(c.expiry_date, c.status)}</td>
-        <td class="text-right"><strong>${fmtMoney(c.amount)}</strong></td>
-        <td class="text-right">${fmtMoney(c.amount_excl_tax)}</td>
-        <td>${escapeHtml(c.tax_rate || '-')}</td>
-        <td>${escapeHtml(c.invoice_type || '-')}</td>
-        <td>${escapeHtml(c.currency)}</td>
-        <td>${perfBondHtml}</td>
-        <td>${warrantyHtml}</td>
-        <td><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
-        <td>
-          ${c.attachment_path
-            ? `<a class="link-btn" onclick="openDetailModal(${c.id})" title="点击在线预览扫描件">📎 ${escapeHtml(c.attachment_original_name)}</a>`
-            : `<span style="color:#9ca3af;">无扫描件</span>`}
-        </td>
-        <td class="summary-cell" title="${escapeHtml(c.remark || '')}">${escapeHtml(c.remark || '-')}</td>
-        <td>
-          <button class="btn btn-outline btn-sm" onclick="openDetailModal(${c.id})">详情 / 扫描件</button>
-          <button class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteContract(${c.id})">删除</button>
-        </td>
-      </tr>
-    `;
-  }).join('');
+      // 履约保证金展示
+      let perfBondHtml = '<span style="color:#9ca3af;">-</span>';
+      if (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined || p.perf_bond_return_date) {
+        const amtStr = (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined) ? `¥${fmtMoney(p.perf_bond_amount)} ` : '';
+        const payStr = p.perf_bond_pay_date ? `<small style="color:#6b7280;">(缴:${escapeHtml(p.perf_bond_pay_date)})</small> ` : '';
+        const badge = p.perf_bond_return_date ? renderDueAlertBadge(p.perf_bond_return_date, c.status, '应退') : '';
+        perfBondHtml = `<div>${amtStr}${payStr}${badge}</div>`;
+      }
+
+      // 质保金展示
+      let warrantyHtml = '<span style="color:#9ca3af;">-</span>';
+      if (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined || p.warranty_bond_expiry_date) {
+        const amtStr = (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined) ? `¥${fmtMoney(p.warranty_bond_amount)} ` : '';
+        const badge = p.warranty_bond_expiry_date ? renderDueAlertBadge(p.warranty_bond_expiry_date, c.status, '到期') : '';
+        warrantyHtml = `<div>${amtStr}${badge}</div>`;
+      }
+
+      const contactStr = (p.contact_person || p.contact_phone)
+        ? `${escapeHtml(p.contact_person || '-')} ${escapeHtml(p.contact_phone || '')}`
+        : '-';
+
+      const bankParts = [];
+      if (p.bank_account_name) bankParts.push(`户名:${p.bank_account_name}`);
+      if (p.bank_account_no) bankParts.push(`账号:${p.bank_account_no}`);
+      if (p.bank_name) bankParts.push(`开户行:${p.bank_name}`);
+      if (p.bank_code) bankParts.push(`行号:${p.bank_code}`);
+      const bankSummary = bankParts.length > 0 ? bankParts.join(' | ') : '-';
+
+      htmlRows.push(`
+        <tr class="${isLastRow ? 'contract-group-end' : ''}">
+          ${isFirstRow ? `
+            <td class="merged-cell" rowspan="${spanCount}"><strong>${escapeHtml(c.contract_no)}</strong></td>
+            <td class="merged-cell" rowspan="${spanCount}">${escapeHtml(c.contract_name)}</td>
+            <td class="merged-cell" rowspan="${spanCount}">${escapeHtml(c.contract_type)}</td>
+            <td class="merged-cell" rowspan="${spanCount}">${escapeHtml(c.our_entity)}</td>
+            <td class="merged-cell" rowspan="${spanCount}">${escapeHtml(c.sign_date)}</td>
+            <td class="merged-cell" rowspan="${spanCount}">${escapeHtml(c.start_date || c.sign_date)}</td>
+            <td class="merged-cell" rowspan="${spanCount}">${renderDueAlertBadge(c.expiry_date, c.status)}</td>
+            <td class="merged-cell" rowspan="${spanCount}"><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
+          ` : ''}
+          <!-- 各对方单位独立履约列 -->
+          <td class="summary-cell" title="${escapeHtml(p.item_summary || '')}">${escapeHtml(p.item_summary || '-')}</td>
+          <td><strong>${escapeHtml(p.company_name)}</strong></td>
+          <td>${escapeHtml(p.credit_code)}</td>
+          <td>${contactStr}</td>
+          <td class="summary-cell" title="${escapeHtml(bankSummary)}">${escapeHtml(bankSummary)}</td>
+          <td class="text-right"><strong>${fmtMoney(p.amount)}</strong></td>
+          <td class="text-right">${fmtMoney(p.amount_excl_tax)}</td>
+          <td>${escapeHtml(p.tax_rate || '-')}</td>
+          <td>${escapeHtml(p.invoice_type || '-')}</td>
+          <td>${escapeHtml(p.currency || c.currency || 'CNY')}</td>
+          <td>${perfBondHtml}</td>
+          <td>${warrantyHtml}</td>
+          <td class="summary-cell" title="${escapeHtml(p.remark || '')}">${escapeHtml(p.remark || '-')}</td>
+          ${isFirstRow ? `
+            <td class="merged-cell" rowspan="${spanCount}">
+              ${c.attachment_path
+                ? `<a class="link-btn" onclick="openDetailModal(${c.id})" title="点击在线预览扫描件">📎 ${escapeHtml(c.attachment_original_name)}</a>`
+                : `<span style="color:#9ca3af;">无扫描件</span>`}
+            </td>
+            <td class="merged-cell" rowspan="${spanCount}">
+              <button class="btn btn-outline btn-sm" onclick="openDetailModal(${c.id})">详情 / 扫描件</button>
+              <button class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteContract(${c.id})">删除</button>
+            </td>
+          ` : ''}
+        </tr>
+      `);
+    });
+  }
+
+  tbody.innerHTML = htmlRows.join('');
 }
 
 function resetFilters() {
@@ -158,14 +232,12 @@ function resetFilters() {
   loadContracts();
 }
 
-// 导出 Excel
 function exportExcel(scope) {
   const params = getFilterParams();
   params.set('scope', scope);
   window.location.href = `/api/contracts/export?${params.toString()}`;
 }
 
-// 签订日期变更时，若开始履约日为空或未手动改过，默认自动同步为签订日
 function syncStartDateDefault() {
   const signDate = document.getElementById('f_sign_date').value;
   const startDateInput = document.getElementById('f_start_date');
@@ -175,17 +247,18 @@ function syncStartDateDefault() {
   }
 }
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
   const startDateInput = document.getElementById('f_start_date');
   if (startDateInput) {
     startDateInput.addEventListener('input', () => {
       startDateInput.dataset.autoSync = 'false';
     });
   }
-  loadContracts();
+  await loadDefaultOurEntity();
+  await loadContracts();
 });
 
-// ==================== 多方对方单位动态卡片管理 ====================
+// ==================== 多方对方单位及独立履约行卡片管理 ====================
 
 function addCounterpartyCard(data = {}) {
   const container = document.getElementById('counterparties_container');
@@ -194,18 +267,24 @@ function addCounterpartyCard(data = {}) {
   card.className = 'party-card';
   card.innerHTML = `
     <div class="party-card-header">
-      <span class="party-title">对方签约单位 #${index}</span>
-      <button type="button" class="btn btn-danger btn-sm" onclick="removeCounterpartyCard(this)">移除此方</button>
+      <span class="party-title">对方单位及独立履约行 #${index}</span>
+      <button type="button" class="btn btn-danger btn-sm" onclick="removeCounterpartyCard(this)">移除此履约方</button>
     </div>
     <div class="form-grid-4">
       <div class="form-group">
-        <label>单位名称 *</label>
+        <label>对方单位名称 *</label>
         <input type="text" class="p_company_name" value="${escapeHtml(data.company_name || '')}" placeholder="对方公司全称" required />
       </div>
       <div class="form-group">
         <label>统一社会信用代码 *</label>
-        <input type="text" class="p_credit_code" value="${escapeHtml(data.credit_code || '')}" placeholder="18位统一信用代码" required />
+        <input type="text" class="p_credit_code" value="${escapeHtml(data.credit_code || '')}" placeholder="18位信用代码" required />
       </div>
+      <div class="form-group span-2">
+        <label>本方履约摘要 <small class="muted">(简要概括该相对方的具体履约义务，各写各的)</small></label>
+        <input type="text" class="p_item_summary" value="${escapeHtml(data.item_summary || '')}"
+          placeholder="示例：负责核心数据库软件授权交付及3年原厂二线技术支持服务" />
+      </div>
+
       <div class="form-group">
         <label>联系人 <small class="muted">(可留空)</small></label>
         <input type="text" class="p_contact_person" value="${escapeHtml(data.contact_person || '')}" placeholder="选填" />
@@ -230,6 +309,53 @@ function addCounterpartyCard(data = {}) {
         <label>开户行行号 <small class="muted">(可留空)</small></label>
         <input type="text" class="p_bank_code" value="${escapeHtml(data.bank_code || '')}" placeholder="12位联行号，选填" />
       </div>
+
+      <div class="party-sub-divider">💰 该相对方独立价款、税率、保证金与质保金信息：</div>
+
+      <div class="form-group">
+        <label>含税金额 * <small class="muted">(默认含税价)</small></label>
+        <input type="number" step="0.01" class="p_amount" value="${data.amount !== undefined ? data.amount : '0.00'}" required />
+      </div>
+      <div class="form-group">
+        <label>不含税价 <small class="muted">(可留空)</small></label>
+        <input type="number" step="0.01" class="p_amount_excl_tax" value="${data.amount_excl_tax !== null && data.amount_excl_tax !== undefined ? data.amount_excl_tax : ''}" placeholder="选填" />
+      </div>
+      <div class="form-group">
+        <label>税率 <small class="muted">(多税率前加*并用,隔开)</small></label>
+        <input type="text" class="p_tax_rate" value="${escapeHtml(data.tax_rate || '')}" placeholder="如 13% 或 *6%,13%" />
+      </div>
+      <div class="form-group">
+        <label>发票类型 <small class="muted">(可留空)</small></label>
+        <input type="text" class="p_invoice_type" list="invoice_type_list" value="${escapeHtml(data.invoice_type || '')}" placeholder="可选或手填" />
+      </div>
+      <div class="form-group">
+        <label>币种 *</label>
+        <input type="text" class="p_currency" value="${escapeHtml(data.currency || 'CNY')}" required />
+      </div>
+      <div class="form-group">
+        <label>履约保证金 <small class="muted">(可留空)</small></label>
+        <input type="number" step="0.01" class="p_perf_bond_amount" value="${data.perf_bond_amount !== null && data.perf_bond_amount !== undefined ? data.perf_bond_amount : ''}" placeholder="选填" />
+      </div>
+      <div class="form-group">
+        <label>保证金缴纳时间 <small class="muted">(可留空)</small></label>
+        <input type="date" class="p_perf_bond_pay_date" value="${escapeHtml(data.perf_bond_pay_date || '')}" />
+      </div>
+      <div class="form-group">
+        <label>保证金应退时间 <small class="muted">(预警)</small></label>
+        <input type="date" class="p_perf_bond_return_date" value="${escapeHtml(data.perf_bond_return_date || '')}" />
+      </div>
+      <div class="form-group">
+        <label>质保金金额 <small class="muted">(可留空)</small></label>
+        <input type="number" step="0.01" class="p_warranty_bond_amount" value="${data.warranty_bond_amount !== null && data.warranty_bond_amount !== undefined ? data.warranty_bond_amount : ''}" placeholder="选填" />
+      </div>
+      <div class="form-group">
+        <label>质保金到期时间 <small class="muted">(预警)</small></label>
+        <input type="date" class="p_warranty_bond_expiry_date" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" />
+      </div>
+      <div class="form-group span-2">
+        <label>分项备注 <small class="muted">(可留空)</small></label>
+        <input type="text" class="p_remark" value="${escapeHtml(data.remark || '')}" placeholder="针对该相对方的补充说明..." />
+      </div>
     </div>
   `;
   container.appendChild(card);
@@ -239,7 +365,7 @@ function addCounterpartyCard(data = {}) {
 function removeCounterpartyCard(btn) {
   const container = document.getElementById('counterparties_container');
   if (container.children.length <= 1) {
-    return alert('合同至少需要保留一个对方单位！');
+    return alert('合同至少需要保留一个对方单位履约行！');
   }
   btn.closest('.party-card').remove();
   renumberCounterpartyCards();
@@ -248,22 +374,40 @@ function removeCounterpartyCard(btn) {
 function renumberCounterpartyCards() {
   const cards = document.querySelectorAll('#counterparties_container .party-card');
   cards.forEach((card, idx) => {
-    card.querySelector('.party-title').innerText = `对方签约单位 #${idx + 1}`;
+    card.querySelector('.party-title').innerText = `对方单位及独立履约行 #${idx + 1}`;
   });
 }
 
 function collectCounterpartiesFromDOM() {
   const cards = document.querySelectorAll('#counterparties_container .party-card');
-  return Array.from(cards).map(card => ({
-    company_name: card.querySelector('.p_company_name').value.trim(),
-    credit_code: card.querySelector('.p_credit_code').value.trim(),
-    contact_person: card.querySelector('.p_contact_person').value.trim(),
-    contact_phone: card.querySelector('.p_contact_phone').value.trim(),
-    bank_account_name: card.querySelector('.p_bank_account_name').value.trim(),
-    bank_account_no: card.querySelector('.p_bank_account_no').value.trim(),
-    bank_name: card.querySelector('.p_bank_name').value.trim(),
-    bank_code: card.querySelector('.p_bank_code').value.trim()
-  }));
+  return Array.from(cards).map((card, idx) => {
+    const taxRateVal = card.querySelector('.p_tax_rate').value.trim().replace(/，/g, ',');
+    if (taxRateVal.includes(',') && !taxRateVal.startsWith('*')) {
+      throw new Error(`第 ${idx + 1} 个对方单位的税率填写了多个值，必须在最前面加 * 号并用逗号隔开（如：*6%,13%）`);
+    }
+    return {
+      company_name: card.querySelector('.p_company_name').value.trim(),
+      credit_code: card.querySelector('.p_credit_code').value.trim(),
+      item_summary: card.querySelector('.p_item_summary').value.trim(),
+      contact_person: card.querySelector('.p_contact_person').value.trim(),
+      contact_phone: card.querySelector('.p_contact_phone').value.trim(),
+      bank_account_name: card.querySelector('.p_bank_account_name').value.trim(),
+      bank_account_no: card.querySelector('.p_bank_account_no').value.trim(),
+      bank_name: card.querySelector('.p_bank_name').value.trim(),
+      bank_code: card.querySelector('.p_bank_code').value.trim(),
+      amount: card.querySelector('.p_amount').value,
+      amount_excl_tax: card.querySelector('.p_amount_excl_tax').value,
+      tax_rate: taxRateVal,
+      invoice_type: card.querySelector('.p_invoice_type').value.trim(),
+      currency: card.querySelector('.p_currency').value.trim() || 'CNY',
+      perf_bond_amount: card.querySelector('.p_perf_bond_amount').value,
+      perf_bond_pay_date: card.querySelector('.p_perf_bond_pay_date').value,
+      perf_bond_return_date: card.querySelector('.p_perf_bond_return_date').value,
+      warranty_bond_amount: card.querySelector('.p_warranty_bond_amount').value,
+      warranty_bond_expiry_date: card.querySelector('.p_warranty_bond_expiry_date').value,
+      remark: card.querySelector('.p_remark').value.trim()
+    };
+  });
 }
 
 // 打开新增 / 编辑弹窗
@@ -283,35 +427,19 @@ function openFormModal(id = null) {
     if (c) {
       document.getElementById('f_contract_no').value = c.contract_no;
       document.getElementById('f_contract_name').value = c.contract_name;
-      document.getElementById('f_contract_summary').value = c.contract_summary || '';
       document.getElementById('f_contract_type').value = c.contract_type;
       document.getElementById('f_status').value = c.status;
       document.getElementById('f_our_entity').value = c.our_entity;
       document.getElementById('f_sign_date').value = c.sign_date;
       document.getElementById('f_start_date').value = c.start_date || c.sign_date;
       document.getElementById('f_expiry_date').value = c.expiry_date;
-      document.getElementById('f_amount').value = c.amount;
-      document.getElementById('f_amount_excl_tax').value = c.amount_excl_tax !== null ? c.amount_excl_tax : '';
-      document.getElementById('f_tax_rate').value = c.tax_rate || '';
-      document.getElementById('f_invoice_type').value = c.invoice_type || '';
-      document.getElementById('f_currency').value = c.currency || 'CNY';
-      document.getElementById('f_perf_bond_amount').value = c.perf_bond_amount !== null ? c.perf_bond_amount : '';
-      document.getElementById('f_perf_bond_pay_date').value = c.perf_bond_pay_date || '';
-      document.getElementById('f_perf_bond_return_date').value = c.perf_bond_return_date || '';
-      document.getElementById('f_warranty_bond_amount').value = c.warranty_bond_amount !== null ? c.warranty_bond_amount : '';
-      document.getElementById('f_warranty_bond_expiry_date').value = c.warranty_bond_expiry_date || '';
-      document.getElementById('f_remark').value = c.remark || '';
 
-      let parties = [];
-      try { parties = JSON.parse(c.counterparties_json || '[]'); } catch (e) {}
-      if (parties.length > 0) {
-        parties.forEach(p => addCounterpartyCard(p));
-      } else {
-        addCounterpartyCard({ company_name: c.counterparty, credit_code: '未录入' });
-      }
+      const parties = parseContractParties(c);
+      parties.forEach(p => addCounterpartyCard(p));
     }
   } else {
-    // 默认新建 1 个对方单位卡片
+    // 新增合同时自动带出默认我方签约主体（可修改）
+    document.getElementById('f_our_entity').value = defaultOurEntity;
     addCounterpartyCard();
   }
 
@@ -322,18 +450,17 @@ function closeFormModal() {
   document.getElementById('form_modal').classList.add('hidden');
 }
 
-// 提交新增或编辑表单
 async function submitContractForm(e) {
   e.preventDefault();
-  const taxRateVal = document.getElementById('f_tax_rate').value.trim().replace(/，/g, ',');
-  if (taxRateVal.includes(',') && !taxRateVal.startsWith('*')) {
-    return alert('【税率格式提示】填写多个税率时，必须在最前面加 * 号并用逗号隔开，例如：*6%,13%');
+  let parties = [];
+  try {
+    parties = collectCounterpartiesFromDOM();
+  } catch (err) {
+    return alert(err.message);
   }
 
-  const parties = collectCounterpartiesFromDOM();
   const id = document.getElementById('form_id').value;
   const formData = new FormData(document.getElementById('contract_form'));
-  formData.set('tax_rate', taxRateVal);
   formData.set('counterparties_json', JSON.stringify(parties));
 
   const url = id ? `/api/contracts/${id}` : '/api/contracts';
@@ -347,7 +474,6 @@ async function submitContractForm(e) {
   loadContracts();
 }
 
-// 删除合同
 async function deleteContract(id) {
   if (!confirm('确认删除该条合同台账及其关联的扫描件吗？此操作不可恢复。')) return;
   const res = await fetch(`/api/contracts/${id}`, { method: 'DELETE' });
@@ -356,55 +482,43 @@ async function deleteContract(id) {
   loadContracts();
 }
 
-// 打开详情与扫描件预览弹窗
 async function openDetailModal(id) {
   const res = await fetch(`/api/contracts/${id}`);
   const result = await res.json();
   if (!result.success) return alert(result.message);
 
   const c = result.data;
-  let parties = [];
-  try { parties = JSON.parse(c.counterparties_json || '[]'); } catch (e) {}
+  const parties = parseContractParties(c);
 
   const partiesDetailHtml = parties.map((p, idx) => `
-    <div style="border-top:1px dashed #e5e7eb;padding-top:6px;margin-top:6px;">
-      <div class="detail-row"><span class="label">对方单位 #${idx + 1}</span><span class="val">${escapeHtml(p.company_name)}</span></div>
-      <div class="detail-row"><span class="label">统一信用代码</span><span class="val">${escapeHtml(p.credit_code)}</span></div>
-      <div class="detail-row"><span class="label">联系人 / 电话</span><span class="val">${escapeHtml(p.contact_person || '-')} / ${escapeHtml(p.contact_phone || '-')}</span></div>
-      <div class="detail-row"><span class="label">收款账户 / 账号</span><span class="val">${escapeHtml(p.bank_account_name || '-')} / ${escapeHtml(p.bank_account_no || '-')}</span></div>
+    <div class="detail-card">
+      <h4>🏢 对方单位及独立履约行 #${idx + 1}：${escapeHtml(p.company_name)}</h4>
+      <div class="detail-row"><span class="label">统一社会信用代码</span><span class="val">${escapeHtml(p.credit_code)}</span></div>
+      <div class="detail-row"><span class="label">本方履约摘要</span><span class="val">${escapeHtml(p.item_summary || '-')}</span></div>
+      <div class="detail-row"><span class="label">联系人 / 联系方式</span><span class="val">${escapeHtml(p.contact_person || '-')} / ${escapeHtml(p.contact_phone || '-')}</span></div>
+      <div class="detail-row"><span class="label">收款户名 / 账号</span><span class="val">${escapeHtml(p.bank_account_name || '-')} / ${escapeHtml(p.bank_account_no || '-')}</span></div>
       <div class="detail-row"><span class="label">开户行 / 行号</span><span class="val">${escapeHtml(p.bank_name || '-')} (${escapeHtml(p.bank_code || '-')})</span></div>
+      <div class="detail-row"><span class="label">含税金额 / 不含税价</span><span class="val">${fmtMoney(p.amount)} / ${fmtMoney(p.amount_excl_tax)} (${escapeHtml(p.currency || 'CNY')})</span></div>
+      <div class="detail-row"><span class="label">税率 / 发票类型</span><span class="val">${escapeHtml(p.tax_rate || '-')} / ${escapeHtml(p.invoice_type || '-')}</span></div>
+      <div class="detail-row"><span class="label">履约保证金</span><span class="val">${fmtMoney(p.perf_bond_amount)} (缴纳:${escapeHtml(p.perf_bond_pay_date || '-')})</span></div>
+      <div class="detail-row"><span class="label">保证金应退时间</span><span class="val">${renderDueAlertBadge(p.perf_bond_return_date, c.status)}</span></div>
+      <div class="detail-row"><span class="label">质保金金额</span><span class="val">${fmtMoney(p.warranty_bond_amount)}</span></div>
+      <div class="detail-row"><span class="label">质保金到期时间</span><span class="val">${renderDueAlertBadge(p.warranty_bond_expiry_date, c.status)}</span></div>
+      <div class="detail-row"><span class="label">分项备注</span><span class="val">${escapeHtml(p.remark || '-')}</span></div>
     </div>
   `).join('');
 
   document.getElementById('detail_fields').innerHTML = `
     <div class="detail-card">
-      <h4>📌 基础信息与履约周期</h4>
+      <h4>📌 合同公共主信息 (合计含税总额: ${fmtMoney(c.amount)})</h4>
       <div class="detail-row"><span class="label">合同编号</span><span class="val">${escapeHtml(c.contract_no)}</span></div>
       <div class="detail-row"><span class="label">合同名称</span><span class="val">${escapeHtml(c.contract_name)}</span></div>
-      <div class="detail-row"><span class="label">合同摘要</span><span class="val">${escapeHtml(c.contract_summary || '-')}</span></div>
       <div class="detail-row"><span class="label">类型 / 状态</span><span class="val">${escapeHtml(c.contract_type)} · <span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></span></div>
-      <div class="detail-row"><span class="label">签订日期</span><span class="val">${escapeHtml(c.sign_date)}</span></div>
-      <div class="detail-row"><span class="label">开始履约日期</span><span class="val">${escapeHtml(c.start_date || c.sign_date)}</span></div>
+      <div class="detail-row"><span class="label">我方签约主体</span><span class="val">${escapeHtml(c.our_entity)}</span></div>
+      <div class="detail-row"><span class="label">签订 / 开始履约日</span><span class="val">${escapeHtml(c.sign_date)} / ${escapeHtml(c.start_date || c.sign_date)}</span></div>
       <div class="detail-row"><span class="label">合同到期日</span><span class="val">${renderDueAlertBadge(c.expiry_date, c.status)}</span></div>
     </div>
-
-    <div class="detail-card">
-      <h4>🏢 签约多方主体明细</h4>
-      <div class="detail-row"><span class="label">我方签约主体</span><span class="val">${escapeHtml(c.our_entity)}</span></div>
-      ${partiesDetailHtml}
-    </div>
-
-    <div class="detail-card">
-      <h4>💰 财税与保证金/质保金</h4>
-      <div class="detail-row"><span class="label">含税总价</span><span class="val">${fmtMoney(c.amount)} ${escapeHtml(c.currency)}</span></div>
-      <div class="detail-row"><span class="label">不含税价</span><span class="val">${fmtMoney(c.amount_excl_tax)}</span></div>
-      <div class="detail-row"><span class="label">税率 / 发票类型</span><span class="val">${escapeHtml(c.tax_rate || '-')} / ${escapeHtml(c.invoice_type || '-')}</span></div>
-      <div class="detail-row"><span class="label">履约保证金</span><span class="val">${fmtMoney(c.perf_bond_amount)} (缴纳:${escapeHtml(c.perf_bond_pay_date || '-')})</span></div>
-      <div class="detail-row"><span class="label">保证金应退时间</span><span class="val">${renderDueAlertBadge(c.perf_bond_return_date, c.status)}</span></div>
-      <div class="detail-row"><span class="label">质保金金额</span><span class="val">${fmtMoney(c.warranty_bond_amount)}</span></div>
-      <div class="detail-row"><span class="label">质保金到期时间</span><span class="val">${renderDueAlertBadge(c.warranty_bond_expiry_date, c.status)}</span></div>
-      <div class="detail-row"><span class="label">备注</span><span class="val">${escapeHtml(c.remark || '-')}</span></div>
-    </div>
+    ${partiesDetailHtml}
   `;
 
   const toolbar = document.getElementById('attachment_toolbar');
@@ -444,7 +558,6 @@ async function openDetailModal(id) {
 function closeDetailModal() {
   document.getElementById('detail_modal').classList.add('hidden');
   const preview = document.getElementById('preview_container');
-  // 主动卸载 iframe 内的 PDF 渲染器句柄，释放内存
   const iframe = preview.querySelector('iframe');
   if (iframe) {
     iframe.src = 'about:blank';
