@@ -12,26 +12,32 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .auth-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; padding: 8px 10px; border-radius: 5px; font-size: 12.5px; margin-bottom: 12px; text-align: left; }
 .auth-submit-btn { width: 100%; padding: 10px; font-size: 14px; font-weight: 600; }
 
-.app-header { background: #ffffff; padding: 12px 24px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
-.app-header h1 { font-size: 18px; font-weight: 600; color: #111827; }
-.header-sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
-.header-actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.app-header { background: #ffffff; padding: 10px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 10px; }
+.app-header h1 { font-size: 17px; font-weight: 700; color: #111827; }
+.header-sub { font-size: 11.5px; color: #6b7280; margin-top: 2px; }
+.header-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.header-module-group { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+
+/* 顶部双模块切换按钮组 */
+.module-tabs { display: inline-flex; background: #e2e8f0; padding: 3px; border-radius: 7px; gap: 4px; }
+.module-tab { border: none; background: transparent; padding: 7px 15px; border-radius: 5px; font-size: 13px; font-weight: 600; color: #475569; cursor: pointer; transition: all 0.15s; }
+.module-tab:hover { color: #0f172a; }
+.module-tab.active { background: #2563eb; color: #ffffff; box-shadow: 0 1px 3px rgba(0,0,0,0.15); }
+#tab_btn_procurement.active { background: #0f766e; color: #ffffff; }
 
 .default-entity-bar { display: flex; align-items: center; gap: 6px; background: #eff6ff; border: 1px solid #bfdbfe; padding: 4px 10px; border-radius: 4px; font-size: 12px; color: #1e3a8a; }
-.legend-box { display: flex; align-items: center; gap: 6px; background: #f9fafb; padding: 5px 10px; border-radius: 4px; border: 1px solid #e5e7eb; font-size: 12px; }
-.legend-gradient { padding: 2px 8px; border-radius: 4px; color: #fff; font-weight: 600; background: linear-gradient(90deg, hsl(130, 65%, 38%) 0%, hsl(45, 85%, 42%) 55%, hsl(0, 78%, 38%) 100%); }
 
-.container { padding: 14px 20px; }
+.container { padding: 12px 18px; }
 
 /* 筛选工具栏 */
 .filter-bar { background: #fff; padding: 10px 12px; border-radius: 6px; border: 1px solid #e5e7eb; display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; align-items: center; }
 .filter-bar input, .filter-bar select { padding: 6px 9px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 12.5px; }
-#filter_no, #filter_counterparty { min-width: 170px; }
+#filter_no, #filter_counterparty { min-width: 160px; }
 .filter-date-range { display: inline-flex; align-items: center; gap: 4px; background: #f8fafc; border: 1px solid #cbd5e1; padding: 2px 6px; border-radius: 4px; }
 .filter-date-range select { border: none; background: transparent; font-weight: 600; color: #1e3a8a; padding: 4px; }
-.smart-date-filter { width: 115px; border: 1px solid #e2e8f0 !important; background: #fff; }
+.smart-date-filter { width: 112px; border: 1px solid #e2e8f0 !important; background: #fff; }
 
-.btn { padding: 6px 13px; border-radius: 4px; border: 1px solid transparent; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.15s; }
+.btn { padding: 6px 12px; border-radius: 4px; border: 1px solid transparent; cursor: pointer; font-size: 13px; font-weight: 500; transition: opacity 0.15s; }
 .btn:hover { opacity: 0.92; }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 .btn-primary { background: #2563eb; color: #fff; }
@@ -39,6 +45,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .btn-secondary { background: #4b5563; color: #fff; }
 .btn-danger { background: #dc2626; color: #fff; }
 .btn-outline { background: #fff; border-color: #d1d5db; color: #374151; }
+.btn-combined-export { background: linear-gradient(135deg, #7c3aed 0%, #4f46e5 100%); color: #ffffff; font-weight: 600; box-shadow: 0 2px 5px rgba(79,70,229,0.28); }
 .btn-sm { padding: 4px 8px; font-size: 12px; }
 
 .dropdown { position: relative; display: inline-block; }
@@ -47,33 +54,40 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .dropdown-menu a:hover { background: #f3f4f6; }
 .dropdown:hover .dropdown-menu { display: block; }
 
-/* 台账主表与按合同隔行斑马纹样式 */
+/* 台账主表样式（自带隔行浅色斑马纹） */
 .table-wrapper { background: #fff; border-radius: 6px; border: 1px solid #e5e7eb; overflow-x: auto; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
 .ledger-table { width: 100%; border-collapse: collapse; white-space: nowrap; }
 .ledger-table th, .ledger-table td { padding: 8px 10px; border: 1px solid #cbd5e1; text-align: left; vertical-align: middle; }
 .ledger-table th { background: #f1f5f9; font-weight: 600; color: #1e293b; position: sticky; top: 0; z-index: 10; }
 .ledger-table th.merged-col-th { background: #e0e7ff; color: #1e3a8a; }
+.ledger-table th.proc-col-th { background: #ccfbf1; color: #115e59; }
 
 .ledger-table tr.contract-group-even td { background: #ffffff; }
-.ledger-table tr.contract-group-odd td { background: #f8fafc; }
+.ledger-table tr.contract-group-odd td { background: #f1f5f9; }
+.ledger-table tr.proc-group-odd td { background: #f0fdfa; }
 .ledger-table tr.contract-group-end td { border-bottom: 2px solid #94a3b8; }
 
 .text-right { text-align: right !important; }
 .text-center { text-align: center !important; }
-.summary-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #374151; }
+.summary-cell { max-width: 210px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #374151; }
 .seq-badge { display: inline-block; padding: 2px 7px; border-radius: 4px; background: #eff6ff; color: #1d4ed8; font-weight: 700; font-family: Consolas, monospace; font-size: 12px; border: 1px solid #bfdbfe; }
 
 .badge { padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; display: inline-block; }
-.badge-生效中 { background: #d1fae5; color: #065f46; }
-.badge-草稿 { background: #e5e7eb; color: #374151; }
+.badge-生效中, .badge-是 { background: #d1fae5; color: #065f46; }
+.badge-草稿, .badge-否 { background: #e5e7eb; color: #374151; }
 .badge-已到期 { background: #fef3c7; color: #92400e; }
 .badge-已终止 { background: #fee2e2; color: #991b1b; }
 
 .due-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 1.3; }
 .link-btn { color: #2563eb; cursor: pointer; text-decoration: none; font-weight: 500; }
 .link-btn:hover { text-decoration: underline; }
+
 .related-badge-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; background: #f0fdf4; color: #0d9488; border: 1px solid #99f6e4; font-weight: 600; font-size: 12px; cursor: pointer; text-decoration: none; }
 .related-badge-btn:hover { background: #ccfbf1; }
+
+.proc-link-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; background: #f3e8ff; color: #6b21a8; border: 1px solid #d8b4fe; font-weight: 600; font-size: 12px; cursor: pointer; text-decoration: none; }
+.proc-link-badge:hover { background: #e9d5ff; }
+
 .hidden { display: none !important; }
 
 /* 模态框与表单布局 */
@@ -100,11 +114,14 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .form-group small.muted { font-weight: 400; color: #6b7280; }
 .form-group input, .form-group select { padding: 6px 9px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px; }
 
+/* 夹心式 4 段自定义分段编号器：[灰底前缀] + [穿插输入段] + [灰底日期段] + [流水号段] + [灰底后缀] */
 .segmented-no-wrapper { display: flex; align-items: stretch; border: 1px solid #93c5fd; border-radius: 4px; overflow: hidden; background: #fff; }
-.seg-locked { background: #e5e7eb; color: #4b5563; padding: 6px 8px; font-size: 13px; font-family: Consolas, monospace; font-weight: 600; user-select: none; display: inline-flex; align-items: center; border-right: 1px solid #d1d5db; }
+.seg-locked { background: #e5e7eb; color: #374151; padding: 6px 7px; font-size: 12.5px; font-family: Consolas, monospace; font-weight: 700; user-select: none; display: inline-flex; align-items: center; border-right: 1px solid #d1d5db; white-space: nowrap; }
 .seg-locked:last-child { border-right: none; border-left: 1px solid #d1d5db; }
 .seg-locked:empty { display: none; }
-.seg-editable { border: none !important; flex: 1; min-width: 70px; padding: 6px 8px !important; font-weight: 700; color: #1d4ed8; font-family: Consolas, monospace; outline: none; background: #ffffff; }
+.seg-custom-mid { border: none !important; border-right: 1px dashed #93c5fd !important; width: 92px; min-width: 65px; padding: 6px 6px !important; font-weight: 600; color: #7c3aed; font-family: Consolas, monospace; font-size: 12.5px !important; outline: none; background: #faf5ff; text-align: center; }
+.seg-custom-mid:focus { background: #f3e8ff; }
+.seg-editable { border: none !important; flex: 1; min-width: 72px; padding: 6px 8px !important; font-weight: 700; color: #1d4ed8; font-family: Consolas, monospace; outline: none; background: #ffffff; }
 .seg-editable:focus { background: #eff6ff; }
 
 .smart-date-wrap { display: flex; align-items: center; position: relative; }
@@ -113,11 +130,11 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .native-date-Helper::-webkit-calendar-picker-indicator { cursor: pointer; }
 
 .parties-container { display: flex; flex-direction: column; gap: 14px; }
-.party-card { border: 1px solid #93c5fd; border-radius: 6px; padding: 12px; background: #f8fafc; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
+.party-card { border: 1px solid #93c5fd; border-radius: 6px; padding: 12px; background: #f8fafc; }
 .party-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #dbeafe; font-weight: 600; color: #1e3a8a; }
 .party-sub-divider { grid-column: span 4; font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; padding-top: 6px; border-top: 1px dashed #cbd5e1; }
 
-.detail-split-layout { display: grid; grid-template-columns: 520px 1fr; flex: 1; overflow: hidden; }
+.detail-split-layout { display: grid; grid-template-columns: 540px 1fr; flex: 1; overflow: hidden; }
 .detail-left { padding: 16px; border-right: 1px solid #e5e7eb; overflow-y: auto; background: #f9fafb; }
 .detail-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
 .detail-card h4 { font-size: 13px; color: #1d4ed8; margin-bottom: 8px; border-bottom: 1px solid #f3f4f6; padding-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
@@ -135,3 +152,16 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .preview-container iframe { width: 100%; height: 100%; border: none; }
 .preview-container img { max-width: 100%; max-height: 100%; object-fit: contain; }
 .empty-preview { color: #e5e7eb; font-size: 14px; text-align: center; padding: 20px; line-height: 1.6; }
+
+/* 手机端触屏自适应优化 */
+@media (max-width: 768px) {
+  .app-header { padding: 10px 14px; }
+  .container { padding: 8px 10px; }
+  .filter-bar input, .filter-bar select, .filter-bar .btn { width: 100%; }
+  .form-grid-4 { grid-template-columns: 1fr !important; }
+  .span-2, .span-3, .span-4, .party-sub-divider { grid-column: span 1 !important; }
+  .detail-split-layout { grid-template-columns: 1fr !important; overflow-y: auto; }
+  .detail-left { border-right: none; border-bottom: 2px solid #e5e7eb; max-height: none; }
+  .detail-right { min-height: 420px; }
+  .modal-xl, .modal-lg { width: 98vw; height: 94vh; max-height: 94vh; }
+}
