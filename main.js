@@ -2,11 +2,14 @@ const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('
 const path = require('path');
 const fs = require('fs');
 
+// ==================== 0. 铬内核轻量化与低内存占用优化 ====================
+app.commandLine.appendSwitch('disable-renderer-backgrounding');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=256');
+
 // ==================== 1. 强制单实例运行 (Single Instance Lock) ====================
 const gotTheLock = app.requestSingleInstanceLock();
 
 if (!gotTheLock) {
-  // 若已有实例运行，立即退出当前新进程，绝不重复占用端口与内存
   app.quit();
   process.exit(0);
 }
@@ -16,10 +19,6 @@ let tray = null;
 let isQuitting = false;
 let backendController = null;
 
-// 解析数据存储目录：
-// - Portable 便携版 .exe：存储在 .exe 同级目录的 ContractData 文件夹下，方便直接拷贝备份
-// - 安装版 .exe：存储在系统 AppData/Roaming/ContractManager/ContractData 下
-// - 开发环境：存储在项目根目录下
 function resolveDataRoot() {
   if (!app.isPackaged) {
     return __dirname;
@@ -30,7 +29,7 @@ function resolveDataRoot() {
   return path.join(app.getPath('userData'), 'ContractData');
 }
 
-// 纯内存动态绘制 16x16 像素系统托盘图标（无需外部 .ico 文件，避免打包路径丢失报错）
+// 纯内存动态生成 16x16 像素系统托盘图标
 function createBuiltinTrayIcon() {
   const size = 16;
   const buf = Buffer.alloc(size * size * 4);
@@ -44,7 +43,6 @@ function createBuiltinTrayIcon() {
       } else if (isBorder || isLine) {
         buf[idx] = 255; buf[idx + 1] = 255; buf[idx + 2] = 255; buf[idx + 3] = 255;
       } else {
-        // 商务蓝底色 (BGRA: B=235, G=99, R=37, A=255)
         buf[idx] = 235; buf[idx + 1] = 99; buf[idx + 2] = 37; buf[idx + 3] = 255;
       }
     }
@@ -52,7 +50,6 @@ function createBuiltinTrayIcon() {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
-// 当用户尝试第二次双击 .exe 时，自动唤醒并聚焦已运行的窗口
 app.on('second-instance', () => {
   if (mainWindow) {
     if (!mainWindow.isVisible()) mainWindow.show();
@@ -64,25 +61,28 @@ app.on('second-instance', () => {
 // ==================== 2. 创建主窗口与系统托盘 ====================
 async function createWindowAndTray(port, dataRoot) {
   const appIcon = createBuiltinTrayIcon();
+  const localUrl = `http://127.0.0.1:${port}`;
 
   mainWindow = new BrowserWindow({
-    width: 1460,
-    height: 900,
-    minWidth: 1100,
+    width: 1520,
+    height: 920,
+    minWidth: 1150,
     minHeight: 680,
     title: '企业合同台账管理系统',
     icon: appIcon,
     autoHideMenuBar: true,
+    backgroundColor: '#f3f4f6',
     webPreferences: {
       nodeIntegration: false,
       contextIsolation: true,
-      plugins: true // 启用 Chromium 内置 PDF 预览插件
+      spellcheck: false, // 关闭英文拼写检查器以节省内存与 CPU
+      plugins: true      // 启用内置 PDF 扫描件预览插件
     }
   });
 
-  await mainWindow.loadURL(`http://127.0.0.1:${port}`);
+  await mainWindow.loadURL(localUrl);
 
-  // 点击窗口右上角 [X] 关闭按钮时：隐藏到系统托盘，不直接退出，同时清理页面缓存降低内存
+  // 点击右上角 [X] 时隐藏到系统托盘，并清理多余渲染缓存降低后台内存
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
@@ -95,13 +95,12 @@ async function createWindowAndTray(port, dataRoot) {
     mainWindow = null;
   });
 
-  // 初始化系统托盘 (System Tray)
   tray = new Tray(appIcon);
-  tray.setToolTip('企业合同台账管理系统 (后台运行中)');
+  tray.setToolTip('企业合同台账管理系统 (双击打开主窗口)');
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '📂 打开合同台账主界面',
+      label: '📂 打开合同台账桌面主界面',
       click: () => {
         if (mainWindow) {
           mainWindow.show();
@@ -111,7 +110,13 @@ async function createWindowAndTray(port, dataRoot) {
       }
     },
     {
-      label: '🗄️ 打开本地数据与扫描件目录',
+      label: '🌐 在系统浏览器中打开网页版',
+      click: () => {
+        shell.openExternal(localUrl);
+      }
+    },
+    {
+      label: '🗄️ 打开本地数据与扫描件存储目录',
       click: () => {
         shell.openPath(dataRoot);
       }
@@ -148,13 +153,11 @@ async function performFullExit() {
   isQuitting = true;
 
   try {
-    // 1. 销毁系统托盘图标，杜绝任务栏残留图标
     if (tray) {
       tray.destroy();
       tray = null;
     }
 
-    // 2. 销毁所有渲染窗口与 WebContents 子进程
     const windows = BrowserWindow.getAllWindows();
     for (const win of windows) {
       if (!win.isDestroyed()) {
@@ -162,7 +165,6 @@ async function performFullExit() {
       }
     }
 
-    // 3. 关闭 Express 服务、强制断开所有长连接 Socket、执行 SQLite WAL 刷盘并关闭数据库锁
     if (backendController && typeof backendController.shutdown === 'function') {
       await backendController.shutdown();
       backendController = null;
@@ -170,7 +172,6 @@ async function performFullExit() {
   } catch (err) {
     console.error('退出清理异常:', err);
   } finally {
-    // 4. 释放操作系统单实例互斥锁并强制结束主进程
     app.releaseSingleInstanceLock();
     app.quit();
     setTimeout(() => {
@@ -207,7 +208,6 @@ app.whenReady().then(async () => {
 
     process.env.DATA_ROOT = dataRoot;
     const { startServer } = require('./server');
-    // 传入端口 0，由操作系统自动分配空闲本地端口，彻底避免端口占用冲突
     backendController = await startServer(0, '127.0.0.1');
 
     await createWindowAndTray(backendController.port, dataRoot);
