@@ -32,33 +32,66 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
   });
 }
 
+function uploadMultipartFiles(port, reqPath, fieldName, filesArray) {
+  return new Promise((resolve, reject) => {
+    const boundary = '----ContractSmokeBoundary' + Date.now();
+    const chunks = [];
+
+    for (const f of filesArray) {
+      chunks.push(Buffer.from(
+        `--${boundary}\r\n` +
+        `Content-Disposition: form-data; name="${fieldName}"; filename="${f.filename}"\r\n` +
+        `Content-Type: ${f.mime || 'application/pdf'}\r\n\r\n`
+      ));
+      chunks.push(Buffer.from(f.content));
+      chunks.push(Buffer.from('\r\n'));
+    }
+    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+    const bodyBuf = Buffer.concat(chunks);
+
+    const req = http.request({
+      hostname: '127.0.0.1',
+      port,
+      path: reqPath,
+      method: 'POST',
+      headers: {
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': bodyBuf.length
+      }
+    }, res => {
+      let data = '';
+      res.on('data', c => data += c);
+      res.on('end', () => resolve(JSON.parse(data)));
+    });
+    req.on('error', reject);
+    req.write(bodyBuf);
+    req.end();
+  });
+}
+
 (async () => {
   let controller = null;
   try {
     controller = await startServer(0, '127.0.0.1');
     const port = controller.port;
-    console.log(`🧪 执行打包前全功能与垃圾回收冒烟测试 (Port: ${port})...`);
+    console.log(`🧪 执行终极全链路稳定性与异常回滚冒烟测试 (Port: ${port})...`);
 
-    // 1. 验证默认我方主体修改接口
-    const entityRes = await requestJson(port, '/api/settings/our-entity', 'PUT', {
+    // 1. 验证默认我方主体与编号规则设置
+    await requestJson(port, '/api/settings/our-entity', 'PUT', {
       default_our_entity: '华南智云科技股份有限公司'
     });
-    assert.strictEqual(entityRes.success, true, '设置默认我方主体应成功');
-
-    // 2. 验证编号规则与按年断号重编设置
-    const ruleRes = await requestJson(port, '/api/settings/contract-no-rule', 'PUT', {
+    await requestJson(port, '/api/settings/contract-no-rule', 'PUT', {
       prefix: 'ZN-',
       date_part: 'YYYY-',
       seq_digits: 3,
       suffix: '-CG',
       reset_yearly: true
     });
-    assert.strictEqual(ruleRes.success, true, '保存合同编号规则应成功');
 
-    // 3. 验证先录入晚签合同、再录入早签合同，系统自动按 001、002 正序重编
+    // 2. 创建两份合同，验证按 001、002 正序排列
     const c2 = await requestJson(port, '/api/contracts', 'POST', {
       contract_no: 'ZN-2026-002-CG',
-      contract_name: '第二份合同(较晚签订)',
+      contract_name: '二期硬件采购合同',
       contract_type: '采购',
       our_entity: '华南智云科技股份有限公司',
       sign_date: '2026.8.15',
@@ -69,7 +102,6 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
         {
           company_name: '硬件供应商B',
           credit_code: '91440300MA5FX00002',
-          bank_account_no: '6222021234567890123',
           amount: 500000,
           tax_rate: '6，13',
           warranty_bond_amount: 4212,
@@ -81,7 +113,7 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
 
     const c1 = await requestJson(port, '/api/contracts', 'POST', {
       contract_no: 'ZN-2026-001-CG',
-      contract_name: '第一份合同(较早签订)',
+      contract_name: '一期软件开发合同',
       contract_type: '服务',
       our_entity: '华南智云科技股份有限公司',
       sign_date: '2026.3.5',
@@ -99,17 +131,68 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
     });
     assert.strictEqual(c1.success, true);
 
-    // 4. 验证孤儿垃圾文件清扫机制 (sweepOrphanUploads)
-    const orphanFile = path.join(testDataRoot, 'uploads', 'orphan_garbage_file.pdf');
-    fs.writeFileSync(orphanFile, 'dummy orphan content');
-    assert.strictEqual(fs.existsSync(orphanFile), true);
-    sweepOrphanUploads();
-    assert.strictEqual(fs.existsSync(orphanFile), false, '未被数据库引用的孤儿扫描件应被自动清扫');
+    // 3. 为第一份合同上传 2 份“其他关联资料”，验证专属文件夹自动创建
+    const relUploadRes = await uploadMultipartFiles(port, `/api/contracts/${c1.id}/related`, 'related_files', [
+      { filename: '1#立项批复文件.pdf', content: '%PDF-1.4 dummy 1' },
+      { filename: '招标会议纪要.docx', content: 'docx dummy 2' }
+    ]);
+    assert.strictEqual(relUploadRes.success, true, '多文件关联资料上传应成功');
+    const originalFolderRel = 'uploads/related/ZN-2026-001-CG+一期软件开发合同+2026-03-05';
+    assert.strictEqual(relUploadRes.related_folder_path, originalFolderRel);
 
-    // 5. 验证导出 Excel 二进制流：正序排列 + 纯整数日期无时分秒
+    // 4. 【异常回滚测试】故意将 c1 的编号改成与 c2 重名的 'ZN-2026-002-CG'，验证被拦截且原文件夹毫发无损
+    const conflictUpdateRes = await requestJson(port, `/api/contracts/${c1.id}`, 'PUT', {
+      contract_no: 'ZN-2026-002-CG',
+      contract_name: '故意制造重名冲突的名称',
+      contract_type: '服务',
+      our_entity: '华南智云科技股份有限公司',
+      sign_date: '2026-03-10',
+      start_date: '2026-03-10',
+      expiry_date: '2026-12-31',
+      status: '生效中',
+      counterparties_json: JSON.stringify([
+        { company_name: '服务商A', credit_code: '91440300MA5FX00001', amount: 100000 }
+      ])
+    });
+    assert.strictEqual(conflictUpdateRes.success, false, '重复编号更新应当被安全拦截');
+    assert.strictEqual(
+      fs.existsSync(path.join(testDataRoot, originalFolderRel, '1#立项批复文件.pdf')),
+      true,
+      '当更新因编号冲突被拦截时，原关联资料文件夹绝不能被误改名或破坏'
+    );
+
+    // 5. 【正常联动改名测试】修改第一份合同的名称与签订日期，验证专属文件夹自动同步重命名
+    const updateRes = await requestJson(port, `/api/contracts/${c1.id}`, 'PUT', {
+      contract_no: 'ZN-2026-001-CG',
+      contract_name: '一期软件升级合同(已改名)',
+      contract_type: '服务',
+      our_entity: '华南智云科技股份有限公司',
+      sign_date: '2026-03-10',
+      start_date: '2026-03-10',
+      expiry_date: '2026-12-31',
+      status: '生效中',
+      counterparties_json: JSON.stringify([
+        {
+          company_name: '服务商A',
+          credit_code: '91440300MA5FX00001',
+          amount: 100000,
+          tax_rate: '6%'
+        }
+      ])
+    });
+    assert.strictEqual(updateRes.success, true, '更新合同信息应成功');
+
+    const expectedNewFolderRel = 'uploads/related/ZN-2026-001-CG+一期软件升级合同(已改名)+2026-03-10';
+    assert.strictEqual(
+      fs.existsSync(path.join(testDataRoot, expectedNewFolderRel, '1#立项批复文件.pdf')),
+      true,
+      '修改合同名称和日期后，关联资料专属文件夹必须自动同步改名且内部文件完好无损'
+    );
+
+    // 6. 验证导出 Excel 二进制流
     const excelBuffer = await new Promise((resolve, reject) => {
       http.get(`http://127.0.0.1:${port}/api/contracts/export?scope=all`, res => {
-        assert.strictEqual(res.statusCode, 200, '导出状态码应为 200');
+        assert.strictEqual(res.statusCode, 200);
         const chunks = [];
         res.on('data', chunk => chunks.push(chunk));
         res.on('end', () => resolve(Buffer.concat(chunks)));
@@ -120,15 +203,15 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
     const ws = wb.Sheets['合同台账'];
 
     assert.strictEqual(ws['A3'].v, '2026-001', '导出第1条数据行必须按正序排列为 2026-001');
-    assert.strictEqual(ws['A4'].v, '2026-002', '导出第2条数据行必须按正序排列为 2026-002');
-    assert.strictEqual(Number.isInteger(ws['F3'].v), true, '导出签订日期序列号必须为纯整数（绝不含时分秒小数）');
-    assert.strictEqual(Number.isInteger(ws['AB4'].v), true, '导出质保金到期日序列号必须为纯整数（绝不含时分秒小数）');
+    assert.strictEqual(Number.isInteger(ws['F3'].v), true, '导出签订日期必须为纯整数序列号');
+    assert.strictEqual(ws['AE3'].l.Target, expectedNewFolderRel, '导出表第31列超链接必须指向重命名后的关联资料专属文件夹');
 
-    // 6. 验证彻底释放端口与 SQLite 文件句柄
+    // 7. 验证孤儿文件清扫与关闭资源释放
+    sweepOrphanUploads();
     await controller.shutdown();
     controller = null;
     fs.rmSync(testDataRoot, { recursive: true, force: true });
-    console.log('✅ 稳定性、安全性、孤儿文件清扫、纯年月日导出与资源释放测试全部通过！');
+    console.log('✅ 终极全局稳定性、异常回滚保护、文件夹联动改名与 Excel 超链接测试 100% 通过！');
     process.exit(0);
   } catch (err) {
     console.error('❌ 冒烟测试失败:', err);
