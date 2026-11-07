@@ -6,31 +6,43 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
-const PORT = process.env.PORT || 3000;
 
-// 1. 确保上传目录与临时目录存在
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
+// 1. 解析可读写的数据根目录（兼容打包成 .exe 后的只读 asar 环境）
+const DATA_ROOT = process.env.DATA_ROOT || __dirname;
+const UPLOAD_DIR = path.join(DATA_ROOT, 'uploads');
 const TMP_UPLOAD_DIR = path.join(UPLOAD_DIR, '.tmp');
+
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(TMP_UPLOAD_DIR)) fs.mkdirSync(TMP_UPLOAD_DIR, { recursive: true });
+
+// 清理残留在 .tmp 目录中的临时文件
+function cleanTmpDir() {
+  if (!fs.existsSync(TMP_UPLOAD_DIR)) return;
+  try {
+    for (const file of fs.readdirSync(TMP_UPLOAD_DIR)) {
+      fs.unlinkSync(path.join(TMP_UPLOAD_DIR, file));
+    }
+  } catch (e) {}
+}
+cleanTmpDir();
 
 // 2. 中间件配置
 app.use(express.json({ limit: '5mb' }));
 app.use(express.urlencoded({ extended: true, limit: '5mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
-// 静态托管扫描件供浏览器内置预览（设置 inline 与 UTF-8 文件名支持）
 app.use('/uploads', express.static(UPLOAD_DIR, {
-  setHeaders: (res, filePath) => {
+  setHeaders: (res) => {
     res.setHeader('Content-Disposition', 'inline');
-    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Cache-Control', 'no-store');
   }
 }));
 
-// 3. 初始化 SQLite 数据库与自动平滑迁移
-const dbPath = process.env.DB_PATH || path.join(__dirname, 'database.sqlite');
+// 3. 初始化 SQLite 数据库
+const dbPath = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
+db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
@@ -86,30 +98,8 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_party_contract_id ON contract_parties(contract_id);
 `);
 
-// 兼容旧版数据库平滑升级（若从 v1 升级，自动补齐新增列）
-const existingCols = db.prepare(`PRAGMA table_info(contracts)`).all().map(c => c.name);
-const alterColumns = [
-  ['contract_summary', `TEXT DEFAULT ''`],
-  ['counterparties_json', `TEXT NOT NULL DEFAULT '[]'`],
-  ['start_date', `TEXT DEFAULT ''`],
-  ['amount_excl_tax', `REAL DEFAULT NULL`],
-  ['tax_rate', `TEXT DEFAULT ''`],
-  ['invoice_type', `TEXT DEFAULT ''`],
-  ['perf_bond_amount', `REAL DEFAULT NULL`],
-  ['perf_bond_pay_date', `TEXT DEFAULT ''`],
-  ['perf_bond_return_date', `TEXT DEFAULT ''`],
-  ['warranty_bond_amount', `REAL DEFAULT NULL`],
-  ['warranty_bond_expiry_date', `TEXT DEFAULT ''`]
-];
-for (const [col, def] of alterColumns) {
-  if (!existingCols.includes(col)) {
-    db.exec(`ALTER TABLE contracts ADD COLUMN ${col} ${def}`);
-  }
-}
-
 // ==================== 工具与安全校验函数 ====================
 
-// 清洗文件名中的非法系统字符，防止路径穿越与写入失败
 function sanitizeFilenamePart(str) {
   if (!str) return '未命名';
   return String(str)
@@ -128,41 +118,45 @@ function buildStandardAttachmentName(contractNo, contractName, signDate, ext) {
   return `${safeNo}+${safeName}+${safeDate}${cleanExt}`;
 }
 
-// 安全删除物理文件（带目录边界检查，防止越权删除）
 function removeFileIfExists(relativePath) {
   if (!relativePath) return;
-  const fullPath = path.resolve(__dirname, relativePath);
+  const fullPath = path.resolve(DATA_ROOT, relativePath);
   if (!fullPath.startsWith(UPLOAD_DIR)) return;
   if (fs.existsSync(fullPath)) {
-    try { fs.unlinkSync(fullPath); } catch (err) { console.error('文件清理失败:', err.message); }
+    try { fs.unlinkSync(fullPath); } catch (err) { console.error('删除文件失败:', err.message); }
   }
 }
 
-// 将临时上传的文件归档为标准命名文件
+// 解决跨分区或同名覆盖重命名兼容性
+function moveFileSafe(srcPath, destPath) {
+  if (fs.existsSync(destPath)) {
+    try { fs.unlinkSync(destPath); } catch (e) {}
+  }
+  try {
+    fs.renameSync(srcPath, destPath);
+  } catch (err) {
+    fs.copyFileSync(srcPath, destPath);
+    fs.unlinkSync(srcPath);
+  }
+}
+
 function finalizeUploadedFile(tempFile, contractNo, contractName, signDate) {
   const ext = path.extname(tempFile.originalname).toLowerCase();
   const standardName = buildStandardAttachmentName(contractNo, contractName, signDate, ext);
   const targetFullPath = path.join(UPLOAD_DIR, standardName);
-
-  // 如果目标同名文件已存在则先覆盖移除
-  if (fs.existsSync(targetFullPath)) {
-    try { fs.unlinkSync(targetFullPath); } catch (e) {}
-  }
-  fs.renameSync(tempFile.path, targetFullPath);
+  moveFileSafe(tempFile.path, targetFullPath);
   return {
     attachment_path: `uploads/${standardName}`,
     attachment_original_name: standardName
   };
 }
 
-// 解析可空浮点数
 function parseNullableFloat(val) {
   if (val === undefined || val === null || String(val).trim() === '') return null;
   const num = Number(val);
   return Number.isFinite(num) ? num : null;
 }
 
-// 校验税率格式：可为空；若多税率，必须以 * 开头并用英文或中文逗号分隔
 function validateAndNormalizeTaxRate(taxRateRaw) {
   if (!taxRateRaw || !String(taxRateRaw).trim()) return '';
   const str = String(taxRateRaw).trim().replace(/，/g, ',');
@@ -172,7 +166,6 @@ function validateAndNormalizeTaxRate(taxRateRaw) {
   return str;
 }
 
-// 解析并校验多方对方单位数据
 function parseCounterparties(body) {
   let list = [];
   if (body.counterparties_json) {
@@ -184,16 +177,9 @@ function parseCounterparties(body) {
       throw new Error('对方单位多方数据格式解析失败');
     }
   } else if (body.counterparty) {
-    // 兼容简单单文本提交
     list = [{
       company_name: String(body.counterparty).trim(),
-      credit_code: String(body.credit_code || '未填').trim(),
-      contact_person: '',
-      contact_phone: '',
-      bank_account_name: '',
-      bank_account_no: '',
-      bank_name: '',
-      bank_code: ''
+      credit_code: String(body.credit_code || '未填').trim()
     }];
   }
 
@@ -218,15 +204,14 @@ function parseCounterparties(body) {
     };
   });
 
-  const summaryNames = normalized.map(p => p.company_name).join('、');
   return {
-    counterpartySummary: summaryNames,
+    counterpartySummary: normalized.map(p => p.company_name).join('、'),
     counterpartiesJson: JSON.stringify(normalized),
     counterpartiesList: normalized
   };
 }
 
-// 4. 配置 Multer 文件上传（先暂存至 .tmp 目录，校验通过后按规则重命名）
+// 4. Multer 配置
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, TMP_UPLOAD_DIR),
   filename: (req, file, cb) => {
@@ -238,7 +223,7 @@ const storage = multer.diskStorage({
 
 const upload = multer({
   storage,
-  limits: { fileSize: 20 * 1024 * 1024 }, // 20MB
+  limits: { fileSize: 20 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
     const allowedMimeTypes = ['application/pdf', 'image/jpeg', 'image/png'];
     if (allowedMimeTypes.includes(file.mimetype)) {
@@ -249,7 +234,6 @@ const upload = multer({
   }
 });
 
-// 构建动态筛选与排序 SQL（供列表查询与 Excel 导出复用）
 function buildQuery(queryParams) {
   const { contract_no, counterparty, contract_type, status, sort_by, sort_order } = queryParams;
   let sql = `SELECT * FROM contracts WHERE 1=1`;
@@ -261,7 +245,6 @@ function buildQuery(queryParams) {
     params.push(kw, kw, kw);
   }
   if (counterparty && counterparty.trim()) {
-    // 支持按我方主体、对方单位名称、统一信用代码或联系人搜索
     sql += ` AND (counterparty LIKE ? OR our_entity LIKE ? OR counterparties_json LIKE ?)`;
     const cpKw = `%${counterparty.trim()}%`;
     params.push(cpKw, cpKw, cpKw);
@@ -286,7 +269,6 @@ function buildQuery(queryParams) {
   return { sql, params };
 }
 
-// 同步更新子表 contract_parties
 const syncPartiesStmt = db.prepare(`
   INSERT INTO contract_parties (
     contract_id, company_name, credit_code, contact_person, contact_phone,
@@ -306,7 +288,6 @@ function syncContractParties(contractId, partiesList) {
 
 // ==================== API 路由 ====================
 
-// [GET] 获取合同台账列表
 app.get('/api/contracts', (req, res) => {
   try {
     const { sql, params } = buildQuery(req.query);
@@ -317,7 +298,6 @@ app.get('/api/contracts', (req, res) => {
   }
 });
 
-// [GET] 导出 Excel（严格与页面表格列顺序一致，并包含对方多方明细展开列）
 app.get('/api/contracts/export', (req, res) => {
   try {
     const queryObj = req.query.scope === 'all'
@@ -389,14 +369,12 @@ app.get('/api/contracts/export', (req, res) => {
   }
 });
 
-// [GET] 获取单条合同详情
 app.get('/api/contracts/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该合同记录' });
   res.json({ success: true, data: row });
 });
 
-// [POST] 新增合同（事务级写入 + 扫描件按 合同编号+合同名称+签订日期 命名）
 app.post('/api/contracts', upload.single('attachment'), (req, res) => {
   let archivedFile = null;
   try {
@@ -468,7 +446,6 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
   }
 });
 
-// [PUT] 编辑合同（若修改了编号/名称/签订日，自动同步重命名已有扫描件）
 app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
   let newlyArchivedFile = null;
   try {
@@ -498,21 +475,19 @@ app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
       let attachment_original_name = existing.attachment_original_name;
 
       if (req.file) {
-        // 上传了新扫描件：删除旧文件，并将新文件按 合同编号+合同名称+签订日期 归档
         removeFileIfExists(existing.attachment_path);
         newlyArchivedFile = finalizeUploadedFile(req.file, cleanNo, cleanName, cleanSignDate);
         attachment_path = newlyArchivedFile.attachment_path;
         attachment_original_name = newlyArchivedFile.attachment_original_name;
       } else if (existing.attachment_path) {
-        // 未上传新扫描件，但检查是否修改了编号/名称/签订日期，若是则同步重命名磁盘文件
-        const oldFullPath = path.resolve(__dirname, existing.attachment_path);
+        const oldFullPath = path.resolve(DATA_ROOT, existing.attachment_path);
         if (fs.existsSync(oldFullPath)) {
           const ext = path.extname(oldFullPath);
           const expectedName = buildStandardAttachmentName(cleanNo, cleanName, cleanSignDate, ext);
           const expectedRelPath = `uploads/${expectedName}`;
           if (expectedRelPath !== existing.attachment_path) {
             const newFullPath = path.join(UPLOAD_DIR, expectedName);
-            fs.renameSync(oldFullPath, newFullPath);
+            moveFileSafe(oldFullPath, newFullPath);
             attachment_path = expectedRelPath;
             attachment_original_name = expectedName;
           }
@@ -559,7 +534,6 @@ app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
   }
 });
 
-// [DELETE] 删除整条合同记录
 app.delete('/api/contracts/:id', (req, res) => {
   const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: '合同不存在' });
@@ -569,7 +543,6 @@ app.delete('/api/contracts/:id', (req, res) => {
   res.json({ success: true, message: '合同及关联扫描件已删除' });
 });
 
-// [POST] 详情页单独上传/替换扫描件（自动以 合同编号+合同名称+签订日期 命名）
 app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res) => {
   try {
     const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
@@ -602,7 +575,6 @@ app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res
   }
 });
 
-// [DELETE] 仅删除合同关联的扫描件
 app.delete('/api/contracts/:id/attachment', (req, res) => {
   const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!existing) return res.status(404).json({ success: false, message: '合同不存在' });
@@ -617,20 +589,18 @@ app.delete('/api/contracts/:id/attachment', (req, res) => {
   res.json({ success: true, message: '扫描件已移除' });
 });
 
-// [GET] 下载扫描件（文件名即为 合同编号+合同名称+签订日期.ext）
 app.get('/api/contracts/:id/download', (req, res) => {
   const existing = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!existing || !existing.attachment_path) {
     return res.status(404).send('该合同尚未上传扫描件');
   }
-  const fullPath = path.resolve(__dirname, existing.attachment_path);
+  const fullPath = path.resolve(DATA_ROOT, existing.attachment_path);
   if (!fullPath.startsWith(UPLOAD_DIR) || !fs.existsSync(fullPath)) {
     return res.status(404).send('扫描件物理文件不存在');
   }
   res.download(fullPath, existing.attachment_original_name);
 });
 
-// 全局错误拦截中间件
 app.use((err, req, res, next) => {
   if (err instanceof multer.MulterError && err.code === 'LIMIT_FILE_SIZE') {
     return res.status(400).json({ success: false, message: '扫描件大小不能超过 20MB' });
@@ -638,10 +608,56 @@ app.use((err, req, res, next) => {
   res.status(400).json({ success: false, message: err.message || '服务器请求处理异常' });
 });
 
-if (require.main === module) {
-  app.listen(PORT, () => {
-    console.log(`✅ 企业合同台账管理系统 v2.0 已启动: http://localhost:${PORT}`);
+// ==================== 5. 可控服务启动与全量资源销毁接口 ====================
+function startServer(port = 0, host = '127.0.0.1') {
+  return new Promise((resolve, reject) => {
+    const activeSockets = new Set();
+    const server = app.listen(port, host, () => {
+      const actualPort = server.address().port;
+      resolve({
+        port: actualPort,
+        server,
+        shutdown: async () => {
+          // 1. 清理临时上传残留文件
+          cleanTmpDir();
+
+          // 2. 主动中断所有 Keep-Alive Socket 连接，防止 server.close 挂起
+          if (typeof server.closeAllConnections === 'function') {
+            server.closeAllConnections();
+          }
+          for (const socket of activeSockets) {
+            try { socket.destroy(); } catch (e) {}
+          }
+          activeSockets.clear();
+
+          // 3. 关闭 HTTP Server 监听端口
+          await new Promise((resClose) => server.close(() => resClose()));
+
+          // 4. 将 SQLite WAL 预写日志完整刷入主库并关闭文件锁句柄
+          if (db && db.open) {
+            try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (e) {}
+            try { db.close(); } catch (e) {}
+          }
+        }
+      });
+    });
+
+    server.on('connection', (socket) => {
+      activeSockets.add(socket);
+      socket.on('close', () => activeSockets.delete(socket));
+    });
+
+    server.on('error', reject);
   });
 }
 
-module.exports = { app, db };
+if (require.main === module) {
+  const PORT = process.env.PORT || 3000;
+  startServer(PORT, '127.0.0.1').then(({ port, shutdown }) => {
+    console.log(`✅ 服务已启动: http://127.0.0.1:${port}`);
+    process.on('SIGINT', async () => { await shutdown(); process.exit(0); });
+    process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
+  });
+}
+
+module.exports = { app, db, startServer };
