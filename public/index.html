@@ -7,12 +7,38 @@
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
+  <!-- 🔒 内网访问口令锁屏拦截层（本机 127.0.0.1 访问自动隐藏；其他内网电脑未认证时强制全屏拦截） -->
+  <div id="lan_auth_overlay" class="auth-overlay hidden">
+    <div class="auth-card">
+      <div class="auth-icon">🔐</div>
+      <h2>内网协同安全验证</h2>
+      <p class="auth-desc" id="lan_auth_desc">
+        您正在通过局域网访问主机合同台账系统。请输入主机管理员指定的<strong>内网验证口令</strong>（验证通过后，您修改的台账与上传的附件将直接保存在主机硬盘中）：
+      </p>
+      <form onsubmit="submitLanAuthForm(event)">
+        <input type="password" id="lan_auth_passcode_input" class="auth-input" placeholder="请输入内网访问验证口令" required autocomplete="off" />
+        <div id="lan_auth_error" class="auth-error hidden"></div>
+        <button type="submit" id="btn_lan_login" class="btn btn-primary auth-submit-btn">🔓 验证口令并进入系统</button>
+      </form>
+    </div>
+  </div>
+
   <header class="app-header">
     <div>
       <h1>📄 企业合同台账管理系统</h1>
-      <p class="header-sub">纯浏览器超轻架构 · 按年断号重编 · 智能日期/税率 · 扫描件与关联资料专属文件夹超链接导出</p>
+      <p class="header-sub">纯浏览器超轻架构 · 动态随机端口 + 内网口令锁 · 按年断号重编 · 扫描件与关联资料专属文件夹超链接导出</p>
     </div>
     <div class="header-actions">
+      <!-- 仅在本机 (127.0.0.1) 显示的内网口令与随机端口共享管理栏 -->
+      <div id="host_lan_bar" class="default-entity-bar hidden" style="background:#f0fdf4;border-color:#86efac;color:#166534;" title="本机免密直连；其他内网电脑访问本次随机端口网址时必须输入您设定的验证口令">
+        <span>🔐 内网协同口令：</span>
+        <strong id="display_lan_status">开启 (口令: ******)</strong>
+        <button type="button" class="btn btn-outline btn-sm" onclick="openLanSecurityModal()">设置口令 / 复制内网链接</button>
+      </div>
+
+      <!-- 仅在其他内网电脑已登录时显示的退出锁屏按钮 -->
+      <button type="button" id="btn_lan_logout" class="btn btn-outline btn-sm hidden" onclick="logoutLanSession()" title="锁定当前内网浏览器的访问权限">🔒 锁定退出</button>
+
       <div class="default-entity-bar" title="配置合同编号的固定前缀、日期格式、流水号位数、固定后缀及序号按年重编规则">
         <span>🔢 编号格式：</span>
         <strong id="display_no_rule">加载中...</strong>
@@ -131,6 +157,50 @@
       </table>
     </section>
   </main>
+
+  <!-- 弹窗 S：本机管理员专属【内网协同口令与动态随机端口】设置弹窗 -->
+  <div id="lan_security_modal" class="modal hidden">
+    <div class="modal-content" style="width: 560px; max-width: 95vw;">
+      <div class="modal-header">
+        <h2>🔐 内网访问安全口令与本次随机端口链接</h2>
+        <span class="close-btn" onclick="closeLanSecurityModal()">&times;</span>
+      </div>
+      <form onsubmit="saveLanSecurityForm(event)">
+        <div class="form-scroll-body">
+          <div style="background:#f0fdf4;border:1px solid #86efac;padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:12.5px;color:#166534;line-height:1.55;">
+            🛡️ <strong>多重安全保障机制已激活：</strong><br/>
+            1. <strong>本机免密特权</strong>：您在这台主机 (`127.0.0.1`) 上操作永远无需输入口令。<br/>
+            2. <strong>每次启动随机端口</strong>：每次启动软件都会动态更换随机端口，防止固定网址被长期窥探。<br/>
+            3. <strong>防暴力破解与一键踢人</strong>：内网输错 5 次口令自动封禁 IP 15 分钟；您随时修改下方口令或取消勾选后保存，所有已登录的内网电脑将<strong>立即失效并被踢出</strong>！
+          </div>
+
+          <div class="form-group" style="margin-bottom:12px;">
+            <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13.5px;">
+              <input type="checkbox" id="lan_enabled_checkbox" checked />
+              <span><strong>允许其他内网电脑通过局域网访问本机并协同编辑台账</strong></span>
+            </label>
+          </div>
+
+          <div class="form-group" style="margin-bottom:14px;">
+            <label>指定内网访问验证口令 * <small class="muted">(4 ~ 32 位字符，其他内网电脑打开网页时必须先输入此口令)</small></label>
+            <input type="text" id="lan_passcode_input" placeholder="如：888888 或自定义密码" minlength="4" maxlength="32" required style="font-family:Consolas,monospace;font-weight:700;font-size:14px;color:#1d4ed8;" />
+          </div>
+
+          <div style="background:#eff6ff;border:1px solid #bfdbfe;padding:10px 12px;border-radius:6px;">
+            <div style="font-size:12px;font-weight:600;color:#1e3a8a;margin-bottom:6px;">
+              📡 本次运行的【内网随机端口访问地址】与【口令】一键复制：
+            </div>
+            <div id="lan_urls_box" style="font-family:Consolas,monospace;font-size:13px;color:#1d4ed8;font-weight:700;margin-bottom:8px;word-break:break-all;"></div>
+            <button type="button" class="btn btn-success btn-sm" onclick="copyLanInviteText()">📋 一键复制【内网网址 + 验证口令】发给同事</button>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeLanSecurityModal()">关闭</button>
+          <button type="submit" class="btn btn-primary">💾 保存安全口令设置</button>
+        </div>
+      </form>
+    </div>
+  </div>
 
   <!-- 弹窗 A：修改默认我方签约主体 -->
   <div id="our_entity_modal" class="modal hidden">
