@@ -15,7 +15,6 @@ const TMP_UPLOAD_DIR = path.join(UPLOAD_DIR, '.tmp');
 if (!fs.existsSync(UPLOAD_DIR)) fs.mkdirSync(UPLOAD_DIR, { recursive: true });
 if (!fs.existsSync(TMP_UPLOAD_DIR)) fs.mkdirSync(TMP_UPLOAD_DIR, { recursive: true });
 
-// 清理残留在 .tmp 目录中的临时文件
 function cleanTmpDir() {
   if (!fs.existsSync(TMP_UPLOAD_DIR)) return;
   try {
@@ -27,8 +26,8 @@ function cleanTmpDir() {
 cleanTmpDir();
 
 // 2. 中间件配置
-app.use(express.json({ limit: '5mb' }));
-app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 app.use(express.static(path.join(__dirname, 'public')));
 
 app.use('/uploads', express.static(UPLOAD_DIR, {
@@ -38,7 +37,7 @@ app.use('/uploads', express.static(UPLOAD_DIR, {
   }
 }));
 
-// 3. 初始化 SQLite 数据库
+// 3. 初始化 SQLite 数据库（含系统设置表、合同主表、多方独立履约明细子表）
 const dbPath = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
@@ -46,6 +45,13 @@ db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 
 db.exec(`
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+  );
+
+  INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_our_entity', '本单位默认签约主体名称（点击顶部可修改）');
+
   CREATE TABLE IF NOT EXISTS contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     contract_no TEXT NOT NULL UNIQUE,
@@ -79,7 +85,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS contract_parties (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     contract_id INTEGER NOT NULL,
-    party_role TEXT NOT NULL DEFAULT '对方单位',
+    party_index INTEGER NOT NULL DEFAULT 1,
     company_name TEXT NOT NULL,
     credit_code TEXT NOT NULL,
     contact_person TEXT DEFAULT '',
@@ -88,6 +94,18 @@ db.exec(`
     bank_account_no TEXT DEFAULT '',
     bank_name TEXT DEFAULT '',
     bank_code TEXT DEFAULT '',
+    item_summary TEXT DEFAULT '',
+    amount REAL NOT NULL DEFAULT 0,
+    amount_excl_tax REAL DEFAULT NULL,
+    tax_rate TEXT DEFAULT '',
+    invoice_type TEXT DEFAULT '',
+    currency TEXT NOT NULL DEFAULT 'CNY',
+    perf_bond_amount REAL DEFAULT NULL,
+    perf_bond_pay_date TEXT DEFAULT '',
+    perf_bond_return_date TEXT DEFAULT '',
+    warranty_bond_amount REAL DEFAULT NULL,
+    warranty_bond_expiry_date TEXT DEFAULT '',
+    remark TEXT DEFAULT '',
     FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE
   );
 
@@ -127,7 +145,6 @@ function removeFileIfExists(relativePath) {
   }
 }
 
-// 解决跨分区或同名覆盖重命名兼容性
 function moveFileSafe(srcPath, destPath) {
   if (fs.existsSync(destPath)) {
     try { fs.unlinkSync(destPath); } catch (e) {}
@@ -157,15 +174,16 @@ function parseNullableFloat(val) {
   return Number.isFinite(num) ? num : null;
 }
 
-function validateAndNormalizeTaxRate(taxRateRaw) {
+function validateAndNormalizeTaxRate(taxRateRaw, partyIndex = 1) {
   if (!taxRateRaw || !String(taxRateRaw).trim()) return '';
   const str = String(taxRateRaw).trim().replace(/，/g, ',');
   if (str.includes(',') && !str.startsWith('*')) {
-    throw new Error('填写多个税率时，必须在最前面加上 * 号并用逗号隔开（例如：*6%,13%）');
+    throw new Error(`第 ${partyIndex} 个对方单位的税率包含多个值时，必须在最前面加上 * 号并用逗号隔开（例如：*6%,13%）`);
   }
   return str;
 }
 
+// 解析并校验多方独立履约数据（每方各有独立的摘要、金额、税率、保证金、质保金、备注）
 function parseCounterparties(body) {
   let list = [];
   if (body.counterparties_json) {
@@ -174,17 +192,12 @@ function parseCounterparties(body) {
         ? JSON.parse(body.counterparties_json)
         : body.counterparties_json;
     } catch (e) {
-      throw new Error('对方单位多方数据格式解析失败');
+      throw new Error('对方单位多方履约数据格式解析失败');
     }
-  } else if (body.counterparty) {
-    list = [{
-      company_name: String(body.counterparty).trim(),
-      credit_code: String(body.credit_code || '未填').trim()
-    }];
   }
 
   if (!Array.isArray(list) || list.length === 0) {
-    throw new Error('请至少添加一方对方单位信息');
+    throw new Error('请至少添加一方对方单位及履约明细');
   }
 
   const normalized = list.map((item, idx) => {
@@ -192,7 +205,12 @@ function parseCounterparties(body) {
     const credit_code = String(item.credit_code || '').trim();
     if (!company_name) throw new Error(`第 ${idx + 1} 个对方单位的“单位名称”不能为空`);
     if (!credit_code) throw new Error(`第 ${idx + 1} 个对方单位（${company_name}）的“统一信用代码”不能为空`);
+
+    const cleanTax = validateAndNormalizeTaxRate(item.tax_rate, idx + 1);
+    const amountVal = parseFloat(item.amount);
+
     return {
+      party_index: idx + 1,
       company_name,
       credit_code,
       contact_person: String(item.contact_person || '').trim(),
@@ -200,12 +218,40 @@ function parseCounterparties(body) {
       bank_account_name: String(item.bank_account_name || '').trim(),
       bank_account_no: String(item.bank_account_no || '').trim(),
       bank_name: String(item.bank_name || '').trim(),
-      bank_code: String(item.bank_code || '').trim()
+      bank_code: String(item.bank_code || '').trim(),
+      item_summary: String(item.item_summary || '').trim(),
+      amount: Number.isFinite(amountVal) ? amountVal : 0,
+      amount_excl_tax: parseNullableFloat(item.amount_excl_tax),
+      tax_rate: cleanTax,
+      invoice_type: String(item.invoice_type || '').trim(),
+      currency: String(item.currency || body.currency || 'CNY').trim(),
+      perf_bond_amount: parseNullableFloat(item.perf_bond_amount),
+      perf_bond_pay_date: String(item.perf_bond_pay_date || '').trim(),
+      perf_bond_return_date: String(item.perf_bond_return_date || '').trim(),
+      warranty_bond_amount: parseNullableFloat(item.warranty_bond_amount),
+      warranty_bond_expiry_date: String(item.warranty_bond_expiry_date || '').trim(),
+      remark: String(item.remark || '').trim()
     };
   });
 
+  // 汇总主表冗余字段（便于快速按总额/最早预警日期排序检索）
+  const counterpartySummary = normalized.map(p => p.company_name).join('、');
+  const summaryCombined = normalized.map(p => p.item_summary).filter(Boolean).join('；');
+  const totalAmount = normalized.reduce((acc, p) => acc + (p.amount || 0), 0);
+  const totalExcl = normalized.some(p => p.amount_excl_tax !== null)
+    ? normalized.reduce((acc, p) => acc + (p.amount_excl_tax || 0), 0)
+    : null;
+
+  const earliestPerfReturn = normalized.map(p => p.perf_bond_return_date).filter(Boolean).sort()[0] || '';
+  const earliestWarrantyExpiry = normalized.map(p => p.warranty_bond_expiry_date).filter(Boolean).sort()[0] || '';
+
   return {
-    counterpartySummary: normalized.map(p => p.company_name).join('、'),
+    counterpartySummary,
+    summaryCombined,
+    totalAmount,
+    totalExcl,
+    earliestPerfReturn,
+    earliestWarrantyExpiry,
     counterpartiesJson: JSON.stringify(normalized),
     counterpartiesList: normalized
   };
@@ -240,9 +286,9 @@ function buildQuery(queryParams) {
   const params = [];
 
   if (contract_no && contract_no.trim()) {
-    sql += ` AND (contract_no LIKE ? OR contract_name LIKE ? OR contract_summary LIKE ?)`;
+    sql += ` AND (contract_no LIKE ? OR contract_name LIKE ? OR contract_summary LIKE ? OR counterparties_json LIKE ?)`;
     const kw = `%${contract_no.trim()}%`;
-    params.push(kw, kw, kw);
+    params.push(kw, kw, kw, kw);
   }
   if (counterparty && counterparty.trim()) {
     sql += ` AND (counterparty LIKE ? OR our_entity LIKE ? OR counterparties_json LIKE ?)`;
@@ -271,23 +317,75 @@ function buildQuery(queryParams) {
 
 const syncPartiesStmt = db.prepare(`
   INSERT INTO contract_parties (
-    contract_id, company_name, credit_code, contact_person, contact_phone,
-    bank_account_name, bank_account_no, bank_name, bank_code
-  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    contract_id, party_index, company_name, credit_code, contact_person, contact_phone,
+    bank_account_name, bank_account_no, bank_name, bank_code,
+    item_summary, amount, amount_excl_tax, tax_rate, invoice_type, currency,
+    perf_bond_amount, perf_bond_pay_date, perf_bond_return_date,
+    warranty_bond_amount, warranty_bond_expiry_date, remark
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 `);
 
 function syncContractParties(contractId, partiesList) {
   db.prepare(`DELETE FROM contract_parties WHERE contract_id = ?`).run(contractId);
   for (const p of partiesList) {
     syncPartiesStmt.run(
-      contractId, p.company_name, p.credit_code, p.contact_person, p.contact_phone,
-      p.bank_account_name, p.bank_account_no, p.bank_name, p.bank_code
+      contractId, p.party_index, p.company_name, p.credit_code, p.contact_person, p.contact_phone,
+      p.bank_account_name, p.bank_account_no, p.bank_name, p.bank_code,
+      p.item_summary, p.amount, p.amount_excl_tax, p.tax_rate, p.invoice_type, p.currency,
+      p.perf_bond_amount, p.perf_bond_pay_date, p.perf_bond_return_date,
+      p.warranty_bond_amount, p.warranty_bond_expiry_date, p.remark
     );
   }
 }
 
+// 辅助函数：读取某条合同的完整多方列表（自动兼容老数据）
+function getContractPartiesList(row) {
+  let parties = [];
+  try { parties = JSON.parse(row.counterparties_json || '[]'); } catch (e) {}
+  if (!Array.isArray(parties) || parties.length === 0) {
+    parties = [{
+      party_index: 1,
+      company_name: row.counterparty || '',
+      credit_code: '',
+      contact_person: '',
+      contact_phone: '',
+      bank_account_name: '',
+      bank_account_no: '',
+      bank_name: '',
+      bank_code: '',
+      item_summary: row.contract_summary || '',
+      amount: row.amount || 0,
+      amount_excl_tax: row.amount_excl_tax,
+      tax_rate: row.tax_rate || '',
+      invoice_type: row.invoice_type || '',
+      currency: row.currency || 'CNY',
+      perf_bond_amount: row.perf_bond_amount,
+      perf_bond_pay_date: row.perf_bond_pay_date || '',
+      perf_bond_return_date: row.perf_bond_return_date || '',
+      warranty_bond_amount: row.warranty_bond_amount,
+      warranty_bond_expiry_date: row.warranty_bond_expiry_date || '',
+      remark: row.remark || ''
+    }];
+  }
+  return parties;
+}
+
 // ==================== API 路由 ====================
 
+// [GET/PUT] 默认我方签约主体设置
+app.get('/api/settings/our-entity', (req, res) => {
+  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
+  res.json({ success: true, default_our_entity: row ? row.value : '' });
+});
+
+app.put('/api/settings/our-entity', (req, res) => {
+  const val = String(req.body.default_our_entity || '').trim();
+  if (!val) return res.status(400).json({ success: false, message: '默认我方主体名称不能为空' });
+  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('default_our_entity', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`).run(val);
+  res.json({ success: true, default_our_entity: val, message: '默认我方主体已保存' });
+});
+
+// [GET] 获取合同台账列表
 app.get('/api/contracts', (req, res) => {
   try {
     const { sql, params } = buildQuery(req.query);
@@ -298,6 +396,7 @@ app.get('/api/contracts', (req, res) => {
   }
 });
 
+// [GET] 导出 Excel（多方自动拆分为多行，且前面公共列+尾部扫描件列自动跨行合并单元格）
 app.get('/api/contracts/export', (req, res) => {
   try {
     const queryObj = req.query.scope === 'all'
@@ -307,52 +406,81 @@ app.get('/api/contracts/export', (req, res) => {
     const { sql, params } = buildQuery(queryObj);
     const rows = db.prepare(sql).all(...params);
 
-    const excelData = rows.map(row => {
-      let parties = [];
-      try { parties = JSON.parse(row.counterparties_json || '[]'); } catch (e) {}
-      const formattedParties = parties.map((p, idx) => {
-        const parts = [`[${idx + 1}] ${p.company_name} (信用代码:${p.credit_code})`];
-        if (p.contact_person || p.contact_phone) parts.push(`联系人:${p.contact_person || '-'} ${p.contact_phone || ''}`);
-        if (p.bank_account_no || p.bank_name) {
-          parts.push(`收款:${p.bank_account_name || '-'} | 账号:${p.bank_account_no || '-'} | 开户行:${p.bank_name || '-'}(行号:${p.bank_code || '-'})`);
+    // 表头严格与前端页面列顺序一致（共 26 列，索引 0~25）
+    // 索引 0~7 为合同公共列（跨行合并），索引 8~24 为各相对方独立履约列（各填各的），索引 25 为扫描件归档名（跨行合并）
+    const headers = [
+      '合同编号', '合同名称', '合同类型', '我方签约主体', '签订日期', '开始履约日', '合同到期日', '合同状态',
+      '履约摘要(分项)', '对方单位名称', '统一信用代码', '联系人', '联系方式', '收款账户名称', '收款账号', '开户行', '开户行号',
+      '含税金额', '不含税价', '税率', '发票类型', '币种',
+      '履约保证金', '保证金缴纳日', '保证金应退日', '质保金金额', '质保金到期日', '分项备注',
+      '扫描件归档名'
+    ];
+
+    const aoa = [headers];
+    const merges = [];
+    // 需要跨行合并的列索引：前 8 列 (0~7) 以及最后 1 列 (28: 扫描件归档名)
+    const mergeColIndices = [0, 1, 2, 3, 4, 5, 6, 7, 28];
+
+    let currentRowIdx = 1; // 第 0 行是表头，数据从第 1 行开始
+
+    for (const row of rows) {
+      const parties = getContractPartiesList(row);
+      const startRow = currentRowIdx;
+
+      for (const p of parties) {
+        aoa.push([
+          row.contract_no,
+          row.contract_name,
+          row.contract_type,
+          row.our_entity,
+          row.sign_date,
+          row.start_date || row.sign_date,
+          row.expiry_date,
+          row.status,
+          p.item_summary || row.contract_summary || '',
+          p.company_name || '',
+          p.credit_code || '',
+          p.contact_person || '',
+          p.contact_phone || '',
+          p.bank_account_name || '',
+          p.bank_account_no || '',
+          p.bank_name || '',
+          p.bank_code || '',
+          Number(p.amount !== undefined ? p.amount : row.amount),
+          p.amount_excl_tax !== null && p.amount_excl_tax !== undefined ? Number(p.amount_excl_tax) : '',
+          p.tax_rate || '',
+          p.invoice_type || '',
+          p.currency || row.currency || 'CNY',
+          p.perf_bond_amount !== null && p.perf_bond_amount !== undefined ? Number(p.perf_bond_amount) : '',
+          p.perf_bond_pay_date || '',
+          p.perf_bond_return_date || '',
+          p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined ? Number(p.warranty_bond_amount) : '',
+          p.warranty_bond_expiry_date || '',
+          p.remark || row.remark || '',
+          row.attachment_original_name || '未上传'
+        ]);
+        currentRowIdx++;
+      }
+
+      const endRow = currentRowIdx - 1;
+      if (endRow > startRow) {
+        for (const colIdx of mergeColIndices) {
+          merges.push({
+            s: { r: startRow, c: colIdx },
+            e: { r: endRow, c: colIdx }
+          });
         }
-        return parts.join(' ');
-      }).join('；\n');
+      }
+    }
 
-      return {
-        '合同编号': row.contract_no,
-        '合同名称': row.contract_name,
-        '合同摘要': row.contract_summary || '',
-        '合同类型': row.contract_type,
-        '我方签约主体(可多方)': row.our_entity,
-        '对方单位(汇总)': row.counterparty,
-        '对方单位详细信息(多方)': formattedParties || row.counterparty,
-        '签订日期': row.sign_date,
-        '开始履约日期': row.start_date || row.sign_date,
-        '到期日期': row.expiry_date,
-        '含税总金额': Number(row.amount),
-        '不含税金额': row.amount_excl_tax !== null ? Number(row.amount_excl_tax) : '',
-        '税率': row.tax_rate || '',
-        '发票类型': row.invoice_type || '',
-        '币种': row.currency,
-        '履约保证金(元)': row.perf_bond_amount !== null ? Number(row.perf_bond_amount) : '',
-        '保证金缴纳日期': row.perf_bond_pay_date || '',
-        '保证金应退日期': row.perf_bond_return_date || '',
-        '质保金(元)': row.warranty_bond_amount !== null ? Number(row.warranty_bond_amount) : '',
-        '质保金到期日期': row.warranty_bond_expiry_date || '',
-        '合同状态': row.status,
-        '扫描件归档名': row.attachment_original_name || '未上传',
-        '备注': row.remark || ''
-      };
-    });
-
-    const worksheet = xlsx.utils.json_to_sheet(excelData);
+    const worksheet = xlsx.utils.aoa_to_sheet(aoa);
+    worksheet['!merges'] = merges;
     worksheet['!cols'] = [
-      { wch: 16 }, { wch: 22 }, { wch: 26 }, { wch: 10 }, { wch: 22 },
-      { wch: 24 }, { wch: 48 }, { wch: 13 }, { wch: 13 }, { wch: 13 },
+      { wch: 16 }, { wch: 22 }, { wch: 10 }, { wch: 22 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
+      { wch: 28 }, { wch: 24 }, { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 22 }, { wch: 20 }, { wch: 20 }, { wch: 14 },
       { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 16 }, { wch: 8 },
-      { wch: 15 }, { wch: 14 }, { wch: 14 }, { wch: 14 }, { wch: 14 },
-      { wch: 10 }, { wch: 32 }, { wch: 24 }
+      { wch: 14 }, { wch: 13 }, { wch: 13 }, { wch: 14 }, { wch: 13 }, { wch: 20 },
+      { wch: 32 }
     ];
 
     const workbook = xlsx.utils.book_new();
@@ -369,21 +497,20 @@ app.get('/api/contracts/export', (req, res) => {
   }
 });
 
+// [GET] 获取单条合同详情
 app.get('/api/contracts/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该合同记录' });
   res.json({ success: true, data: row });
 });
 
+// [POST] 新增合同
 app.post('/api/contracts', upload.single('attachment'), (req, res) => {
   let archivedFile = null;
   try {
     const {
-      contract_no, contract_name, contract_summary, contract_type, our_entity,
-      sign_date, start_date, expiry_date, amount, amount_excl_tax,
-      tax_rate, invoice_type, currency,
-      perf_bond_amount, perf_bond_pay_date, perf_bond_return_date,
-      warranty_bond_amount, warranty_bond_expiry_date, status, remark
+      contract_no, contract_name, contract_type, our_entity,
+      sign_date, start_date, expiry_date, status
     } = req.body;
 
     if (!contract_no || !contract_name || !our_entity || !sign_date || !expiry_date) {
@@ -394,8 +521,13 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
     const cleanName = contract_name.trim();
     const cleanSignDate = sign_date.trim();
     const cleanStartDate = (start_date && start_date.trim()) ? start_date.trim() : cleanSignDate;
-    const cleanTaxRate = validateAndNormalizeTaxRate(tax_rate);
-    const { counterpartySummary, counterpartiesJson, counterpartiesList } = parseCounterparties(req.body);
+
+    const {
+      counterpartySummary, summaryCombined, totalAmount, totalExcl,
+      earliestPerfReturn, earliestWarrantyExpiry, counterpartiesJson, counterpartiesList
+    } = parseCounterparties(req.body);
+
+    const firstParty = counterpartiesList[0];
 
     const createTx = db.transaction(() => {
       if (req.file) {
@@ -415,14 +547,13 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
       `);
 
       const info = stmt.run(
-        cleanNo, cleanName, (contract_summary || '').trim(), contract_type,
+        cleanNo, cleanName, summaryCombined, contract_type,
         our_entity.trim(), counterpartySummary, counterpartiesJson,
         cleanSignDate, cleanStartDate, expiry_date.trim(),
-        parseFloat(amount) || 0, parseNullableFloat(amount_excl_tax),
-        cleanTaxRate, (invoice_type || '').trim(), (currency || 'CNY').trim(),
-        parseNullableFloat(perf_bond_amount), (perf_bond_pay_date || '').trim(), (perf_bond_return_date || '').trim(),
-        parseNullableFloat(warranty_bond_amount), (warranty_bond_expiry_date || '').trim(),
-        status || '生效中', (remark || '').trim(),
+        totalAmount, totalExcl, firstParty.tax_rate, firstParty.invoice_type, firstParty.currency,
+        firstParty.perf_bond_amount, firstParty.perf_bond_pay_date, earliestPerfReturn,
+        firstParty.warranty_bond_amount, earliestWarrantyExpiry,
+        status || '生效中', firstParty.remark,
         archivedFile ? archivedFile.attachment_path : null,
         archivedFile ? archivedFile.attachment_original_name : null
       );
@@ -446,6 +577,7 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
   }
 });
 
+// [PUT] 编辑合同
 app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
   let newlyArchivedFile = null;
   try {
@@ -456,19 +588,21 @@ app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
     }
 
     const {
-      contract_no, contract_name, contract_summary, contract_type, our_entity,
-      sign_date, start_date, expiry_date, amount, amount_excl_tax,
-      tax_rate, invoice_type, currency,
-      perf_bond_amount, perf_bond_pay_date, perf_bond_return_date,
-      warranty_bond_amount, warranty_bond_expiry_date, status, remark
+      contract_no, contract_name, contract_type, our_entity,
+      sign_date, start_date, expiry_date, status
     } = req.body;
 
     const cleanNo = contract_no.trim();
     const cleanName = contract_name.trim();
     const cleanSignDate = sign_date.trim();
     const cleanStartDate = (start_date && start_date.trim()) ? start_date.trim() : cleanSignDate;
-    const cleanTaxRate = validateAndNormalizeTaxRate(tax_rate);
-    const { counterpartySummary, counterpartiesJson, counterpartiesList } = parseCounterparties(req.body);
+
+    const {
+      counterpartySummary, summaryCombined, totalAmount, totalExcl,
+      earliestPerfReturn, earliestWarrantyExpiry, counterpartiesJson, counterpartiesList
+    } = parseCounterparties(req.body);
+
+    const firstParty = counterpartiesList[0];
 
     const updateTx = db.transaction(() => {
       let attachment_path = existing.attachment_path;
@@ -507,14 +641,13 @@ app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
           updated_at = datetime('now', 'localtime')
         WHERE id = ?
       `).run(
-        cleanNo, cleanName, (contract_summary || '').trim(), contract_type,
+        cleanNo, cleanName, summaryCombined, contract_type,
         our_entity.trim(), counterpartySummary, counterpartiesJson,
         cleanSignDate, cleanStartDate, expiry_date.trim(),
-        parseFloat(amount) || 0, parseNullableFloat(amount_excl_tax),
-        cleanTaxRate, (invoice_type || '').trim(), (currency || 'CNY').trim(),
-        parseNullableFloat(perf_bond_amount), (perf_bond_pay_date || '').trim(), (perf_bond_return_date || '').trim(),
-        parseNullableFloat(warranty_bond_amount), (warranty_bond_expiry_date || '').trim(),
-        status, (remark || '').trim(),
+        totalAmount, totalExcl, firstParty.tax_rate, firstParty.invoice_type, firstParty.currency,
+        firstParty.perf_bond_amount, firstParty.perf_bond_pay_date, earliestPerfReturn,
+        firstParty.warranty_bond_amount, earliestWarrantyExpiry,
+        status, firstParty.remark,
         attachment_path, attachment_original_name, req.params.id
       );
 
@@ -618,10 +751,7 @@ function startServer(port = 0, host = '127.0.0.1') {
         port: actualPort,
         server,
         shutdown: async () => {
-          // 1. 清理临时上传残留文件
           cleanTmpDir();
-
-          // 2. 主动中断所有 Keep-Alive Socket 连接，防止 server.close 挂起
           if (typeof server.closeAllConnections === 'function') {
             server.closeAllConnections();
           }
@@ -629,11 +759,7 @@ function startServer(port = 0, host = '127.0.0.1') {
             try { socket.destroy(); } catch (e) {}
           }
           activeSockets.clear();
-
-          // 3. 关闭 HTTP Server 监听端口
           await new Promise((resClose) => server.close(() => resClose()));
-
-          // 4. 将 SQLite WAL 预写日志完整刷入主库并关闭文件锁句柄
           if (db && db.open) {
             try { db.pragma('wal_checkpoint(TRUNCATE)'); } catch (e) {}
             try { db.close(); } catch (e) {}
