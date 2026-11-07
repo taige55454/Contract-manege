@@ -73,9 +73,21 @@ function uploadMultipartFiles(port, reqPath, fieldName, filesArray) {
 (async () => {
   let controller = null;
   try {
-    controller = await startServer(0, '127.0.0.1');
+    controller = await startServer(0, '0.0.0.0');
     const port = controller.port;
-    console.log(`🧪 执行终极全链路稳定性与异常回滚冒烟测试 (Port: ${port})...`);
+    console.log(`🧪 执行终极全链路稳定性、内网安全口令与异常回滚冒烟测试 (Random Port: ${port})...`);
+
+    // 0. 验证本机 127.0.0.1 免密直连状态与内网安全口令修改接口
+    const authStatus = await requestJson(port, '/api/auth/status', 'GET');
+    assert.strictEqual(authStatus.authenticated, true, '本机 127.0.0.1 访问应自动免密通过');
+    assert.strictEqual(authStatus.is_localhost, true, '应精准识别本机回环地址');
+
+    const updateSecRes = await requestJson(port, '/api/settings/lan-security', 'PUT', {
+      enabled: true,
+      passcode: '654321'
+    });
+    assert.strictEqual(updateSecRes.success, true, '本机管理员修改内网口令应成功');
+    assert.strictEqual(updateSecRes.lan_info.passcode, '654321');
 
     // 1. 验证默认我方主体与编号规则设置
     await requestJson(port, '/api/settings/our-entity', 'PUT', {
@@ -216,7 +228,7 @@ function uploadMultipartFiles(port, reqPath, fieldName, filesArray) {
     await controller.shutdown();
     controller = null;
     fs.rmSync(testDataRoot, { recursive: true, force: true });
-    console.log('✅ 终极全局稳定性、异常回滚保护、文件夹联动改名与 Excel 超链接测试 100% 通过！');
+    console.log('✅ 终极全局稳定性、内网安全口令、异常回滚保护、文件夹联动改名与 Excel 超链接测试 100% 通过！');
     process.exit(0);
   } catch (err) {
     console.error('❌ 冒烟测试失败:', err);
