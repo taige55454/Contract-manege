@@ -22,14 +22,12 @@ jobs:
       - name: 3. 安装依赖并针对 Electron 内核编译 SQLite 原生模块
         run: npm install --no-audit --no-fund
 
-      - name: 4. 使用 Electron 内核执行冒烟测试 (统一 ABI 版本，验证多方合并与资源释放)
+      - name: 4. 使用 Electron 内核执行冒烟测试 (统一 ABI 版本，验证编号生成、多方合并与资源释放)
         env:
           ELECTRON_RUN_AS_NODE: 1
         run: npm test
 
-      - name: 5. 打包生成 Windows .exe (免安装便携版 + 安装包)
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: 5. 打包生成 Windows .exe (免安装便携版 Portable + 安装版 Setup)
         run: npm run dist:win
 
       - name: 6. 上传编译好的 .exe 到 GitHub Actions Artifacts
