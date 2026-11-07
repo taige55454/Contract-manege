@@ -10,9 +10,15 @@
   <header class="app-header">
     <div>
       <h1>📄 企业合同台账管理系统</h1>
-      <p class="header-sub">默认我方主体自动带出 · 多方独立履约分行列示与自动合并 · 到期光谱渐变预警</p>
+      <p class="header-sub">合同编号前缀/后缀自动生成 · 默认我方主体带出 · 多方独立履约分行合并 · 到期光谱渐变预警</p>
     </div>
     <div class="header-actions">
+      <!-- 合同编号固定前缀/后缀规则快捷设置栏 -->
+      <div class="default-entity-bar" title="配置合同编号的固定前缀、日期格式、流水号位数与固定后缀，新增合同时将自动生成带出">
+        <span>🔢 编号格式：</span>
+        <strong id="display_no_rule">加载中...</strong>
+        <button class="btn btn-outline btn-sm" onclick="openNoRuleModal()">修改编号规则</button>
+      </div>
       <!-- 默认我方主体快捷设置栏 -->
       <div class="default-entity-bar" title="新建合同时将自动带出此主体名称，也可在单份合同中修改">
         <span>🏢 默认我方主体：</span>
@@ -106,6 +112,63 @@
     </section>
   </main>
 
+  <!-- 弹窗 0：合同编号固定前缀/后缀规则自定义弹窗 -->
+  <div id="no_rule_modal" class="modal hidden">
+    <div class="modal-content" style="width: 560px; max-width: 95vw;">
+      <div class="modal-header">
+        <h2>🔢 自定义合同编号固定前缀 / 后缀与流水号规则</h2>
+        <span class="close-btn" onclick="closeNoRuleModal()">&times;</span>
+      </div>
+      <form onsubmit="saveNoRuleForm(event)">
+        <div class="form-scroll-body">
+          <p style="font-size:12px;color:#4b5563;margin-bottom:12px;">
+            系统将按照 <strong>【固定前缀 + 日期段 + 自动递增流水号 + 固定后缀】</strong> 自动为您生成下一个合同编号；生成后您仍可在单份合同中自由修改。
+          </p>
+          <div class="form-grid-4">
+            <div class="form-group span-2">
+              <label>固定前缀 <small class="muted">(可留空，如 HT- 或 ZN-CG-)</small></label>
+              <input type="text" id="rule_prefix" placeholder="例如：HT-" oninput="updateNoRulePreview()" />
+            </div>
+            <div class="form-group span-2">
+              <label>中间日期段格式</label>
+              <select id="rule_date_part" onchange="updateNoRulePreview()">
+                <option value="YYYY-">年份 + 横杠 (如 2026-)</option>
+                <option value="YYYY">仅年份 (如 2026)</option>
+                <option value="YYYYMM-">年月 + 横杠 (如 202611-)</option>
+                <option value="YYYYMM">仅年月 (如 202611)</option>
+                <option value="YYYYMMDD-">年月日 + 横杠 (如 20261107-)</option>
+                <option value="YYYYMMDD">仅年月日 (如 20261107)</option>
+                <option value="NONE">不包含日期段</option>
+              </select>
+            </div>
+            <div class="form-group span-2">
+              <label>自动流水号位数 <small class="muted">(选 0 则不加流水号)</small></label>
+              <select id="rule_seq_digits" onchange="updateNoRulePreview()">
+                <option value="0">0 位 (不自动追加流水号，留空手填)</option>
+                <option value="2">2 位数字 (如 01, 02...)</option>
+                <option value="3" selected>3 位数字 (如 001, 002...)</option>
+                <option value="4">4 位数字 (如 0001, 0002...)</option>
+                <option value="5">5 位数字 (如 00001, 00002...)</option>
+              </select>
+            </div>
+            <div class="form-group span-2">
+              <label>固定后缀 <small class="muted">(可留空，如 -A 或 -总部)</small></label>
+              <input type="text" id="rule_suffix" placeholder="例如：-CG" oninput="updateNoRulePreview()" />
+            </div>
+            <div class="form-group span-4" style="background:#eff6ff;padding:10px;border-radius:4px;border:1px solid #bfdbfe;margin-top:4px;">
+              <label style="color:#1e3a8a;">📌 实时编号格式预览：</label>
+              <div id="rule_live_preview" style="font-size:15px;font-weight:700;color:#2563eb;margin-top:2px;">HT-2026-001</div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeNoRuleModal()">取消</button>
+          <button type="submit" class="btn btn-primary">💾 保存编号规则</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
   <!-- 弹窗 1：新增 / 编辑合同表单 -->
   <div id="form_modal" class="modal hidden">
     <div class="modal-content modal-lg">
@@ -117,10 +180,16 @@
         <input type="hidden" id="form_id" />
         <div class="form-scroll-body">
           <!-- 分区 1：合同公共主信息（多方共享，表格中自动合并单元格） -->
-          <div class="form-section-title">📌 一、合同公共基础信息（多方共用的主合同属性，列表与导出时自动合并单元格）</div>
+          <div class="form-section-title">
+            <span>📌 一、合同公共基础信息（多方共用的主合同属性，列表与导出时自动合并单元格）</span>
+            <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">⚙️ 设置编号前缀/后缀</button>
+          </div>
           <div class="form-grid-4">
             <div class="form-group">
-              <label>合同编号 * <small class="muted">(唯一)</small></label>
+              <label style="display:flex;justify-content:space-between;align-items:center;">
+                <span>合同编号 * <small class="muted">(自动带出，可改)</small></span>
+                <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoContractNo()">🔄 重生成</a>
+              </label>
               <input type="text" name="contract_no" id="f_contract_no" placeholder="如：HT-2026-001" required />
             </div>
             <div class="form-group">
