@@ -6,8 +6,8 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "server": "node server.js",
-    "test": "node test-smoke.js",
+    "server": "electron -r ./server.js",
+    "test": "electron test-smoke.js",
     "postinstall": "electron-builder install-app-deps",
     "dist:win": "electron-builder --win portable nsis --x64 --publish never",
     "dist:portable": "electron-builder --win portable --x64 --publish never",
