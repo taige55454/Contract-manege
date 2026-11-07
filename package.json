@@ -6,7 +6,7 @@
   "scripts": {
     "start": "electron .",
     "server": "node server.js",
-    "test": "node test-smoke.js",
+    "test": "electron test-smoke.js",
     "postinstall": "electron-builder install-app-deps",
     "dist:win": "electron-builder --win --x64"
   },
@@ -24,6 +24,9 @@
     "appId": "com.enterprise.contractmanager",
     "productName": "ContractManager",
     "asar": true,
+    "asarUnpack": [
+      "**/*.node"
+    ],
     "files": [
       "main.js",
       "server.js",
