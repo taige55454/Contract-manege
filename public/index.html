@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>企业合同台账管理系统</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="app-header">
+    <div>
+      <h1>📄 企业合同台账管理系统</h1>
+      <p class="header-sub">支持多方签约 · 财税与保证金跟踪 · 到期光谱渐变预警 · 扫描件规范化归档</p>
+    </div>
+    <div class="header-actions">
+      <div class="legend-box" title="距离到期日 ≤90天 启动由绿到红平滑颜色渐变，越接近或逾期颜色越红越深">
+        <span class="legend-label">到期预警光谱：</span>
+        <span class="legend-gradient">安全(绿) ➔ 临近(黄/橙) ➔ 紧急/逾期(深红)</span>
+      </div>
+      <button class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
+      <div class="dropdown">
+        <button class="btn btn-success">导出 Excel ▾</button>
+        <div class="dropdown-menu">
+          <a href="javascript:void(0)" onclick="exportExcel('filtered')">导出当前筛选结果</a>
+          <a href="javascript:void(0)" onclick="exportExcel('all')">导出全部台账</a>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <!-- 顶部筛选与排序工具栏 -->
+    <section class="filter-bar">
+      <input type="text" id="filter_no" placeholder="搜合同编号 / 名称 / 摘要..." />
+      <input type="text" id="filter_counterparty" placeholder="搜对方名称 / 信用代码 / 我方主体..." />
+      <select id="filter_type">
+        <option value="">全部合同类型</option>
+        <option value="采购">采购</option>
+        <option value="销售">销售</option>
+        <option value="框架">框架</option>
+        <option value="服务">服务</option>
+        <option value="其他">其他</option>
+      </select>
+      <select id="filter_status">
+        <option value="">全部状态</option>
+        <option value="草稿">草稿</option>
+        <option value="生效中">生效中</option>
+        <option value="已到期">已到期</option>
+        <option value="已终止">已终止</option>
+      </select>
+      <select id="sort_by">
+        <option value="created_at">默认排序 (创建时间)</option>
+        <option value="sign_date">按签订日期排序</option>
+        <option value="start_date">按开始履约日排序</option>
+        <option value="expiry_date">按合同到期日排序</option>
+        <option value="perf_bond_return_date">按履约保证金应退日排序</option>
+        <option value="warranty_bond_expiry_date">按质保金到期日排序</option>
+      </select>
+      <select id="sort_order">
+        <option value="ASC">升序 (最早到期在前)</option>
+        <option value="DESC" selected>降序 (最新在前)</option>
+      </select>
+      <button class="btn btn-secondary" onclick="loadContracts()">🔍 查询</button>
+      <button class="btn btn-outline" onclick="resetFilters()">重置</button>
+    </section>
+
+    <!-- 合同台账主表格（列顺序与导出 Excel 严格一致） -->
+    <section class="table-wrapper">
+      <table class="ledger-table">
+        <thead>
+          <tr>
+            <th>合同编号</th>
+            <th>合同名称</th>
+            <th>合同摘要</th>
+            <th>类型</th>
+            <th>我方签约主体(可多方)</th>
+            <th>对方单位(支持多方)</th>
+            <th>签订日期</th>
+            <th>开始履约日</th>
+            <th>合同到期日(预警)</th>
+            <th class="text-right">含税金额</th>
+            <th class="text-right">不含税价</th>
+            <th>税率</th>
+            <th>发票类型</th>
+            <th>币种</th>
+            <th>履约保证金 / 应退预警</th>
+            <th>质保金 / 到期预警</th>
+            <th>状态</th>
+            <th>扫描件(点击预览)</th>
+            <th>备注</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody id="contract_tbody"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- 弹窗 1：新增 / 编辑合同表单 -->
+  <div id="form_modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+      <div class="modal-header">
+        <h2 id="form_modal_title">新增合同台账</h2>
+        <span class="close-btn" onclick="closeFormModal()">&times;</span>
+      </div>
+      <form id="contract_form" onsubmit="submitContractForm(event)">
+        <input type="hidden" id="form_id" />
+        <div class="form-scroll-body">
+          <!-- 分区 1：合同基础信息与摘要 -->
+          <div class="form-section-title">📌 一、合同基础信息与履约周期</div>
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label>合同编号 *</label>
+              <input type="text" name="contract_no" id="f_contract_no" placeholder="如：HT-2026-001" required />
+            </div>
+            <div class="form-group">
+              <label>合同名称 *</label>
+              <input type="text" name="contract_name" id="f_contract_name" placeholder="如：核心机房服务器采购合同" required />
+            </div>
+            <div class="form-group">
+              <label>合同类型 *</label>
+              <select name="contract_type" id="f_contract_type" required>
+                <option value="采购">采购</option>
+                <option value="销售">销售</option>
+                <option value="框架">框架</option>
+                <option value="服务">服务</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+            <div class="form-group span-2">
+              <label>合同摘要（简要概括合同核心标的与履约内容）</label>
+              <input type="text" name="contract_summary" id="f_contract_summary"
+                placeholder="示例：采购10台应用服务器及3年原厂7×24小时驻场维保服务，分三期交付验收" />
+            </div>
+            <div class="form-group">
+              <label>合同状态 *</label>
+              <select name="status" id="f_status" required>
+                <option value="草稿">草稿</option>
+                <option value="生效中" selected>生效中</option>
+                <option value="已到期">已到期</option>
+                <option value="已终止">已终止</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>签订日期 *</label>
+              <input type="date" name="sign_date" id="f_sign_date" required onchange="syncStartDateDefault()" />
+            </div>
+            <div class="form-group">
+              <label>开始履约日期 * <small class="muted">(默认同签订日，可改)</small></label>
+              <input type="date" name="start_date" id="f_start_date" required />
+            </div>
+            <div class="form-group">
+              <label>合同到期日期 * <small class="muted">(自动渐变色提醒)</small></label>
+              <input type="date" name="expiry_date" id="f_expiry_date" required />
+            </div>
+          </div>
+
+          <!-- 分区 2：签约主体（支持多方） -->
+          <div class="form-section-title">
+            <span>🏢 二、签约主体信息（支持多方共同签约）</span>
+            <button type="button" class="btn btn-primary btn-sm" onclick="addCounterpartyCard()">+ 添加一个对方单位</button>
+          </div>
+          <div class="form-grid-1" style="margin-bottom: 12px;">
+            <div class="form-group">
+              <label>我方签约主体 * <small class="muted">（若涉及我方多个主体联合签约，请用逗号或顿号分隔）</small></label>
+              <input type="text" name="our_entity" id="f_our_entity" placeholder="如：华南智云科技有限公司、华南智云（深圳）分公司" required />
+            </div>
+          </div>
+          <div id="counterparties_container" class="parties-container"></div>
+
+          <!-- 分区 3：合同金额与财税发票信息 -->
+          <div class="form-section-title">💰 三、合同价款与财税发票信息</div>
+          <div class="form-grid-4">
+            <div class="form-group">
+              <label>合同含税总价 * <small class="muted">(默认含税)</small></label>
+              <input type="number" step="0.01" name="amount" id="f_amount" required value="0.00" />
+            </div>
+            <div class="form-group">
+              <label>合同不含税价 <small class="muted">(可留空)</small></label>
+              <input type="number" step="0.01" name="amount_excl_tax" id="f_amount_excl_tax" placeholder="选填，如 88495.58" />
+            </div>
+            <div class="form-group">
+              <label>税率 <small class="muted">(多税率前加*并用,隔开)</small></label>
+              <input type="text" name="tax_rate" id="f_tax_rate" placeholder="如 13% 或 *6%,13%" />
+            </div>
+            <div class="form-group">
+              <label>发票类型 <small class="muted">(可留空)</small></label>
+              <input type="text" name="invoice_type" id="f_invoice_type" list="invoice_type_list" placeholder="可选择或手填" />
+              <datalist id="invoice_type_list">
+                <option value="增值税专用发票"></option>
+                <option value="增值税普通发票"></option>
+                <option value="数电专票"></option>
+                <option value="数电普票"></option>
+                <option value="形式发票 / 收据"></option>
+              </datalist>
+            </div>
+            <div class="form-group">
+              <label>结算币种 *</label>
+              <input type="text" name="currency" id="f_currency" required value="CNY" />
+            </div>
+          </div>
+
+          <!-- 分区 4：履约保证金与质保金跟踪 -->
+          <div class="form-section-title">🛡️ 四、履约保证金与质保金管理（选填，支持到期颜色渐变提醒）</div>
+          <div class="form-grid-3">
+            <div class="form-group">
+              <label>履约保证金金额 <small class="muted">(可留空)</small></label>
+              <input type="number" step="0.01" name="perf_bond_amount" id="f_perf_bond_amount" placeholder="未涉及可留空" />
+            </div>
+            <div class="form-group">
+              <label>保证金缴纳时间 <small class="muted">(可留空)</small></label>
+              <input type="date" name="perf_bond_pay_date" id="f_perf_bond_pay_date" />
+            </div>
+            <div class="form-group">
+              <label>保证金应退时间 <small class="muted">(可留空，到期预警)</small></label>
+              <input type="date" name="perf_bond_return_date" id="f_perf_bond_return_date" />
+            </div>
+            <div class="form-group">
+              <label>质保金金额 <small class="muted">(可留空)</small></label>
+              <input type="number" step="0.01" name="warranty_bond_amount" id="f_warranty_bond_amount" placeholder="未涉及可留空" />
+            </div>
+            <div class="form-group">
+              <label>质保金到期时间 <small class="muted">(可留空，到期预警)</small></label>
+              <input type="date" name="warranty_bond_expiry_date" id="f_warranty_bond_expiry_date" />
+            </div>
+          </div>
+
+          <!-- 分区 5：扫描件上传与备注 -->
+          <div class="form-section-title">📎 五、扫描件上传与备注</div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>合同扫描件 (PDF / JPG / PNG，≤20MB，系统自动按“合同编号+合同名称+签订日期”命名)</label>
+              <input type="file" name="attachment" id="f_attachment" accept=".pdf,.jpg,.jpeg,.png" />
+            </div>
+            <div class="form-group">
+              <label>备注 <small class="muted">(可留空)</small></label>
+              <input type="text" name="remark" id="f_remark" placeholder="其他补充说明..." />
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeFormModal()">取消</button>
+          <button type="submit" class="btn btn-primary">💾 保存合同台账</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 2：合同详情与扫描件在线预览（左侧完整台账与多方卡片，右侧扫描件预览） -->
+  <div id="detail_modal" class="modal hidden">
+    <div class="modal-content modal-xl">
+      <div class="modal-header">
+        <h2>合同台账全量详情与扫描件预览</h2>
+        <span class="close-btn" onclick="closeDetailModal()">&times;</span>
+      </div>
+      <div class="detail-split-layout">
+        <div class="detail-left" id="detail_fields"></div>
+        <div class="detail-right">
+          <div class="attachment-toolbar" id="attachment_toolbar"></div>
+          <div class="preview-container" id="preview_container"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
