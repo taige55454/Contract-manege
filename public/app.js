@@ -1,11 +1,11 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.3.0 满血终极版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.4.0 终极版)
  * 特性：
- * 1. 夹心式 4 段自定义分段编号器（[灰底前缀] + [穿插段] + [灰底日期段] + [零空洞流水号] + [灰底后缀]）
- * 2. 自定义下拉选项与预设词库引擎（8 大分类自由定制 + 历史老数据自动兜底防丢保护 + 一键恢复默认）
- * 3. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan)
- * 4. 智能日期输入解析（支持 2026.3.18、简写 3.18、以及 Excel 序列号如 46099 自动转 YYYY-MM-DD）
- * 5. 详情弹窗内直接支持【主扫描件/立项资料/关联附件】一键补传与单文件物理删除 + 奇葩文件名转义免疫
+ * 1. 100% 适配原版精美 UI 结构与 CSS 类名
+ * 2. 夹心式 4 段自定义分段编号器（[灰底前缀] + [穿插段] + [灰底日期段] + [零空洞流水号] + [灰底后缀]）
+ * 3. 自定义下拉选项与预设词库引擎（8 大分类自由定制 + 历史老数据自动兜底防丢保护 + 一键恢复默认）
+ * 4. 合同到期状态实时联动引擎（本地时区零点精准比对：手输或日历选择到期日时，自动在“生效中”与“已到期”间双向切换，保护“草稿/已终止”等特殊状态）
+ * 5. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan) + 详情弹窗内三大资料直接补传/删除
  */
 
 let currentTab = 'contract'; // 'contract' | 'procurement'
@@ -16,15 +16,16 @@ let defaultOurEntity = '毕节自营公司';
 let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
+// 默认值 100% 匹配原版 index.html 中的选项
 let dropdownPresets = {
-  contract_types: ['购货', '销售', '服务', '租赁', '仓储', '工程', '其他'],
-  contract_statuses: ['生效中', '履行完毕', '已解除', '待签署', '已归档'],
-  project_types: ['服务类项目', '物资采购类', '工程维保类', '信息化建设', '零星采购', '其他'],
-  cost_departments: ['综合部', '市场部', '财务部', '运营部', '揽投部', '寄递事业部', '渠道平台部', '安保部'],
-  procurement_types: ['小额零星采购', '分散采购', '集中采购', '单一来源采购', '紧急采购'],
-  procurement_methods: ['合作谈判', '询价采购', '竞争性磋商', '公开招标', '直接采购', '比选', '电商直购'],
-  budget_subjects: ['业务外包费', '办公费', '车辆运行维护费', '宣传营销费', '房屋租赁及物业费', '信息化运维费', '安全保卫费', '低值易耗品'],
-  invoice_types: ['增值税专用发票', '增值税普通发票', '免税普通发票', '财政票据/收据']
+  contract_types: ['采购', '服务', '销售', '框架', '其他'],
+  contract_statuses: ['草稿', '生效中', '已到期', '已终止'],
+  project_types: ['服务类项目', '货物类项目', '设备采购', '工程类项目', '其他'],
+  cost_departments: ['综合管理部', '省区费用预算', '市场营销部', '运营管理部', '财务部', '毕节自营店'],
+  procurement_types: ['小额零星采购', '二级集中采购', '一级集中采购', '分散采购', '其他'],
+  procurement_methods: ['合作谈判', '邀请竞争谈判', '公开竞争谈判', '邀请询比', '公开询比', '单一来源采购'],
+  budget_subjects: ['办公费', '运输费', '其他固定资产采购', '日常安全费用', '其他外包项目', '租赁费', '中介费', '装修费', '其他福利费'],
+  invoice_types: ['增值税专用发票', '增值税普通发票', '数电专票', '数电普票']
 };
 
 let isFreeContractNoMode = false;
@@ -33,6 +34,15 @@ let isSubmitting = false;
 let isSilentSyncing = false;
 
 const LAN_TOKEN_KEY = 'cm_lan_session_token';
+
+// 获取本地时区（北京时间）的 YYYY-MM-DD 字符串
+function getLocalTodayStr() {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
+}
 
 // ==================== 1. 鉴权请求封装与通用安全转义工具 ====================
 function getLanToken() {
@@ -71,7 +81,6 @@ function escapeHtml(str) {
     .replace(/'/g, '&#39;');
 }
 
-// 专门用于内联 onclick="fn('...')" 的 JS 字符串参数转义，彻底免疫单引号与反斜杠文件名
 function escapeJsStr(str) {
   return String(str ?? '')
     .replace(/\\/g, '\\\\')
@@ -85,7 +94,6 @@ function formatMoney(val) {
   return '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-// 智能日期解析（支持 2026.3.18 / 3.18 / Excel 序列号 46099）
 function parseSmartDateString(raw) {
   const str = String(raw || '').trim();
   if (!str) return '';
@@ -113,9 +121,27 @@ function parseSmartDateString(raw) {
   return str;
 }
 
+// 当修改合同表单的“合同到期日”时，实时联动“合同状态”下拉框
+function syncContractStatusByExpiryDate(expiryDateVal) {
+  const exp = String(expiryDateVal || '').trim();
+  if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return;
+  const statusSel = document.getElementById('f_status');
+  if (!statusSel) return;
+
+  const today = getLocalTodayStr();
+  if (exp < today && statusSel.value === '生效中') {
+    setSelectValueWithFallback('f_status', '已到期');
+  } else if (exp >= today && statusSel.value === '已到期') {
+    setSelectValueWithFallback('f_status', '生效中');
+  }
+}
+
 function normalizeDateInputElem(el) {
   if (!el) return '';
   el.value = parseSmartDateString(el.value);
+  if (el.id === 'f_expiry_date') {
+    syncContractStatusByExpiryDate(el.value);
+  }
   return el.value;
 }
 
@@ -124,12 +150,15 @@ function pickDateToInput(pickerEl, targetInputId, isSignDate) {
   if (target && pickerEl.value) {
     target.value = pickerEl.value;
     if (isSignDate) onSignDateBlur(target);
+    if (targetInputId === 'f_expiry_date') {
+      syncContractStatusByExpiryDate(target.value);
+    }
   }
 }
 
 function renderDueChip(dateStr) {
   if (!dateStr) return '<span style="color:#9ca3af;">-</span>';
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getLocalTodayStr();
   const diffDays = Math.ceil((new Date(dateStr) - new Date(today)) / (86400 * 1000));
   if (diffDays < 0) {
     return `<span class="due-chip" style="background:#fee2e2;color:#991b1b;">${escapeHtml(dateStr)} (已超期)</span>`;
@@ -140,8 +169,8 @@ function renderDueChip(dateStr) {
   return `<span>${escapeHtml(dateStr)}</span>`;
 }
 
-// ==================== 2. 自定义下拉选项与预设词库引擎（含老数据防丢兜底） ====================
-function populateSelectWithOptions(selectId, optionsArr, placeholderText = null) {
+// ==================== 2. 自定义下拉选项与预设词库引擎 ====================
+function populateSelectWithOptions(selectId, optionsArr, placeholderText = null, defaultSelectedVal = null) {
   const el = document.getElementById(selectId);
   if (!el) return;
   const prevVal = el.value;
@@ -155,6 +184,8 @@ function populateSelectWithOptions(selectId, optionsArr, placeholderText = null)
   el.innerHTML = html;
   if (prevVal && (optionsArr.includes(prevVal) || prevVal === '')) {
     el.value = prevVal;
+  } else if (defaultSelectedVal && optionsArr.includes(defaultSelectedVal)) {
+    el.value = defaultSelectedVal;
   }
 }
 
@@ -164,7 +195,6 @@ function populateDatalistWithOptions(datalistId, optionsArr) {
   el.innerHTML = (optionsArr || []).map(item => `<option value="${escapeHtml(item)}"></option>`).join('');
 }
 
-// 编辑老记录时，若老记录的值不在当前预设列表中，自动临时补入该选项，确保 100% 零数据丢失
 function setSelectValueWithFallback(selectId, val) {
   const el = document.getElementById(selectId);
   if (!el) return;
@@ -178,19 +208,16 @@ function setSelectValueWithFallback(selectId, val) {
 }
 
 function applyDropdownPresetsToDOM() {
-  // 1. 顶部筛选栏下拉框（保留“全部”占位项与当前已选值）
   populateSelectWithOptions('filter_type', dropdownPresets.contract_types, '全部类型');
   populateSelectWithOptions('filter_status', dropdownPresets.contract_statuses, '全部状态');
   populateSelectWithOptions('proc_filter_type', dropdownPresets.project_types, '全部立项类型');
 
-  // 2. 合同与采购立项表单内的下拉框
-  populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null);
-  populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null);
-  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null);
-  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null);
+  populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null, '采购');
+  populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null, '生效中');
+  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null, '服务类项目');
+  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null, '小额零星采购');
 
-  // 3. 可选可手填的 Datalist 建议列表
-  populateDatalistWithOptions('cost_dept_list', dropdownPresets.cost_departments);
+  populateDatalistWithOptions('dept_list', dropdownPresets.cost_departments);
   populateDatalistWithOptions('budget_subject_list', dropdownPresets.budget_subjects);
   populateDatalistWithOptions('proc_method_list', dropdownPresets.procurement_methods);
   populateDatalistWithOptions('invoice_type_list', dropdownPresets.invoice_types);
@@ -251,7 +278,7 @@ async function savePresetsForm(e) {
 }
 
 async function restoreDefaultPresets() {
-  if (!confirm('确定将所有下拉选项恢复为系统出厂默认设置吗？（不会影响已录入的历史台账数据）')) return;
+  if (!confirm('确定将所有下拉选项恢复为默认设置吗？（不会影响已录入的历史台账数据）')) return;
   const res = await apiFetch('/api/settings/presets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -581,7 +608,7 @@ function syncSegmentedContractNo() {
 }
 
 async function fillAutoContractNo(signDateVal) {
-  const cleanDate = parseSmartDateString(signDateVal) || new Date().toISOString().slice(0, 10);
+  const cleanDate = parseSmartDateString(signDateVal) || getLocalTodayStr();
   const midVal = document.getElementById('seg_mid_custom_input').value.trim();
   try {
     const res = await apiFetch(`/api/contracts/next-no?sign_date=${encodeURIComponent(cleanDate)}&mid_custom=${encodeURIComponent(midVal)}`);
@@ -625,7 +652,7 @@ function syncSegmentedProcNo() {
 }
 
 async function fillAutoProcurementNo(approvalDateVal) {
-  const cleanDate = parseSmartDateString(approvalDateVal) || new Date().toISOString().slice(0, 10);
+  const cleanDate = parseSmartDateString(approvalDateVal) || getLocalTodayStr();
   const midVal = document.getElementById('p_seg_mid_custom_input').value.trim();
   try {
     const res = await apiFetch(`/api/procurements/next-no?approval_date=${encodeURIComponent(cleanDate)}&mid_custom=${encodeURIComponent(midVal)}`);
@@ -954,7 +981,7 @@ async function openFormModal(editId = null) {
   form.reset();
   document.getElementById('counterparties_container').innerHTML = '';
 
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getLocalTodayStr();
 
   if (!editId) {
     document.getElementById('form_id').value = '';
@@ -963,6 +990,7 @@ async function openFormModal(editId = null) {
     document.getElementById('f_sign_date').value = today;
     document.getElementById('f_start_date').value = today;
     document.getElementById('f_expiry_date').value = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
+    setSelectValueWithFallback('f_status', '生效中');
     document.getElementById('seg_mid_custom_input').value = contractRule.default_mid || '';
     toggleFreeContractNoMode(false);
     addCounterpartyCard();
@@ -984,6 +1012,7 @@ async function openFormModal(editId = null) {
     document.getElementById('f_sign_date').value = c.sign_date;
     document.getElementById('f_start_date').value = c.start_date;
     document.getElementById('f_expiry_date').value = c.expiry_date;
+    syncContractStatusByExpiryDate(c.expiry_date);
     await populateProcDropdownInContractForm(c.procurement_id);
     (c.counterparties || [{}]).forEach(cp => addCounterpartyCard(cp));
   }
@@ -1004,6 +1033,9 @@ async function submitContractForm(e) {
 
   try {
     if (!isFreeContractNoMode) syncSegmentedContractNo();
+    const cleanExpiry = parseSmartDateString(document.getElementById('f_expiry_date').value);
+    syncContractStatusByExpiryDate(cleanExpiry);
+
     const editId = document.getElementById('form_id').value;
     const fd = new FormData();
     fd.append('contract_no', document.getElementById('f_contract_no').value.trim());
@@ -1013,7 +1045,7 @@ async function submitContractForm(e) {
     fd.append('our_entity', document.getElementById('f_our_entity').value.trim());
     fd.append('sign_date', parseSmartDateString(document.getElementById('f_sign_date').value));
     fd.append('start_date', parseSmartDateString(document.getElementById('f_start_date').value));
-    fd.append('expiry_date', parseSmartDateString(document.getElementById('f_expiry_date').value));
+    fd.append('expiry_date', cleanExpiry);
     fd.append('procurement_id', document.getElementById('f_procurement_id').value || '');
     fd.append('counterparties_json', JSON.stringify(collectCounterpartiesFromDOM()));
 
@@ -1166,7 +1198,7 @@ async function openProcurementFormModal(editId = null) {
   applyDropdownPresetsToDOM();
   const form = document.getElementById('procurement_form');
   form.reset();
-  const today = new Date().toISOString().slice(0, 10);
+  const today = getLocalTodayStr();
   const defaultMethod = (dropdownPresets.procurement_methods && dropdownPresets.procurement_methods[0]) || '合作谈判';
 
   if (!editId) {
@@ -1508,97 +1540,4 @@ async function openDetailModal(mode, id) {
 }
 
 function previewFileInBox(relPath, title) {
-  const box = document.getElementById('preview_container');
-  if (!box) return;
-  box.innerHTML = '';
-  const url = withTokenUrl(`/uploads/${encodeURI(relPath)}`);
-  const dlUrl = withTokenUrl(`/uploads/${encodeURI(relPath)}?download=1&filename=${encodeURIComponent(title)}`);
-  const ext = (relPath.split('.').pop() || '').toLowerCase();
-
-  if (ext === 'pdf') {
-    box.innerHTML = `<iframe src="${url}"></iframe>`;
-  } else if (['png', 'jpg', 'jpeg', 'webp', 'bmp'].includes(ext)) {
-    box.innerHTML = `<img src="${url}" alt="${escapeHtml(title)}" />`;
-  } else {
-    box.innerHTML = `
-      <div class="empty-preview">
-        <p>文件 <strong>${escapeHtml(title)}</strong> (${ext.toUpperCase()}) 不支持直接内嵌预览</p>
-        <p style="margin-top:12px;"><a class="btn btn-primary" href="${dlUrl}">📥 点击下载到本地查看</a></p>
-      </div>
-    `;
-  }
-}
-
-function closeDetailModal() {
-  document.getElementById('detail_modal').classList.add('hidden');
-  const box = document.getElementById('preview_container');
-  if (box) box.innerHTML = ''; // 立即销毁 iframe/img 释放内存
-}
-
-// ==================== 11. Excel 导出动作绑定 ====================
-function exportExcel(mode) {
-  const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildContractQueryParams();
-  window.location.href = withTokenUrl(`/api/export/excel?${params.toString()}`);
-}
-
-function exportProcurementExcel(mode) {
-  const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildProcQueryParams();
-  window.location.href = withTokenUrl(`/api/procurements/export?${params.toString()}`);
-}
-
-function exportCombinedWorkbook() {
-  window.location.href = withTokenUrl('/api/export/combined');
-}
-
-// ==================== 12. 多机局域网协同：静默同步（带弹窗防打扰锁） ====================
-function hasOpenModal() {
-  const ids = [
-    'lan_auth_overlay', 'lan_security_modal', 'presets_modal',
-    'our_entity_modal', 'no_rule_modal', 'proc_no_rule_modal',
-    'form_modal', 'proc_form_modal', 'detail_modal'
-  ];
-  return ids.some(id => {
-    const el = document.getElementById(id);
-    return el && !el.classList.contains('hidden');
-  });
-}
-
-async function silentSyncAll() {
-  if (isSilentSyncing || isSubmitting || hasOpenModal()) return;
-  isSilentSyncing = true;
-  try {
-    await loadDropdownPresets();
-    if (currentTab === 'procurement') {
-      await loadProcNoRuleSettings();
-      await loadProcurements();
-    } else {
-      await loadContractNoRuleSettings();
-      await loadContracts();
-    }
-  } catch (e) {
-  } finally {
-    isSilentSyncing = false;
-  }
-}
-
-window.addEventListener('focus', () => silentSyncAll());
-setInterval(() => {
-  if (!document.hidden) silentSyncAll();
-}, 30000);
-
-// ==================== 13. 应用启动初始化 ====================
-async function initAppData() {
-  await loadDropdownPresets();
-  await loadOurEntitySetting();
-  await loadContractNoRuleSettings();
-  await loadProcNoRuleSettings();
-  await loadContracts();
-}
-
-window.addEventListener('DOMContentLoaded', async () => {
-  initYearDropdowns();
-  const ok = await checkLanAuthStatus();
-  if (ok) {
-    await initAppData();
-  }
-});
+  const box = document.getElementById('preview_container我已准备好提供更多信息，但已达到回答词元数上限。您有任何具体问题希望我解答吗？
