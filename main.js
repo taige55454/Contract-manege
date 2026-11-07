@@ -9,8 +9,8 @@ app.commandLine.appendSwitch('disable-extensions');
 app.commandLine.appendSwitch('disable-component-extensions-with-background-pages');
 app.commandLine.appendSwitch('disable-sync');
 app.commandLine.appendSwitch('disable-translate');
-app.commandLine.appendSwitch(' mute-audio');
-app.commandLine.appendSwitch('disk-cache-size', '1048576'); // 限制磁盘缓存 1MB，本地回环无需重复缓存
+app.commandLine.appendSwitch('mute-audio'); // 修复此前多余的前置空格
+app.commandLine.appendSwitch('disk-cache-size', '1048576');
 app.commandLine.appendSwitch('media-cache-size', '1048576');
 app.commandLine.appendSwitch('js-flags', '--max-old-space-size=128 --expose-gc');
 
@@ -35,6 +35,12 @@ function resolveDataRoot() {
     return path.join(process.env.PORTABLE_EXECUTABLE_DIR, 'ContractData');
   }
   return path.join(app.getPath('userData'), 'ContractData');
+}
+
+function triggerMainGC() {
+  if (typeof global.gc === 'function') {
+    try { global.gc(); } catch (e) {}
+  }
 }
 
 // 纯内存动态生成 16x16 像素系统托盘图标
@@ -86,21 +92,37 @@ async function createWindowAndTray(port, dataRoot) {
       spellcheck: false,
       enableWebSQL: false,
       v8CacheOptions: 'none',
-      plugins: true // 保持内置 PDF 扫描件预览支持
+      plugins: true // 启用内置 PDF 扫描件预览插件
     }
+  });
+
+  // 安全加固：禁止渲染层意外弹出未知外部窗口，防止恶意跳转
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (url.startsWith(localUrl)) {
+      return { action: 'allow' };
+    }
+    return { action: 'deny' };
   });
 
   await mainWindow.loadURL(localUrl);
 
-  // 点击右上角 [X] 时隐藏到系统托盘，并主动回收内存
+  // 页面首次加载完毕后清理启动期临时缓存并执行一次 GC
+  mainWindow.webContents.once('did-finish-load', () => {
+    setTimeout(() => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.session.clearCache().catch(() => {});
+      }
+      triggerMainGC();
+    }, 1500);
+  });
+
+  // 点击右上角 [X] 时隐藏到系统托盘，并主动释放渲染缓存与 V8 垃圾内存
   mainWindow.on('close', (event) => {
     if (!isQuitting) {
       event.preventDefault();
       mainWindow.hide();
       mainWindow.webContents.session.clearCache().catch(() => {});
-      if (typeof global.gc === 'function') {
-        try { global.gc(); } catch (e) {}
-      }
+      triggerMainGC();
     }
   });
 
@@ -174,6 +196,9 @@ async function performFullExit() {
     const windows = BrowserWindow.getAllWindows();
     for (const win of windows) {
       if (!win.isDestroyed()) {
+        try {
+          await win.webContents.session.clearCache();
+        } catch (e) {}
         win.destroy();
       }
     }
@@ -185,6 +210,7 @@ async function performFullExit() {
   } catch (err) {
     console.error('退出清理异常:', err);
   } finally {
+    triggerMainGC();
     app.releaseSingleInstanceLock();
     app.quit();
     setTimeout(() => {
@@ -209,6 +235,9 @@ process.on('SIGTERM', () => performFullExit());
 process.on('uncaughtException', (err) => {
   console.error('未捕获异常:', err);
   performFullExit();
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('未处理的 Promise 拒绝:', reason);
 });
 
 // ==================== 4. 启动应用入口 ====================
