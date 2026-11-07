@@ -10,42 +10,45 @@
   <header class="app-header">
     <div>
       <h1>📄 企业合同台账管理系统</h1>
-      <p class="header-sub">合同编号前缀/后缀自动生成 · 默认我方主体带出 · 多方独立履约分行合并 · 到期光谱渐变预警</p>
+      <p class="header-sub">按年断号重编序号 · 固定前缀/后缀灰显补全 · 智能日期与税率识别 · 多方独立履约合并</p>
     </div>
     <div class="header-actions">
       <!-- 合同编号固定前缀/后缀规则快捷设置栏 -->
-      <div class="default-entity-bar" title="配置合同编号的固定前缀、日期格式、流水号位数与固定后缀，新增合同时将自动生成带出">
+      <div class="default-entity-bar" title="配置合同编号的固定前缀、日期格式、流水号位数、固定后缀及序号按年重编规则">
         <span>🔢 编号格式：</span>
         <strong id="display_no_rule">加载中...</strong>
-        <button class="btn btn-outline btn-sm" onclick="openNoRuleModal()">修改编号规则</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">修改编号规则</button>
       </div>
-      <!-- 默认我方主体快捷设置栏 -->
+      <!-- 默认我方主体快捷设置栏（改为自定义模态框，解决 Electron 下 prompt 无反应问题） -->
       <div class="default-entity-bar" title="新建合同时将自动带出此主体名称，也可在单份合同中修改">
         <span>🏢 默认我方主体：</span>
         <strong id="display_default_entity">加载中...</strong>
-        <button class="btn btn-outline btn-sm" onclick="changeDefaultOurEntity()">修改默认</button>
+        <button type="button" class="btn btn-outline btn-sm" onclick="openOurEntityModal()">修改默认</button>
       </div>
       <div class="legend-box" title="距离到期日 ≤90天 启动由绿到红平滑颜色渐变，越接近或逾期颜色越红越深">
         <span class="legend-gradient">安全(绿) ➔ 临近(黄/橙) ➔ 紧急/逾期(深红)</span>
       </div>
-      <button class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
+      <button type="button" class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
       <div class="dropdown">
-        <button class="btn btn-success">导出 Excel ▾</button>
+        <button type="button" class="btn btn-success">导出美化 Excel ▾</button>
         <div class="dropdown-menu">
-          <a href="javascript:void(0)" onclick="exportExcel('filtered')">导出当前筛选结果 (含合并单元格)</a>
-          <a href="javascript:void(0)" onclick="exportExcel('all')">导出全部台账 (含合并单元格)</a>
+          <a href="javascript:void(0)" onclick="exportExcel('filtered')">导出当前筛选结果 (含斑马纹/会计格式)</a>
+          <a href="javascript:void(0)" onclick="exportExcel('all')">导出全部台账 (含斑马纹/会计格式)</a>
         </div>
       </div>
     </div>
   </header>
 
   <main class="container">
-    <!-- 顶部筛选与排序工具栏 -->
+    <!-- 顶部多维筛选与排序工具栏（新增按年份筛选、按指定时间维度及起止时间段筛选） -->
     <section class="filter-bar">
-      <input type="text" id="filter_no" placeholder="搜合同编号 / 名称 / 分项摘要..." />
+      <input type="text" id="filter_no" placeholder="搜序号 / 合同编号 / 名称 / 摘要..." />
       <input type="text" id="filter_counterparty" placeholder="搜对方单位 / 信用代码 / 我方主体..." />
+      <select id="filter_year" title="按合同签订年份快速筛选">
+        <option value="">全部年份</option>
+      </select>
       <select id="filter_type">
-        <option value="">全部合同类型</option>
+        <option value="">全部类型</option>
         <option value="采购">采购</option>
         <option value="销售">销售</option>
         <option value="框架">框架</option>
@@ -59,35 +62,52 @@
         <option value="已到期">已到期</option>
         <option value="已终止">已终止</option>
       </select>
+
+      <!-- 指定时间段组合筛选 -->
+      <div class="filter-date-range">
+        <select id="filter_date_field" title="选择要筛选的时间维度">
+          <option value="sign_date">签订日期</option>
+          <option value="expiry_date">合同到期日</option>
+          <option value="start_date">开始履约日</option>
+          <option value="perf_bond_return_date">保证金应退日</option>
+          <option value="warranty_bond_expiry_date">质保金到期日</option>
+        </select>
+        <input type="text" id="filter_date_from" class="smart-date-filter" placeholder="起始如 2026.1.1" onblur="normalizeDateInputElem(this)" />
+        <span>至</span>
+        <input type="text" id="filter_date_to" class="smart-date-filter" placeholder="截止如 12.31" onblur="normalizeDateInputElem(this)" />
+      </div>
+
       <select id="sort_by">
-        <option value="created_at">默认排序 (创建时间)</option>
+        <option value="seq_no">按年度序号排序</option>
         <option value="sign_date">按签订日期排序</option>
         <option value="start_date">按开始履约日排序</option>
         <option value="expiry_date">按合同到期日排序</option>
         <option value="perf_bond_return_date">按保证金应退日排序</option>
         <option value="warranty_bond_expiry_date">按质保金到期日排序</option>
+        <option value="created_at">按录入时间排序</option>
       </select>
       <select id="sort_order">
-        <option value="ASC">升序 (最早在前)</option>
+        <option value="ASC">升序 (最早/001在前)</option>
         <option value="DESC" selected>降序 (最新在前)</option>
       </select>
-      <button class="btn btn-secondary" onclick="loadContracts()">🔍 查询</button>
-      <button class="btn btn-outline" onclick="resetFilters()">重置</button>
+      <button type="button" class="btn btn-secondary" onclick="loadContracts()">🔍 查询</button>
+      <button type="button" class="btn btn-outline" onclick="resetFilters()">重置</button>
     </section>
 
-    <!-- 合同台账主表格（左侧公共列与右侧扫描件/操作列自动跨行合并，中间多方履约明细逐行独立展示） -->
+    <!-- 合同台账主表格 -->
     <section class="table-wrapper">
       <table class="ledger-table">
         <thead>
           <tr>
+            <th class="merged-col-th text-center" title="支持按年断号重编">序号</th>
             <th class="merged-col-th">合同编号</th>
             <th class="merged-col-th">合同名称</th>
-            <th class="merged-col-th">类型</th>
+            <th class="merged-col-th text-center">类型</th>
             <th class="merged-col-th">我方签约主体</th>
-            <th class="merged-col-th">签订日期</th>
-            <th class="merged-col-th">开始履约日</th>
-            <th class="merged-col-th">合同到期日(预警)</th>
-            <th class="merged-col-th">状态</th>
+            <th class="merged-col-th text-center">签订日期</th>
+            <th class="merged-col-th text-center">开始履约日</th>
+            <th class="merged-col-th text-center">合同到期日(预警)</th>
+            <th class="merged-col-th text-center">状态</th>
             <!-- 以下为每个对方单位各自独立的履约行字段 -->
             <th>履约摘要(各写各的)</th>
             <th>对方单位名称</th>
@@ -96,15 +116,15 @@
             <th>收款账户/账号/开户行</th>
             <th class="text-right">含税金额</th>
             <th class="text-right">不含税价</th>
-            <th>税率</th>
-            <th>发票类型</th>
-            <th>币种</th>
+            <th class="text-center">税率</th>
+            <th class="text-center">发票类型</th>
+            <th class="text-center">币种</th>
             <th>履约保证金 / 应退预警</th>
             <th>质保金 / 到期预警</th>
             <th>分项备注</th>
             <!-- 以下为公共合并归档与操作列 -->
             <th class="merged-col-th">扫描件(点击预览)</th>
-            <th class="merged-col-th">操作</th>
+            <th class="merged-col-th text-center">操作</th>
           </tr>
         </thead>
         <tbody id="contract_tbody"></tbody>
@@ -112,17 +132,42 @@
     </section>
   </main>
 
-  <!-- 弹窗 0：合同编号固定前缀/后缀规则自定义弹窗 -->
-  <div id="no_rule_modal" class="modal hidden">
-    <div class="modal-content" style="width: 560px; max-width: 95vw;">
+  <!-- 弹窗 A：修改默认我方签约主体（替代原失效的 window.prompt） -->
+  <div id="our_entity_modal" class="modal hidden">
+    <div class="modal-content" style="width: 480px; max-width: 95vw;">
       <div class="modal-header">
-        <h2>🔢 自定义合同编号固定前缀 / 后缀与流水号规则</h2>
+        <h2>🏢 修改默认【我方签约主体】</h2>
+        <span class="close-btn" onclick="closeOurEntityModal()">&times;</span>
+      </div>
+      <form onsubmit="saveOurEntityForm(event)">
+        <div class="form-scroll-body">
+          <p style="font-size:12px;color:#4b5563;margin-bottom:10px;">
+            设置后，每次点击“+ 新增合同”时系统会自动填入该主体名称；遇到特殊合同时您仍可在表单中单次修改。
+          </p>
+          <div class="form-group">
+            <label>默认我方签约主体全称 *</label>
+            <input type="text" id="modal_our_entity_input" placeholder="请输入贵单位全称" required />
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeOurEntityModal()">取消</button>
+          <button type="submit" class="btn btn-primary">💾 保存默认主体</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 B：合同编号固定前缀/后缀与按年断号重编设置 -->
+  <div id="no_rule_modal" class="modal hidden">
+    <div class="modal-content" style="width: 580px; max-width: 95vw;">
+      <div class="modal-header">
+        <h2>🔢 合同编号固定前缀/后缀与序号重编设置</h2>
         <span class="close-btn" onclick="closeNoRuleModal()">&times;</span>
       </div>
       <form onsubmit="saveNoRuleForm(event)">
         <div class="form-scroll-body">
           <p style="font-size:12px;color:#4b5563;margin-bottom:12px;">
-            系统将按照 <strong>【固定前缀 + 日期段 + 自动递增流水号 + 固定后缀】</strong> 自动为您生成下一个合同编号；生成后您仍可在单份合同中自由修改。
+            新增合同时，已设置的<strong>固定前缀、日期段、固定后缀将做灰色锁定显示</strong>，您只需确认或补全中间编号部分即可。
           </p>
           <div class="form-grid-4">
             <div class="form-group span-2">
@@ -142,9 +187,9 @@
               </select>
             </div>
             <div class="form-group span-2">
-              <label>自动流水号位数 <small class="muted">(选 0 则不加流水号)</small></label>
+              <label>默认流水号位数 <small class="muted">(选 0 则中间留空手填)</small></label>
               <select id="rule_seq_digits" onchange="updateNoRulePreview()">
-                <option value="0">0 位 (不自动追加流水号，留空手填)</option>
+                <option value="0">0 位 (中间留空由人工手填)</option>
                 <option value="2">2 位数字 (如 01, 02...)</option>
                 <option value="3" selected>3 位数字 (如 001, 002...)</option>
                 <option value="4">4 位数字 (如 0001, 0002...)</option>
@@ -152,18 +197,24 @@
               </select>
             </div>
             <div class="form-group span-2">
-              <label>固定后缀 <small class="muted">(可留空，如 -A 或 -总部)</small></label>
+              <label>固定后缀 <small class="muted">(可留空，如 -CG 或 -总部)</small></label>
               <input type="text" id="rule_suffix" placeholder="例如：-CG" oninput="updateNoRulePreview()" />
             </div>
+            <div class="form-group span-4">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
+                <input type="checkbox" id="rule_reset_yearly" checked />
+                <span><strong>【序号列】按年断号重编</strong>（勾选后：按签订年份从 1 重新编号，如 <code>2025-001</code>、<code>2026-001</code>；不勾选则全表连续编号）</span>
+              </label>
+            </div>
             <div class="form-group span-4" style="background:#eff6ff;padding:10px;border-radius:4px;border:1px solid #bfdbfe;margin-top:4px;">
-              <label style="color:#1e3a8a;">📌 实时编号格式预览：</label>
-              <div id="rule_live_preview" style="font-size:15px;font-weight:700;color:#2563eb;margin-top:2px;">HT-2026-001</div>
+              <label style="color:#1e3a8a;">📌 实时编号结构预览（灰底为自动锁定段，白底为补全输入框）：</label>
+              <div id="rule_live_preview" style="font-size:15px;font-weight:700;color:#2563eb;margin-top:4px;">HT-2026-001</div>
             </div>
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline" onclick="closeNoRuleModal()">取消</button>
-          <button type="submit" class="btn btn-primary">💾 保存编号规则</button>
+          <button type="submit" class="btn btn-primary">💾 保存规则</button>
         </div>
       </form>
     </div>
@@ -179,23 +230,39 @@
       <form id="contract_form" onsubmit="submitContractForm(event)">
         <input type="hidden" id="form_id" />
         <div class="form-scroll-body">
-          <!-- 分区 1：合同公共主信息（多方共享，表格中自动合并单元格） -->
+          <!-- 分区 1：合同公共主信息 -->
           <div class="form-section-title">
-            <span>📌 一、合同公共基础信息（多方共用的主合同属性，列表与导出时自动合并单元格）</span>
-            <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">⚙️ 设置编号前缀/后缀</button>
+            <span>📌 一、合同公共基础信息（支持快捷输入日期如 <code>2026.3.5</code> 或简写 <code>6.3</code> 自动补全当年）</span>
+            <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">⚙️ 设置前缀/后缀规则</button>
           </div>
           <div class="form-grid-4">
-            <div class="form-group">
+            <!-- 合同编号：新增时采用“灰色固定段 + 仅补全中间段”，编辑时开放完整自由修改 -->
+            <div class="form-group span-2">
               <label style="display:flex;justify-content:space-between;align-items:center;">
-                <span>合同编号 * <small class="muted">(自动带出，可改)</small></span>
-                <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoContractNo()">🔄 重生成</a>
+                <span>合同编号 * <small class="muted" id="no_mode_hint">(灰底固定段已锁定，仅需补全中间项)</small></span>
+                <span>
+                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;margin-right:8px;" onclick="toggleFreeContractNoMode()" id="toggle_no_mode_btn">✏️ 切换自由手填</a>
+                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoContractNo()">🔄 重置流水号</a>
+                </span>
               </label>
-              <input type="text" name="contract_no" id="f_contract_no" placeholder="如：HT-2026-001" required />
+
+              <!-- 模式 A：分段补全输入器（新增合同默认启用） -->
+              <div id="segmented_no_box" class="segmented-no-wrapper">
+                <span id="seg_prefix" class="seg-locked" title="固定前缀（灰色只读）">HT-</span>
+                <span id="seg_date" class="seg-locked" title="日期段（灰色只读）">2026-</span>
+                <input type="text" id="seg_middle_input" class="seg-editable" placeholder="补全编号" oninput="syncSegmentedContractNo()" />
+                <span id="seg_suffix" class="seg-locked" title="固定后缀（灰色只读）"></span>
+              </div>
+
+              <!-- 模式 B：完整自由输入框（编辑已有合同默认启用，或点击切换时启用） -->
+              <input type="text" name="contract_no" id="f_contract_no" class="hidden" placeholder="如：HT-2026-001" required />
             </div>
-            <div class="form-group">
+
+            <div class="form-group span-2">
               <label>合同名称 *</label>
               <input type="text" name="contract_name" id="f_contract_name" placeholder="如：核心机房三方联合建设合同" required />
             </div>
+
             <div class="form-group">
               <label>合同类型 *</label>
               <select name="contract_type" id="f_contract_type" required>
@@ -215,31 +282,42 @@
                 <option value="已终止">已终止</option>
               </select>
             </div>
-            <div class="form-group">
-              <label>我方签约主体 * <small class="muted">(默认带出，可改)</small></label>
+            <div class="form-group span-2">
+              <label>我方签约主体 * <small class="muted">(默认带出，可单次修改)</small></label>
               <input type="text" name="our_entity" id="f_our_entity" required />
             </div>
+
+            <!-- 灵活日期输入组件（支持手敲 2026.3.5 / 6-3 自动识别，也可点右侧日历图标选日期） -->
             <div class="form-group">
-              <label>签订日期 *</label>
-              <input type="date" name="sign_date" id="f_sign_date" required onchange="syncStartDateDefault()" />
+              <label>签订日期 * <small class="muted">(如 2026.6.3 或 6.3)</small></label>
+              <div class="smart-date-wrap">
+                <input type="text" name="sign_date" id="f_sign_date" placeholder="YYYY-MM-DD 或 6.3" required onblur="onSignDateBlur(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_sign_date', true)" title="点击弹出日历选择" />
+              </div>
             </div>
             <div class="form-group">
-              <label>开始履约日期 * <small class="muted">(默认同签订日)</small></label>
-              <input type="date" name="start_date" id="f_start_date" required />
+              <label>开始履约日 * <small class="muted">(默认同签订日)</small></label>
+              <div class="smart-date-wrap">
+                <input type="text" name="start_date" id="f_start_date" placeholder="YYYY-MM-DD 或 6.3" required onblur="normalizeDateInputElem(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_start_date', false)" title="点击弹出日历选择" />
+              </div>
             </div>
             <div class="form-group">
-              <label>合同到期日期 * <small class="muted">(渐变色预警)</small></label>
-              <input type="date" name="expiry_date" id="f_expiry_date" required />
+              <label>合同到期日 * <small class="muted">(渐变色预警)</small></label>
+              <div class="smart-date-wrap">
+                <input type="text" name="expiry_date" id="f_expiry_date" placeholder="YYYY-MM-DD 或 12.31" required onblur="normalizeDateInputElem(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_expiry_date', false)" title="点击弹出日历选择" />
+              </div>
             </div>
-            <div class="form-group span-4">
-              <label>合同扫描件上传 (PDF / JPG / PNG，≤20MB，系统自动按“合同编号+合同名称+签订日期”命名归档)</label>
+            <div class="form-group">
+              <label>扫描件上传 <small class="muted">(PDF/JPG/PNG ≤20MB)</small></label>
               <input type="file" name="attachment" id="f_attachment" accept=".pdf,.jpg,.jpeg,.png" />
             </div>
           </div>
 
-          <!-- 分区 2：对方单位及各自独立履约义务（支持添加多行，每方各填各的摘要、金额、税率、保证金等） -->
+          <!-- 分区 2：对方单位及各自独立履约义务 -->
           <div class="form-section-title">
-            <span>🏢 二、对方单位及各自独立履约明细（支持多方：每方独立填写摘要、客商账户、金额税率及保证金）</span>
+            <span>🏢 二、对方单位及各自独立履约明细（税率输 <code>6</code> 自动转 <code>6%</code>，输 <code>6,9</code> 自动转 <code>*6%,9%</code>）</span>
             <button type="button" class="btn btn-primary btn-sm" onclick="addCounterpartyCard()">+ 添加一个对方单位履约行</button>
           </div>
           <datalist id="invoice_type_list">
