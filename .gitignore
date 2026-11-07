@@ -1,0 +1,6 @@
+node_modules/
+database.sqlite*
+test_ci.sqlite*
+uploads/*
+!uploads/.gitkeep
+.DS_Store
