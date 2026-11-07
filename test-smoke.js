@@ -41,12 +41,13 @@ function uploadMultipartFiles(port, reqPath, fieldName, filesArray) {
       chunks.push(Buffer.from(
         `--${boundary}\r\n` +
         `Content-Disposition: form-data; name="${fieldName}"; filename="${f.filename}"\r\n` +
-        `Content-Type: ${f.mime || 'application/pdf'}\r\n\r\n`
+        `Content-Type: ${f.mime || 'application/pdf'}\r\n\r\n`,
+        'utf8'
       ));
-      chunks.push(Buffer.from(f.content));
-      chunks.push(Buffer.from('\r\n'));
+      chunks.push(Buffer.from(f.content, 'utf8'));
+      chunks.push(Buffer.from('\r\n', 'utf8'));
     }
-    chunks.push(Buffer.from(`--${boundary}--\r\n`));
+    chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf8'));
     const bodyBuf = Buffer.concat(chunks);
 
     const req = http.request({
@@ -189,7 +190,7 @@ function uploadMultipartFiles(port, reqPath, fieldName, filesArray) {
       '修改合同名称和日期后，关联资料专属文件夹必须自动同步改名且内部文件完好无损'
     );
 
-    // 6. 验证导出 Excel 二进制流
+    // 6. 验证导出 Excel 二进制流（公式超链接原生保留 UTF-8 中文路径，零乱码）
     const excelBuffer = await new Promise((resolve, reject) => {
       http.get(`http://127.0.0.1:${port}/api/contracts/export?scope=all`, res => {
         assert.strictEqual(res.statusCode, 200);
@@ -199,12 +200,16 @@ function uploadMultipartFiles(port, reqPath, fieldName, filesArray) {
       }).on('error', reject);
     });
 
-    const wb = XLSX.read(excelBuffer, { type: 'buffer', cellNF: true });
+    const wb = XLSX.read(excelBuffer, { type: 'buffer', cellNF: true, cellFormula: true });
     const ws = wb.Sheets['合同台账'];
 
     assert.strictEqual(ws['A3'].v, '2026-001', '导出第1条数据行必须按正序排列为 2026-001');
     assert.strictEqual(Number.isInteger(ws['F3'].v), true, '导出签订日期必须为纯整数序列号');
-    assert.strictEqual(ws['AE3'].l.Target, expectedNewFolderRel, '导出表第31列超链接必须指向重命名后的关联资料专属文件夹');
+    assert.strictEqual(
+      ws['AE3'].f && ws['AE3'].f.includes(`HYPERLINK("${expectedNewFolderRel}"`),
+      true,
+      '导出表第31列超链接公式必须原生指向重命名后的中文关联资料专属文件夹'
+    );
 
     // 7. 验证孤儿文件清扫与关闭资源释放
     sweepOrphanUploads();
