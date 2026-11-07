@@ -3,6 +3,7 @@ let defaultOurEntity = '';
 let isFreeContractNoMode = false;
 let isSubmittingForm = false;
 let isUploadingDetail = false;
+let hostLanInfo = null;
 let contractNoRule = {
   prefix: 'HT-',
   date_part: 'YYYY-',
@@ -10,6 +11,15 @@ let contractNoRule = {
   suffix: '',
   reset_yearly: true
 };
+
+// 统一封装 API 请求：若内网电脑会话过期或主机改了口令返回 401，立即弹出全屏口令锁
+async function apiFetch(url, options = {}) {
+  const res = await fetch(url, options);
+  if (res.status === 401 && !url.startsWith('/api/auth/')) {
+    showLanAuthOverlay('内网访问口令已更新或会话已过期，请重新输入验证口令');
+  }
+  return res;
+}
 
 function getLocalTodayStr() {
   const d = new Date();
@@ -26,7 +36,6 @@ function escapeHtml(str) {
   }[m]));
 }
 
-// 按路径分段严格调用 encodeURIComponent，彻底解决合同名或附件名含 #、%、?、+ 等字符时预览 404 的问题
 function encodeFilePathForUrl(relPath) {
   if (!relPath) return '';
   return String(relPath)
@@ -40,6 +49,165 @@ function fmtMoney(val) {
   if (val === null || val === undefined || val === '') return '-';
   const num = Number(val);
   return Number.isFinite(num) ? num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '-';
+}
+
+// ==================== 内网口令鉴权与本机安全控制逻辑 ====================
+
+function showLanAuthOverlay(errorMsg = '') {
+  const overlay = document.getElementById('lan_auth_overlay');
+  const errBox = document.getElementById('lan_auth_error');
+  overlay.classList.remove('hidden');
+  if (errorMsg) {
+    errBox.innerText = errorMsg;
+    errBox.classList.remove('hidden');
+  } else {
+    errBox.classList.add('hidden');
+  }
+  setTimeout(() => {
+    const input = document.getElementById('lan_auth_passcode_input');
+    if (input) input.focus();
+  }, 50);
+}
+
+function hideLanAuthOverlay() {
+  document.getElementById('lan_auth_overlay').classList.add('hidden');
+  document.getElementById('lan_auth_error').classList.add('hidden');
+  document.getElementById('lan_auth_passcode_input').value = '';
+}
+
+function updateHostLanBarUI(lanInfo) {
+  hostLanInfo = lanInfo;
+  const bar = document.getElementById('host_lan_bar');
+  const statusEl = document.getElementById('display_lan_status');
+  if (!lanInfo) {
+    bar.classList.add('hidden');
+    return;
+  }
+  bar.classList.remove('hidden');
+  if (lanInfo.enabled) {
+    statusEl.innerText = `已开启 (口令: ${lanInfo.passcode} | 端口: ${lanInfo.port})`;
+    statusEl.style.color = '#166534';
+  } else {
+    statusEl.innerText = '已关闭内网访问';
+    statusEl.style.color = '#dc2626';
+  }
+}
+
+async function checkAuthAndInitApp() {
+  try {
+    const res = await fetch('/api/auth/status');
+    const result = await res.json();
+
+    if (result.is_localhost) {
+      hideLanAuthOverlay();
+      document.getElementById('btn_lan_logout').classList.add('hidden');
+      updateHostLanBarUI(result.lan_info);
+      await loadContractNoRule();
+      await loadDefaultOurEntity();
+      await loadContracts();
+      return;
+    }
+
+    // 内网其他电脑访问
+    document.getElementById('host_lan_bar').classList.add('hidden');
+    if (result.authenticated) {
+      hideLanAuthOverlay();
+      document.getElementById('btn_lan_logout').classList.remove('hidden');
+      await loadContractNoRule();
+      await loadDefaultOurEntity();
+      await loadContracts();
+    } else {
+      const msg = result.lan_enabled === false
+        ? '主机管理员当前已关闭内网共享访问权限'
+        : '';
+      showLanAuthOverlay(msg);
+    }
+  } catch (err) {
+    console.error('鉴权检查失败:', err);
+  }
+}
+
+async function submitLanAuthForm(e) {
+  e.preventDefault();
+  const input = document.getElementById('lan_auth_passcode_input');
+  const btn = document.getElementById('btn_lan_login');
+  const passcode = input.value.trim();
+  if (!passcode) return;
+
+  btn.disabled = true;
+  try {
+    const res = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ passcode })
+    });
+    const result = await res.json();
+    if (!result.success) {
+      showLanAuthOverlay(result.message || '口令验证失败');
+      return;
+    }
+    hideLanAuthOverlay();
+    document.getElementById('btn_lan_logout').classList.remove('hidden');
+    await loadContractNoRule();
+    await loadDefaultOurEntity();
+    await loadContracts();
+  } catch (err) {
+    showLanAuthOverlay('网络请求异常，请重试');
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+async function logoutLanSession() {
+  await fetch('/api/auth/logout', { method: 'POST' });
+  currentContracts = [];
+  document.getElementById('contract_tbody').innerHTML = '';
+  document.getElementById('btn_lan_logout').classList.add('hidden');
+  showLanAuthOverlay('您已安全锁定并退出当前内网会话');
+}
+
+function openLanSecurityModal() {
+  if (!hostLanInfo) return;
+  document.getElementById('lan_enabled_checkbox').checked = hostLanInfo.enabled !== false;
+  document.getElementById('lan_passcode_input').value = hostLanInfo.passcode || '888888';
+  const urlsHtml = (hostLanInfo.lan_urls || []).map(u => `<div>🌐 ${escapeHtml(u)}</div>`).join('');
+  document.getElementById('lan_urls_box').innerHTML = urlsHtml || '未检测到局域网网卡';
+  document.getElementById('lan_security_modal').classList.remove('hidden');
+}
+
+function closeLanSecurityModal() {
+  document.getElementById('lan_security_modal').classList.add('hidden');
+}
+
+async function saveLanSecurityForm(e) {
+  e.preventDefault();
+  const enabled = document.getElementById('lan_enabled_checkbox').checked;
+  const passcode = document.getElementById('lan_passcode_input').value.trim();
+  if (passcode.length < 4) return alert('验证口令至少需要 4 位字符！');
+
+  const res = await apiFetch('/api/settings/lan-security', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ enabled, passcode })
+  });
+  const result = await res.json();
+  if (!result.success) return alert(result.message);
+
+  updateHostLanBarUI(result.lan_info);
+  openLanSecurityModal();
+  alert('✅ ' + result.message);
+}
+
+function copyLanInviteText() {
+  if (!hostLanInfo) return;
+  const url = (hostLanInfo.lan_urls && hostLanInfo.lan_urls[0]) || '';
+  const code = document.getElementById('lan_passcode_input').value.trim() || hostLanInfo.passcode;
+  const text = `【企业合同台账系统 - 内网协同访问】\n访问网址（本次随机端口）：${url}\n验证口令：${code}\n（请在同一局域网电脑浏览器打开网址并输入口令，修改内容与上传附件将自动保存在主机中）`;
+  navigator.clipboard.writeText(text).then(() => {
+    alert('📋 已成功复制【内网随机端口网址 + 验证口令】，可直接粘贴发送给内网同事！');
+  }).catch(() => {
+    prompt('请复制以下内网访问信息：', text);
+  });
 }
 
 // ==================== 前端智能日期与智能税率即时识别 ====================
@@ -187,7 +355,7 @@ function renderDueAlertBadge(dateStr, contractStatus = '生效中', prefixLabel 
 // ==================== 合同编号固定前缀/后缀与分段灰显管理 ====================
 async function loadContractNoRule() {
   try {
-    const res = await fetch('/api/settings/contract-no-rule');
+    const res = await apiFetch('/api/settings/contract-no-rule');
     const result = await res.json();
     if (result.success) {
       contractNoRule = result.rule;
@@ -246,7 +414,7 @@ async function saveNoRuleForm(e) {
     reset_yearly: document.getElementById('rule_reset_yearly').checked
   };
 
-  const res = await fetch('/api/settings/contract-no-rule', {
+  const res = await apiFetch('/api/settings/contract-no-rule', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload)
@@ -303,7 +471,7 @@ function toggleFreeContractNoMode() {
 async function fillAutoContractNo(signDateVal = '') {
   try {
     const query = signDateVal ? `?sign_date=${encodeURIComponent(signDateVal)}` : '';
-    const res = await fetch(`/api/contracts/next-no${query}`);
+    const res = await apiFetch(`/api/contracts/next-no${query}`);
     const result = await res.json();
     if (result.success && result.parts) {
       const p = result.parts;
@@ -321,7 +489,7 @@ async function fillAutoContractNo(signDateVal = '') {
 // ==================== 默认我方签约主体管理 ====================
 async function loadDefaultOurEntity() {
   try {
-    const res = await fetch('/api/settings/our-entity');
+    const res = await apiFetch('/api/settings/our-entity');
     const result = await res.json();
     if (result.success) {
       defaultOurEntity = result.default_our_entity;
@@ -345,7 +513,7 @@ async function saveOurEntityForm(e) {
   const newVal = document.getElementById('modal_our_entity_input').value.trim();
   if (!newVal) return alert('默认我方主体名称不能为空！');
 
-  const res = await fetch('/api/settings/our-entity', {
+  const res = await apiFetch('/api/settings/our-entity', {
     method: 'PUT',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ default_our_entity: newVal })
@@ -429,7 +597,8 @@ function populateYearFilterOptions(yearsFromDb = []) {
 async function loadContracts() {
   try {
     const params = getFilterParams();
-    const res = await fetch(`/api/contracts?${params.toString()}`);
+    const res = await apiFetch(`/api/contracts?${params.toString()}`);
+    if (res.status === 401) return;
     const result = await res.json();
     if (!result.success) return alert(result.message);
 
@@ -577,6 +746,8 @@ document.addEventListener('DOMContentLoaded', async () => {
     if (e.key === 'Escape') {
       if (!document.getElementById('detail_modal').classList.contains('hidden')) {
         closeDetailModal();
+      } else if (!document.getElementById('lan_security_modal').classList.contains('hidden')) {
+        closeLanSecurityModal();
       } else if (!document.getElementById('no_rule_modal').classList.contains('hidden')) {
         closeNoRuleModal();
       } else if (!document.getElementById('our_entity_modal').classList.contains('hidden')) {
@@ -587,9 +758,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     }
   });
 
-  await loadContractNoRule();
-  await loadDefaultOurEntity();
-  await loadContracts();
+  await checkAuthAndInitApp();
 });
 
 // ==================== 多方对方单位及独立履约行卡片管理 ====================
@@ -777,7 +946,7 @@ async function openFormModal(id = null) {
     setContractNoEditorMode(true);
     let c = null;
     try {
-      const res = await fetch(`/api/contracts/${id}`);
+      const res = await apiFetch(`/api/contracts/${id}`);
       const result = await res.json();
       if (result.success) c = result.data;
     } catch (e) {}
@@ -851,7 +1020,8 @@ async function submitContractForm(e) {
     const url = id ? `/api/contracts/${id}` : '/api/contracts';
     const method = id ? 'PUT' : 'POST';
 
-    const res = await fetch(url, { method, body: formData });
+    const res = await apiFetch(url, { method, body: formData });
+    if (res.status === 401) return;
     const result = await res.json();
     if (!result.success) return alert(result.message);
 
@@ -868,7 +1038,8 @@ async function submitContractForm(e) {
 
 async function deleteContract(id) {
   if (!confirm('确认删除该条合同台账及其关联的扫描件与关联资料专属文件夹吗？此操作不可恢复。')) return;
-  const res = await fetch(`/api/contracts/${id}`, { method: 'DELETE' });
+  const res = await apiFetch(`/api/contracts/${id}`, { method: 'DELETE' });
+  if (res.status === 401) return;
   const result = await res.json();
   if (!result.success) return alert(result.message);
   await loadContractNoRule();
@@ -919,7 +1090,8 @@ function previewByNodeDataset(btnEl) {
 
 async function openDetailModal(id) {
   releasePreviewDOM();
-  const res = await fetch(`/api/contracts/${id}`);
+  const res = await apiFetch(`/api/contracts/${id}`);
+  if (res.status === 401) return;
   const result = await res.json();
   if (!result.success) return alert(result.message);
 
@@ -1048,7 +1220,8 @@ async function uploadAttachmentInDetail(id, fileInput) {
     formData.append('attachment', fileInput.files[0]);
     fileInput.value = '';
 
-    const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'POST', body: formData });
+    const res = await apiFetch(`/api/contracts/${id}/attachment`, { method: 'POST', body: formData });
+    if (res.status === 401) return;
     const result = await res.json();
     if (!result.success) return alert(result.message);
 
@@ -1061,7 +1234,8 @@ async function uploadAttachmentInDetail(id, fileInput) {
 
 async function deleteAttachmentInDetail(id) {
   if (!confirm('确认删除该合同的主扫描件吗？（合同记录与其他关联资料将保留）')) return;
-  const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'DELETE' });
+  const res = await apiFetch(`/api/contracts/${id}/attachment`, { method: 'DELETE' });
+  if (res.status === 401) return;
   const result = await res.json();
   if (!result.success) return alert(result.message);
 
@@ -1079,7 +1253,8 @@ async function uploadRelatedFilesInDetail(id, fileInput) {
     }
     fileInput.value = '';
 
-    const res = await fetch(`/api/contracts/${id}/related`, { method: 'POST', body: formData });
+    const res = await apiFetch(`/api/contracts/${id}/related`, { method: 'POST', body: formData });
+    if (res.status === 401) return;
     const result = await res.json();
     if (!result.success) return alert(result.message);
 
@@ -1092,7 +1267,8 @@ async function uploadRelatedFilesInDetail(id, fileInput) {
 
 async function deleteRelatedFileInDetail(contractId, attId) {
   if (!confirm('确认删除这份关联资料文件吗？')) return;
-  const res = await fetch(`/api/contracts/${contractId}/related/${attId}`, { method: 'DELETE' });
+  const res = await apiFetch(`/api/contracts/${contractId}/related/${attId}`, { method: 'DELETE' });
+  if (res.status === 401) return;
   const result = await res.json();
   if (!result.success) return alert(result.message);
 
