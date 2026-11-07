@@ -2,6 +2,7 @@ let currentContracts = [];
 let defaultOurEntity = '';
 let isFreeContractNoMode = false;
 let isSubmittingForm = false;
+let isUploadingDetail = false;
 let contractNoRule = {
   prefix: 'HT-',
   date_part: 'YYYY-',
@@ -10,7 +11,6 @@ let contractNoRule = {
   reset_yearly: true
 };
 
-// 获取本地时区当天日期 (YYYY-MM-DD)，修复 toISOString() 在北京时间 00:00~08:00 差一天的 Bug
 function getLocalTodayStr() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -24,6 +24,16 @@ function escapeHtml(str) {
   return String(str).replace(/[&<>"']/g, m => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   }[m]));
+}
+
+// 按路径分段严格调用 encodeURIComponent，彻底解决合同名或附件名含 #、%、?、+ 等字符时预览 404 的问题
+function encodeFilePathForUrl(relPath) {
+  if (!relPath) return '';
+  return String(relPath)
+    .replace(/\\/g, '/')
+    .split('/')
+    .map(seg => encodeURIComponent(seg))
+    .join('/');
 }
 
 function fmtMoney(val) {
@@ -105,7 +115,7 @@ function pickDateToInput(datePickerEl, targetInputId, isSignDate) {
   const target = document.getElementById(targetInputId);
   target.value = datePickerEl.value;
   target.style.borderColor = '#d1d5db';
-  datePickerEl.value = ''; // 释放原生日期选择器状态
+  datePickerEl.value = '';
   if (isSignDate) {
     onSignDateBlur(target);
   }
@@ -428,7 +438,7 @@ async function loadContracts() {
 
     const tbody = document.getElementById('contract_tbody');
     if (currentContracts.length === 0) {
-      tbody.innerHTML = `<tr><td colspan="24" style="text-align:center;color:#6b7280;padding:28px;">暂无匹配的合同台账记录</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="25" style="text-align:center;color:#6b7280;padding:28px;">暂无匹配的合同台账记录</td></tr>`;
       return;
     }
 
@@ -438,6 +448,7 @@ async function loadContracts() {
       const parties = parseContractParties(c);
       const spanCount = parties.length;
       const groupStripeClass = (contractIndex % 2 === 1) ? 'contract-group-odd' : 'contract-group-even';
+      const relatedList = Array.isArray(c.related_files) ? c.related_files : [];
 
       parties.forEach((p, idx) => {
         const isFirstRow = idx === 0;
@@ -469,6 +480,8 @@ async function loadContracts() {
         if (p.bank_code) bankParts.push(`行号:${p.bank_code}`);
         const bankSummary = bankParts.length > 0 ? bankParts.join(' | ') : '-';
 
+        const relatedTitleTip = relatedList.map(r => r.file_name).join('\n');
+
         htmlRows.push(`
           <tr class="${groupStripeClass} ${isLastRow ? 'contract-group-end' : ''}">
             ${isFirstRow ? `
@@ -498,11 +511,16 @@ async function loadContracts() {
             ${isFirstRow ? `
               <td rowspan="${spanCount}">
                 ${c.attachment_path
-                  ? `<a class="link-btn" onclick="openDetailModal(${c.id})" title="点击在线预览扫描件">📎 ${escapeHtml(c.attachment_original_name)}</a>`
+                  ? `<a class="link-btn" onclick="openDetailModal(${c.id})" title="点击在线预览主合同扫描件">📎 ${escapeHtml(c.attachment_original_name)}</a>`
                   : `<span style="color:#9ca3af;">无扫描件</span>`}
               </td>
+              <td rowspan="${spanCount}">
+                ${relatedList.length > 0
+                  ? `<a class="related-badge-btn" onclick="openDetailModal(${c.id})" title="${escapeHtml(relatedTitleTip)}">📂 已归档 ${relatedList.length} 份资料</a>`
+                  : `<a class="link-btn" style="color:#6b7280;font-size:12px;" onclick="openDetailModal(${c.id})">+ 上传关联资料</a>`}
+              </td>
               <td class="text-center" rowspan="${spanCount}">
-                <button type="button" class="btn btn-outline btn-sm" onclick="openDetailModal(${c.id})">详情 / 扫描件</button>
+                <button type="button" class="btn btn-outline btn-sm" onclick="openDetailModal(${c.id})">详情 / 资料</button>
                 <button type="button" class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
                 <button type="button" class="btn btn-danger btn-sm" onclick="deleteContract(${c.id})">删除</button>
               </td>
@@ -555,7 +573,6 @@ document.addEventListener('DOMContentLoaded', async () => {
     });
   }
 
-  // 支持按键盘 ESC 键优雅关闭当前打开的弹窗并释放预览内存
   document.addEventListener('keydown', (e) => {
     if (e.key === 'Escape') {
       if (!document.getElementById('detail_modal').classList.contains('hidden')) {
@@ -747,8 +764,9 @@ async function openFormModal(id = null) {
   const form = document.getElementById('contract_form');
   form.reset();
   document.getElementById('f_attachment').value = '';
+  document.getElementById('f_related_files').value = '';
   document.getElementById('form_id').value = id || '';
-  document.getElementById('form_modal_title').innerText = id ? '编辑合同台账' : '新增合同台账';
+  document.getElementById('form_modal_title').innerText = id ? '编辑合同台账（修改编号/名称/日期将自动同步重命名关联资料文件夹）' : '新增合同台账';
   const container = document.getElementById('counterparties_container');
   container.innerHTML = '';
 
@@ -757,7 +775,14 @@ async function openFormModal(id = null) {
 
   if (id) {
     setContractNoEditorMode(true);
-    const c = currentContracts.find(item => item.id === id);
+    let c = null;
+    try {
+      const res = await fetch(`/api/contracts/${id}`);
+      const result = await res.json();
+      if (result.success) c = result.data;
+    } catch (e) {}
+    if (!c) c = currentContracts.find(item => item.id === id);
+
     if (c) {
       document.getElementById('f_contract_no').value = c.contract_no;
       document.getElementById('f_contract_name').value = c.contract_name;
@@ -788,6 +813,7 @@ function closeFormModal() {
   document.getElementById('form_modal').classList.add('hidden');
   document.getElementById('counterparties_container').innerHTML = '';
   document.getElementById('f_attachment').value = '';
+  document.getElementById('f_related_files').value = '';
 }
 
 async function submitContractForm(e) {
@@ -841,7 +867,7 @@ async function submitContractForm(e) {
 }
 
 async function deleteContract(id) {
-  if (!confirm('确认删除该条合同台账及其关联的扫描件吗？此操作不可恢复。')) return;
+  if (!confirm('确认删除该条合同台账及其关联的扫描件与关联资料专属文件夹吗？此操作不可恢复。')) return;
   const res = await fetch(`/api/contracts/${id}`, { method: 'DELETE' });
   const result = await res.json();
   if (!result.success) return alert(result.message);
@@ -849,7 +875,6 @@ async function deleteContract(id) {
   await loadContracts();
 }
 
-// 彻底销毁预览容器内的 iframe / img 节点，防止 Chromium 插件内存驻留
 function releasePreviewDOM() {
   const preview = document.getElementById('preview_container');
   if (!preview) return;
@@ -866,6 +891,32 @@ function releasePreviewDOM() {
   preview.innerHTML = '';
 }
 
+function previewFileInRightPane(relFilePath, displayTitle) {
+  releasePreviewDOM();
+  const preview = document.getElementById('preview_container');
+  const lower = String(relFilePath).toLowerCase();
+  const cacheBuster = `?t=${Date.now()}`;
+  const safeUrl = `/${encodeFilePathForUrl(relFilePath)}${cacheBuster}`;
+
+  if (lower.endsWith('.pdf')) {
+    preview.innerHTML = `<iframe src="${safeUrl}"></iframe>`;
+  } else if (lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png') || lower.endsWith('.gif') || lower.endsWith('.webp')) {
+    preview.innerHTML = `<img src="${safeUrl}" alt="${escapeHtml(displayTitle)}" />`;
+  } else {
+    preview.innerHTML = `
+      <div class="empty-preview">
+        📄 <strong>${escapeHtml(displayTitle)}</strong><br/>
+        该文件为非 PDF/图片格式（如 Word / Excel / 压缩包），请点击左侧列表中的【⬇ 下载】按钮使用本地办公软件打开，或在导出的 Excel 中点击超链接直接打开关联资料专属文件夹。
+      </div>
+    `;
+  }
+}
+
+function previewByNodeDataset(btnEl) {
+  if (!btnEl) return;
+  previewFileInRightPane(btnEl.dataset.filepath || '', btnEl.dataset.filename || '');
+}
+
 async function openDetailModal(id) {
   releasePreviewDOM();
   const res = await fetch(`/api/contracts/${id}`);
@@ -874,6 +925,46 @@ async function openDetailModal(id) {
 
   const c = result.data;
   const parties = parseContractParties(c);
+  const relatedList = Array.isArray(c.related_files) ? c.related_files : [];
+
+  const folderHint = c.related_folder_path
+    ? `<div style="font-size:11.5px;color:#0f766e;background:#f0fdf4;padding:5px 8px;border-radius:4px;margin-bottom:6px;word-break:break-all;">
+         📁 <strong>专属归档夹相对路径：</strong><code>${escapeHtml(c.related_folder_path)}</code>
+       </div>`
+    : `<div style="font-size:11.5px;color:#6b7280;margin-bottom:6px;">尚未上传关联资料（上传后将自动创建以“合同编号+合同名称+签订日期”命名的专属文件夹）</div>`;
+
+  const relatedItemsHtml = relatedList.length > 0
+    ? relatedList.map(att => {
+        const lower = att.file_name.toLowerCase();
+        const canPreview = lower.endsWith('.pdf') || lower.endsWith('.jpg') || lower.endsWith('.jpeg') || lower.endsWith('.png');
+        return `
+          <div class="related-list-item">
+            <span class="fname" title="${escapeHtml(att.file_name)}">📄 ${escapeHtml(att.file_name)}</span>
+            <div class="factions">
+              ${canPreview
+                ? `<button type="button" class="btn btn-outline btn-sm" data-filepath="${escapeHtml(att.file_path)}" data-filename="${escapeHtml(att.file_name)}" onclick="previewByNodeDataset(this)">👁 预览</button>`
+                : ''}
+              <a class="btn btn-primary btn-sm" href="/api/contracts/${c.id}/related/${att.id}/download">⬇ 下载</a>
+              <button type="button" class="btn btn-danger btn-sm" onclick="deleteRelatedFileInDetail(${c.id}, ${att.id})">🗑</button>
+            </div>
+          </div>
+        `;
+      }).join('')
+    : '';
+
+  const relatedSectionHtml = `
+    <div class="detail-card" style="border-color:#99f6e4;">
+      <h4 style="color:#0f766e;">
+        <span>📂 其他关联资料 (${relatedList.length} 份)</span>
+        <label class="btn btn-success btn-sm" style="margin:0;cursor:pointer;">
+          + 追加上传多份资料
+          <input type="file" hidden multiple onchange="uploadRelatedFilesInDetail(${c.id}, this)" />
+        </label>
+      </h4>
+      ${folderHint}
+      ${relatedItemsHtml}
+    </div>
+  `;
 
   const partiesDetailHtml = parties.map((p, idx) => `
     <div class="detail-card">
@@ -904,6 +995,7 @@ async function openDetailModal(id) {
       <div class="detail-row"><span class="label">签订 / 开始履约日</span><span class="val">${escapeHtml(c.sign_date)} / ${escapeHtml(c.start_date || c.sign_date)}</span></div>
       <div class="detail-row"><span class="label">合同到期日</span><span class="val">${renderDueAlertBadge(c.expiry_date, c.status)}</span></div>
     </div>
+    ${relatedSectionHtml}
     ${partiesDetailHtml}
   `;
 
@@ -911,11 +1003,15 @@ async function openDetailModal(id) {
   const preview = document.getElementById('preview_container');
 
   if (c.attachment_path) {
-    const isPdf = c.attachment_path.toLowerCase().endsWith('.pdf');
     toolbar.innerHTML = `
-      <div><strong>归档扫描件：</strong><code>${escapeHtml(c.attachment_original_name)}</code></div>
+      <div>
+        <strong>主合同扫描件：</strong>
+        <a class="link-btn" data-filepath="${escapeHtml(c.attachment_path)}" data-filename="${escapeHtml(c.attachment_original_name)}" onclick="previewByNodeDataset(this)">
+          <code>${escapeHtml(c.attachment_original_name)}</code> (点击切回预览)
+        </a>
+      </div>
       <div style="display:flex;gap:8px;">
-        <a class="btn btn-primary btn-sm" href="/api/contracts/${c.id}/download">⬇ 下载原件</a>
+        <a class="btn btn-primary btn-sm" href="/api/contracts/${c.id}/download">⬇ 下载扫描件</a>
         <label class="btn btn-outline btn-sm" style="margin:0;">
           🔄 替换扫描件
           <input type="file" hidden accept=".pdf,.jpg,.jpeg,.png" onchange="uploadAttachmentInDetail(${c.id}, this)" />
@@ -923,19 +1019,16 @@ async function openDetailModal(id) {
         <button type="button" class="btn btn-danger btn-sm" onclick="deleteAttachmentInDetail(${c.id})">🗑 删除扫描件</button>
       </div>
     `;
-    const cacheBuster = `?t=${Date.now()}`;
-    preview.innerHTML = isPdf
-      ? `<iframe src="/${encodeURI(c.attachment_path)}${cacheBuster}"></iframe>`
-      : `<img src="/${encodeURI(c.attachment_path)}${cacheBuster}" alt="合同扫描件预览" />`;
+    previewFileInRightPane(c.attachment_path, c.attachment_original_name);
   } else {
     toolbar.innerHTML = `
-      <div><span style="color:#6b7280;">当前未关联扫描件（上传后自动按“合同编号+合同名称+签订日期”命名）</span></div>
+      <div><span style="color:#6b7280;">当前未关联主合同扫描件（上传后自动按“合同编号+合同名称+签订日期”命名）</span></div>
       <label class="btn btn-primary btn-sm" style="margin:0;">
-        + 上传扫描件 (PDF/JPG/PNG)
+        + 上传主合同扫描件 (PDF/JPG/PNG)
         <input type="file" hidden accept=".pdf,.jpg,.jpeg,.png" onchange="uploadAttachmentInDetail(${c.id}, this)" />
       </label>
     `;
-    preview.innerHTML = `<div class="empty-preview">暂无扫描件，请点击右上角按钮上传</div>`;
+    preview.innerHTML = `<div class="empty-preview">暂无主合同扫描件，可点击右上角上传；若已上传其他关联资料，也可点击左侧列表中的【👁 预览】在此处查看。</div>`;
   }
 
   document.getElementById('detail_modal').classList.remove('hidden');
@@ -948,12 +1041,27 @@ function closeDetailModal() {
 }
 
 async function uploadAttachmentInDetail(id, fileInput) {
-  if (!fileInput.files.length) return;
-  const formData = new FormData();
-  formData.append('attachment', fileInput.files[0]);
-  fileInput.value = ''; // 立即释放浏览器文件选择器句柄
+  if (!fileInput.files.length || isUploadingDetail) return;
+  isUploadingDetail = true;
+  try {
+    const formData = new FormData();
+    formData.append('attachment', fileInput.files[0]);
+    fileInput.value = '';
 
-  const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'POST', body: formData });
+    const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'POST', body: formData });
+    const result = await res.json();
+    if (!result.success) return alert(result.message);
+
+    await openDetailModal(id);
+    loadContracts();
+  } finally {
+    isUploadingDetail = false;
+  }
+}
+
+async function deleteAttachmentInDetail(id) {
+  if (!confirm('确认删除该合同的主扫描件吗？（合同记录与其他关联资料将保留）')) return;
+  const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'DELETE' });
   const result = await res.json();
   if (!result.success) return alert(result.message);
 
@@ -961,12 +1069,33 @@ async function uploadAttachmentInDetail(id, fileInput) {
   loadContracts();
 }
 
-async function deleteAttachmentInDetail(id) {
-  if (!confirm('确认删除该合同的扫描件吗？（合同台账记录将保留）')) return;
-  const res = await fetch(`/api/contracts/${id}/attachment`, { method: 'DELETE' });
+async function uploadRelatedFilesInDetail(id, fileInput) {
+  if (!fileInput.files || !fileInput.files.length || isUploadingDetail) return;
+  isUploadingDetail = true;
+  try {
+    const formData = new FormData();
+    for (const file of fileInput.files) {
+      formData.append('related_files', file);
+    }
+    fileInput.value = '';
+
+    const res = await fetch(`/api/contracts/${id}/related`, { method: 'POST', body: formData });
+    const result = await res.json();
+    if (!result.success) return alert(result.message);
+
+    await openDetailModal(id);
+    loadContracts();
+  } finally {
+    isUploadingDetail = false;
+  }
+}
+
+async function deleteRelatedFileInDetail(contractId, attId) {
+  if (!confirm('确认删除这份关联资料文件吗？')) return;
+  const res = await fetch(`/api/contracts/${contractId}/related/${attId}`, { method: 'DELETE' });
   const result = await res.json();
   if (!result.success) return alert(result.message);
 
-  await openDetailModal(id);
+  await openDetailModal(contractId);
   loadContracts();
 }
