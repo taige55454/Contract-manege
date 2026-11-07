@@ -150,8 +150,8 @@ async function loadContracts() {
 
       // 履约保证金展示
       let perfBondHtml = '<span style="color:#9ca3af;">-</span>';
-      if (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined || p.perf_bond_return_date) {
-        const amtStr = (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined) ? `¥${fmtMoney(p.perf_bond_amount)} ` : '';
+      if ((p.perf_bond_amount !== null && p.perf_bond_amount !== undefined && p.perf_bond_amount !== '') || p.perf_bond_return_date) {
+        const amtStr = (p.perf_bond_amount !== null && p.perf_bond_amount !== undefined && p.perf_bond_amount !== '') ? `¥${fmtMoney(p.perf_bond_amount)} ` : '';
         const payStr = p.perf_bond_pay_date ? `<small style="color:#6b7280;">(缴:${escapeHtml(p.perf_bond_pay_date)})</small> ` : '';
         const badge = p.perf_bond_return_date ? renderDueAlertBadge(p.perf_bond_return_date, c.status, '应退') : '';
         perfBondHtml = `<div>${amtStr}${payStr}${badge}</div>`;
@@ -159,8 +159,8 @@ async function loadContracts() {
 
       // 质保金展示
       let warrantyHtml = '<span style="color:#9ca3af;">-</span>';
-      if (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined || p.warranty_bond_expiry_date) {
-        const amtStr = (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined) ? `¥${fmtMoney(p.warranty_bond_amount)} ` : '';
+      if ((p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined && p.warranty_bond_amount !== '') || p.warranty_bond_expiry_date) {
+        const amtStr = (p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined && p.warranty_bond_amount !== '') ? `¥${fmtMoney(p.warranty_bond_amount)} ` : '';
         const badge = p.warranty_bond_expiry_date ? renderDueAlertBadge(p.warranty_bond_expiry_date, c.status, '到期') : '';
         warrantyHtml = `<div>${amtStr}${badge}</div>`;
       }
