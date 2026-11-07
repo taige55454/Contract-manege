@@ -61,13 +61,15 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .due-chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 1.3; }
 .link-btn { color: #2563eb; cursor: pointer; text-decoration: none; font-weight: 500; }
 .link-btn:hover { text-decoration: underline; }
+.related-badge-btn { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: 4px; background: #f0fdf4; color: #0d9488; border: 1px solid #99f6e4; font-weight: 600; font-size: 12px; cursor: pointer; text-decoration: none; }
+.related-badge-btn:hover { background: #ccfbf1; }
 .hidden { display: none !important; }
 
 /* 模态框与表单布局 */
 .modal { position: fixed; inset: 0; background: rgba(17,24,39,0.55); display: flex; align-items: center; justify-content: center; z-index: 100; }
 .modal-content { background: #fff; border-radius: 8px; display: flex; flex-direction: column; max-height: 92vh; overflow: hidden; box-shadow: 0 20px 25px -5px rgba(0,0,0,0.2); }
 .modal-lg { width: 1080px; max-width: 96vw; }
-.modal-xl { width: 94vw; max-width: 1400px; height: 88vh; }
+.modal-xl { width: 95vw; max-width: 1440px; height: 89vh; }
 .modal-header { padding: 14px 20px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; background: #f9fafb; }
 .modal-header h2 { font-size: 16px; font-weight: 600; }
 .close-btn { font-size: 22px; cursor: pointer; color: #6b7280; line-height: 1; }
@@ -87,7 +89,6 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .form-group small.muted { font-weight: 400; color: #6b7280; }
 .form-group input, .form-group select { padding: 6px 9px; border: 1px solid #d1d5db; border-radius: 4px; font-size: 13px; }
 
-/* 合同编号“灰显固定前缀/后缀 + 白色可编辑补全区”组合控件 */
 .segmented-no-wrapper { display: flex; align-items: stretch; border: 1px solid #93c5fd; border-radius: 4px; overflow: hidden; background: #fff; }
 .seg-locked { background: #e5e7eb; color: #4b5563; padding: 6px 8px; font-size: 13px; font-family: Consolas, monospace; font-weight: 600; user-select: none; display: inline-flex; align-items: center; border-right: 1px solid #d1d5db; }
 .seg-locked:last-child { border-right: none; border-left: 1px solid #d1d5db; }
@@ -95,30 +96,31 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Micr
 .seg-editable { border: none !important; flex: 1; min-width: 70px; padding: 6px 8px !important; font-weight: 700; color: #1d4ed8; font-family: Consolas, monospace; outline: none; background: #ffffff; }
 .seg-editable:focus { background: #eff6ff; }
 
-/* 灵活手输日期 + 右侧原生日历小图标组合控件 */
 .smart-date-wrap { display: flex; align-items: center; position: relative; }
 .smart-date-wrap input[type="text"] { flex: 1; width: 100%; padding-right: 30px; }
 .native-date-Helper { position: absolute; right: 2px; width: 26px; height: 26px; opacity: 0.65; border: none !important; padding: 0 !important; background: transparent; cursor: pointer; }
 .native-date-Helper::-webkit-calendar-picker-indicator { cursor: pointer; }
 
-/* 多方对方单位独立履约卡片 */
 .parties-container { display: flex; flex-direction: column; gap: 14px; }
 .party-card { border: 1px solid #93c5fd; border-radius: 6px; padding: 12px; background: #f8fafc; box-shadow: 0 1px 2px rgba(0,0,0,0.03); }
 .party-card-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; padding-bottom: 6px; border-bottom: 1px solid #dbeafe; font-weight: 600; color: #1e3a8a; }
 .party-sub-divider { grid-column: span 4; font-size: 12px; font-weight: 600; color: #475569; margin-top: 4px; padding-top: 6px; border-top: 1px dashed #cbd5e1; }
 
-/* 详情页左台账右扫描件布局 */
-.detail-split-layout { display: grid; grid-template-columns: 490px 1fr; flex: 1; overflow: hidden; }
+.detail-split-layout { display: grid; grid-template-columns: 520px 1fr; flex: 1; overflow: hidden; }
 .detail-left { padding: 16px; border-right: 1px solid #e5e7eb; overflow-y: auto; background: #f9fafb; }
 .detail-card { background: #fff; border: 1px solid #e5e7eb; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
-.detail-card h4 { font-size: 13px; color: #1d4ed8; margin-bottom: 8px; border-bottom: 1px solid #f3f4f6; padding-bottom: 4px; }
+.detail-card h4 { font-size: 13px; color: #1d4ed8; margin-bottom: 8px; border-bottom: 1px solid #f3f4f6; padding-bottom: 4px; display: flex; justify-content: space-between; align-items: center; }
 .detail-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 13px; gap: 10px; }
 .detail-row .label { color: #6b7280; flex-shrink: 0; }
 .detail-row .val { color: #111827; font-weight: 500; text-align: right; word-break: break-all; }
+
+.related-list-item { display: flex; justify-content: space-between; align-items: center; padding: 6px 8px; border: 1px solid #e2e8f0; border-radius: 4px; margin-top: 6px; background: #f8fafc; gap: 8px; }
+.related-list-item .fname { font-size: 12.5px; font-weight: 500; color: #0f766e; word-break: break-all; flex: 1; }
+.related-list-item .factions { display: flex; gap: 5px; flex-shrink: 0; }
 
 .detail-right { display: flex; flex-direction: column; height: 100%; overflow: hidden; }
 .attachment-toolbar { padding: 10px 16px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; background: #fff; flex-wrap: wrap; gap: 8px; }
 .preview-container { flex: 1; background: #525659; display: flex; align-items: center; justify-content: center; overflow: auto; }
 .preview-container iframe { width: 100%; height: 100%; border: none; }
 .preview-container img { max-width: 100%; max-height: 100%; object-fit: contain; }
-.empty-preview { color: #e5e7eb; font-size: 14px; }
+.empty-preview { color: #e5e7eb; font-size: 14px; text-align: center; padding: 20px; line-height: 1.6; }
