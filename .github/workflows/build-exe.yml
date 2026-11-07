@@ -19,10 +19,12 @@ jobs:
         with:
           node-version: '20'
 
-      - name: 3. 安装依赖并针对 Electron 内核编译 SQLite 驱动
+      - name: 3. 安装依赖并针对 Electron 内核编译 SQLite 原生模块
         run: npm install --no-audit --no-fund
 
-      - name: 4. 执行自动化冒烟测试 (验证多方分行合并、Excel合并单元格导出与资源彻底释放)
+      - name: 4. 使用 Electron 内核执行冒烟测试 (统一 ABI 版本，验证多方合并与资源释放)
+        env:
+          ELECTRON_RUN_AS_NODE: 1
         run: npm test
 
       - name: 5. 打包生成 Windows .exe (免安装便携版 + 安装包)
