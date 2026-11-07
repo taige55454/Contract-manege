@@ -3,17 +3,17 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>企业合同台账管理系统</title>
+  <title>企业合同与采购项目台账管理系统</title>
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <!-- 🔒 内网访问口令锁屏拦截层（本机 127.0.0.1 访问自动隐藏；其他内网电脑未认证时强制全屏拦截） -->
+  <!-- 🔒 内网访问口令锁屏拦截层 -->
   <div id="lan_auth_overlay" class="auth-overlay hidden">
     <div class="auth-card">
       <div class="auth-icon">🔐</div>
       <h2>内网协同安全验证</h2>
       <p class="auth-desc" id="lan_auth_desc">
-        您正在通过局域网访问主机合同台账系统。请输入主机管理员指定的<strong>内网验证口令</strong>（验证通过后，您修改的台账与上传的附件将直接保存在主机硬盘中）：
+        您正在通过局域网访问主机<strong>合同与采购台账系统</strong>。请输入主机管理员指定的<strong>内网验证口令</strong>（验证一次后 12 小时内免重复输入）：
       </p>
       <form onsubmit="submitLanAuthForm(event)">
         <input type="password" id="lan_auth_passcode_input" class="auth-input" placeholder="请输入内网访问验证口令" required autocomplete="off" />
@@ -24,51 +24,85 @@
   </div>
 
   <header class="app-header">
-    <div>
-      <h1>📄 企业合同台账管理系统</h1>
-      <p class="header-sub">纯浏览器超轻架构 · 动态随机端口 + 内网口令锁 · 按年断号重编 · 扫描件与关联资料专属文件夹超链接导出</p>
+    <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap;">
+      <div>
+        <h1>📄 企业合同与采购立项台账系统</h1>
+        <p class="header-sub">双台账双向互锁 · 夹心式智能编码 · 三大资料库跨模块穿透 · 双子表一键总导出</p>
+      </div>
+      <!-- 模块导航切换栏 -->
+      <div class="module-tabs">
+        <button type="button" id="tab_btn_contract" class="module-tab active" onclick="switchModuleTab('contract')">
+          📄 合同管理台账
+        </button>
+        <button type="button" id="tab_btn_procurement" class="module-tab" onclick="switchModuleTab('procurement')">
+          🛒 采购项目台账
+        </button>
+      </div>
     </div>
+
     <div class="header-actions">
-      <!-- 仅在本机 (127.0.0.1) 显示的内网口令与随机端口共享管理栏 -->
-      <div id="host_lan_bar" class="default-entity-bar hidden" style="background:#f0fdf4;border-color:#86efac;color:#166534;" title="本机免密直连；其他内网电脑访问本次随机端口网址时必须输入您设定的验证口令">
-        <span>🔐 内网协同口令：</span>
-        <strong id="display_lan_status">开启 (口令: ******)</strong>
-        <button type="button" class="btn btn-outline btn-sm" onclick="openLanSecurityModal()">设置口令 / 复制内网链接</button>
+      <div id="host_lan_bar" class="default-entity-bar hidden" style="background:#f0fdf4;border-color:#86efac;color:#166534;">
+        <span>🔐 内网协同：</span>
+        <strong id="display_lan_status">开启</strong>
+        <button type="button" class="btn btn-outline btn-sm" onclick="openLanSecurityModal()">口令 / 复制内网链接</button>
       </div>
 
-      <!-- 仅在其他内网电脑已登录时显示的退出锁屏按钮 -->
-      <button type="button" id="btn_lan_logout" class="btn btn-outline btn-sm hidden" onclick="logoutLanSession()" title="锁定当前内网浏览器的访问权限">🔒 锁定退出</button>
+      <button type="button" id="btn_lan_logout" class="btn btn-outline btn-sm hidden" onclick="logoutLanSession()">🔒 锁定退出</button>
 
-      <div class="default-entity-bar" title="配置合同编号的固定前缀、日期格式、流水号位数、固定后缀及序号按年重编规则">
-        <span>🔢 编号格式：</span>
-        <strong id="display_no_rule">加载中...</strong>
-        <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">修改编号规则</button>
-      </div>
-      <div class="default-entity-bar" title="新建合同时将自动带出此主体名称，也可在单份合同中修改">
-        <span>🏢 默认我方主体：</span>
-        <strong id="display_default_entity">加载中...</strong>
-        <button type="button" class="btn btn-outline btn-sm" onclick="openOurEntityModal()">修改默认</button>
-      </div>
-      <div class="legend-box" title="距离到期日 ≤90天 启动由绿到红平滑颜色渐变，越接近或逾期颜色越红越深">
-        <span class="legend-gradient">安全(绿) ➔ 临近(黄/橙) ➔ 紧急/逾期(深红)</span>
-      </div>
-      <button type="button" class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
-      <div class="dropdown">
-        <button type="button" class="btn btn-success">导出美化 Excel ▾</button>
-        <div class="dropdown-menu" style="min-width: 335px;">
-          <div style="padding: 8px 12px; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: 11.5px; color: #92400e; line-height: 1.45;">
-            💡 <strong>扫描件与关联资料文件夹超链接说明：</strong><br/>
-            导出表最后两列分别为【合同扫描件】与【其他关联资料专属文件夹 (<code>uploads/related/合同名/</code>)】相对路径超链接。请将导出的 Excel 放在 <strong><code>uploads</code> 同级目录</strong>下，点击超链接即可直接打开扫描件或关联资料文件夹！
+      <!-- 合同模块专属顶部动作组 -->
+      <div id="header_group_contract" class="header-module-group">
+        <div class="default-entity-bar">
+          <span>🔢 合同编号：</span>
+          <strong id="display_no_rule">加载中...</strong>
+          <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">规则</button>
+        </div>
+        <div class="default-entity-bar">
+          <span>🏢 默认我方：</span>
+          <strong id="display_default_entity">加载中...</strong>
+          <button type="button" class="btn btn-outline btn-sm" onclick="openOurEntityModal()">修改</button>
+        </div>
+        <button type="button" class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
+        <div class="dropdown">
+          <button type="button" class="btn btn-success">导出合同 Excel ▾</button>
+          <div class="dropdown-menu" style="min-width: 340px;">
+            <div style="padding: 8px 12px; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: 11.5px; color: #92400e; line-height: 1.45;">
+              💡 导出表隔行换色，末尾自带<strong>【合同扫描件】、【采购立项资料夹】、【合同其他关联资料夹】3 列超链接</strong>！
+            </div>
+            <a href="javascript:void(0)" onclick="exportExcel('filtered')">📥 导出当前筛选合同台账</a>
+            <a href="javascript:void(0)" onclick="exportExcel('all')">📥 导出全部合同台账</a>
           </div>
-          <a href="javascript:void(0)" onclick="exportExcel('filtered')">📥 导出当前筛选结果 (按001正序+双超链接)</a>
-          <a href="javascript:void(0)" onclick="exportExcel('all')">📥 导出全部合同台账 (按001正序+双超链接)</a>
         </div>
       </div>
+
+      <!-- 采购模块专属顶部动作组 -->
+      <div id="header_group_procurement" class="header-module-group hidden">
+        <div class="default-entity-bar" style="background:#f0fdf4;border-color:#99f6e4;color:#115e59;">
+          <span>🔢 立项编号：</span>
+          <strong id="display_proc_no_rule">加载中...</strong>
+          <button type="button" class="btn btn-outline btn-sm" onclick="openProcNoRuleModal()">规则</button>
+        </div>
+        <button type="button" class="btn btn-primary" style="background:#0f766e;" onclick="openProcurementFormModal()">+ 新增采购立项</button>
+        <div class="dropdown">
+          <button type="button" class="btn btn-success">导出采购台账 Excel ▾</button>
+          <div class="dropdown-menu" style="min-width: 340px;">
+            <div style="padding: 8px 12px; background: #f0fdf4; border-bottom: 1px solid #bbf7d0; font-size: 11.5px; color: #166534; line-height: 1.45;">
+              💡 导出表隔行填充浅色斑马纹，末尾自带<strong>【立项相关资料夹】与【关联合同扫描件】双超链接</strong>！
+            </div>
+            <a href="javascript:void(0)" onclick="exportProcurementExcel('filtered')">📥 导出当前筛选采购台账</a>
+            <a href="javascript:void(0)" onclick="exportProcurementExcel('all')">📥 导出全部采购项目台账</a>
+          </div>
+        </div>
+      </div>
+
+      <!-- 全局常驻：一键同时导出双子表总台账按钮 -->
+      <button type="button" class="btn btn-combined-export" onclick="exportCombinedWorkbook()" title="生成同一个 Excel 文件：第1子表为《合同台账》，第2子表为《采购项目台账》，均含完整超链接与隔行换色">
+        📊 同时导出双台账总表(含2个子表)
+      </button>
     </div>
   </header>
 
-  <main class="container">
-    <!-- 顶部多维筛选与排序工具栏 -->
+  <!-- ==================== 视图 1：合同管理台账主视图 ==================== -->
+  <main id="view_contract" class="container">
     <section class="filter-bar">
       <input type="text" id="filter_no" placeholder="搜序号 / 合同编号 / 名称 / 摘要..." />
       <input type="text" id="filter_counterparty" placeholder="搜对方单位 / 信用代码 / 我方主体..." />
@@ -92,7 +126,7 @@
       </select>
 
       <div class="filter-date-range">
-        <select id="filter_date_field" title="选择要筛选的时间维度">
+        <select id="filter_date_field">
           <option value="sign_date">签订日期</option>
           <option value="expiry_date">合同到期日</option>
           <option value="start_date">开始履约日</option>
@@ -107,26 +141,23 @@
       <select id="sort_by">
         <option value="seq_no" selected>按年度序号排序</option>
         <option value="sign_date">按签订日期排序</option>
-        <option value="start_date">按开始履约日排序</option>
         <option value="expiry_date">按合同到期日排序</option>
         <option value="perf_bond_return_date">按保证金应退日排序</option>
         <option value="warranty_bond_expiry_date">按质保金到期日排序</option>
-        <option value="created_at">按录入时间排序</option>
       </select>
       <select id="sort_order">
-        <option value="ASC" selected>正序 (001、002往下排)</option>
+        <option value="ASC" selected>正序 (001往下排)</option>
         <option value="DESC">倒序 (最新在前)</option>
       </select>
       <button type="button" class="btn btn-secondary" onclick="loadContracts()">🔍 查询</button>
       <button type="button" class="btn btn-outline" onclick="resetFilters()">重置</button>
     </section>
 
-    <!-- 合同台账主表格 -->
     <section class="table-wrapper">
       <table class="ledger-table">
         <thead>
           <tr>
-            <th class="merged-col-th text-center" title="支持按年断号重编">序号</th>
+            <th class="merged-col-th text-center">序号</th>
             <th class="merged-col-th">合同编号</th>
             <th class="merged-col-th">合同名称</th>
             <th class="merged-col-th text-center">类型</th>
@@ -148,12 +179,72 @@
             <th>履约保证金 / 应退预警</th>
             <th>质保金 / 到期预警</th>
             <th>分项备注</th>
-            <th class="merged-col-th">合同扫描件</th>
-            <th class="merged-col-th">其他关联资料(多文件)</th>
+            <th class="merged-col-th">① 合同扫描件</th>
+            <th class="merged-col-th" style="background:#f3e8ff;color:#6b21a8;">② 关联采购立项及资料</th>
+            <th class="merged-col-th">③ 其他关联资料</th>
             <th class="merged-col-th text-center">操作</th>
           </tr>
         </thead>
         <tbody id="contract_tbody"></tbody>
+      </table>
+    </section>
+  </main>
+
+  <!-- ==================== 视图 2：采购项目立项台账主视图 ==================== -->
+  <main id="view_procurement" class="container hidden">
+    <section class="filter-bar">
+      <input type="text" id="proc_filter_kw" placeholder="搜立项编号 / 项目名称 / 成交供应商 / 预算科目 / 合同号..." style="min-width:260px;" />
+      <select id="proc_filter_year">
+        <option value="">全部立项年份</option>
+      </select>
+      <select id="proc_filter_type">
+        <option value="">全部立项类型</option>
+        <option value="服务类项目">服务类项目</option>
+        <option value="货物类项目">货物类项目</option>
+        <option value="设备采购">设备采购</option>
+        <option value="工程类项目">工程类项目</option>
+        <option value="其他">其他</option>
+      </select>
+      <input type="text" id="proc_filter_dept" placeholder="搜费用承担部门..." style="width:150px;" />
+      <select id="proc_filter_has_contract">
+        <option value="">是否签合同(全部)</option>
+        <option value="是">已签合同 (是)</option>
+        <option value="否">未签合同 (否)</option>
+      </select>
+      <select id="proc_sort_order">
+        <option value="ASC" selected>按立项序号正序 (1, 2, 3...)</option>
+        <option value="DESC">按立项序号倒序</option>
+      </select>
+      <button type="button" class="btn btn-secondary" onclick="loadProcurements()">🔍 查询采购台账</button>
+      <button type="button" class="btn btn-outline" onclick="resetProcurementFilters()">重置</button>
+    </section>
+
+    <section class="table-wrapper">
+      <table class="ledger-table">
+        <thead>
+          <tr>
+            <th class="proc-col-th text-center">序号</th>
+            <th class="proc-col-th">采购立项编号</th>
+            <th class="proc-col-th">采购项目名称</th>
+            <th class="proc-col-th text-center">立项类型</th>
+            <th class="proc-col-th text-center" style="background:#fef3c7;color:#92400e;">费用承担部门</th>
+            <th class="proc-col-th text-right">采购预算</th>
+            <th class="proc-col-th text-center">预算科目</th>
+            <th class="proc-col-th text-center">采购类型</th>
+            <th class="proc-col-th text-center">采购方式</th>
+            <th class="proc-col-th text-center">立项时间</th>
+            <th class="proc-col-th text-center">决策/成交确认时间</th>
+            <th class="proc-col-th text-center">完结时间</th>
+            <th class="proc-col-th">成交供应商</th>
+            <th class="proc-col-th text-right">成交金额</th>
+            <th class="proc-col-th text-center">是否签订合同</th>
+            <th class="proc-col-th">关联合同编号 & 扫描件直连</th>
+            <th class="proc-col-th">备注</th>
+            <th class="proc-col-th">立项相关资料(专属夹)</th>
+            <th class="proc-col-th text-center">操作</th>
+          </tr>
+        </thead>
+        <tbody id="procurement_tbody"></tbody>
       </table>
     </section>
   </main>
@@ -168,28 +259,22 @@
       <form onsubmit="saveLanSecurityForm(event)">
         <div class="form-scroll-body">
           <div style="background:#f0fdf4;border:1px solid #86efac;padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:12.5px;color:#166534;line-height:1.55;">
-            🛡️ <strong>多重安全保障机制已激活：</strong><br/>
-            1. <strong>本机免密特权</strong>：您在这台主机 (`127.0.0.1`) 上操作永远无需输入口令。<br/>
-            2. <strong>每次启动随机端口</strong>：每次启动软件都会动态更换随机端口，防止固定网址被长期窥探。<br/>
-            3. <strong>防暴力破解与一键踢人</strong>：内网输错 5 次口令自动封禁 IP 15 分钟；您随时修改下方口令或取消勾选后保存，所有已登录的内网电脑将<strong>立即失效并被踢出</strong>！
+            🛡️ <strong>多重安全保障已覆盖【合同台账 + 采购立项台账】：</strong><br/>
+            1. 本机 (`127.0.0.1`) 永远免密直连；内网其他电脑或手机需验证 1 次口令（12 小时有效）。<br/>
+            2. 每次重启软件自动更换随机端口；随时修改口令可立即将所有内网连接踢出锁屏。
           </div>
-
           <div class="form-group" style="margin-bottom:12px;">
             <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13.5px;">
               <input type="checkbox" id="lan_enabled_checkbox" checked />
-              <span><strong>允许其他内网电脑通过局域网访问本机并协同编辑台账</strong></span>
+              <span><strong>允许其他内网电脑/手机通过局域网访问并协同录入</strong></span>
             </label>
           </div>
-
           <div class="form-group" style="margin-bottom:14px;">
-            <label>指定内网访问验证口令 * <small class="muted">(4 ~ 32 位字符，其他内网电脑打开网页时必须先输入此口令)</small></label>
-            <input type="text" id="lan_passcode_input" placeholder="如：888888 或自定义密码" minlength="4" maxlength="32" required style="font-family:Consolas,monospace;font-weight:700;font-size:14px;color:#1d4ed8;" />
+            <label>指定内网访问验证口令 * <small class="muted">(4 ~ 32 位字符)</small></label>
+            <input type="text" id="lan_passcode_input" placeholder="如：888888" minlength="4" maxlength="32" required style="font-family:Consolas,monospace;font-weight:700;font-size:14px;color:#1d4ed8;" />
           </div>
-
           <div style="background:#eff6ff;border:1px solid #bfdbfe;padding:10px 12px;border-radius:6px;">
-            <div style="font-size:12px;font-weight:600;color:#1e3a8a;margin-bottom:6px;">
-              📡 本次运行的【内网随机端口访问地址】与【口令】一键复制：
-            </div>
+            <div style="font-size:12px;font-weight:600;color:#1e3a8a;margin-bottom:6px;">📡 本次随机端口内网地址：</div>
             <div id="lan_urls_box" style="font-family:Consolas,monospace;font-size:13px;color:#1d4ed8;font-weight:700;margin-bottom:8px;word-break:break-all;"></div>
             <button type="button" class="btn btn-success btn-sm" onclick="copyLanInviteText()">📋 一键复制【内网网址 + 验证口令】发给同事</button>
           </div>
@@ -211,9 +296,6 @@
       </div>
       <form onsubmit="saveOurEntityForm(event)">
         <div class="form-scroll-body">
-          <p style="font-size:12px;color:#4b5563;margin-bottom:10px;">
-            设置后，每次点击“+ 新增合同”时系统会自动填入该主体名称；遇到特殊合同时您仍可在表单中单次修改。
-          </p>
           <div class="form-group">
             <label>默认我方签约主体全称 *</label>
             <input type="text" id="modal_our_entity_input" placeholder="请输入贵单位全称" required />
@@ -227,70 +309,133 @@
     </div>
   </div>
 
-  <!-- 弹窗 B：合同编号固定前缀/后缀与按年断号重编设置 -->
+  <!-- 弹窗 B1：合同编号规则设置（支持前缀 + 默认中间穿插段 + 日期段 + 流水号 + 后缀） -->
   <div id="no_rule_modal" class="modal hidden">
-    <div class="modal-content" style="width: 580px; max-width: 95vw;">
+    <div class="modal-content" style="width: 620px; max-width: 95vw;">
       <div class="modal-header">
-        <h2>🔢 合同编号固定前缀/后缀与序号重编设置</h2>
+        <h2>🔢 合同编号规则设置（支持灰色预设段 + 中间自定义输入）</h2>
         <span class="close-btn" onclick="closeNoRuleModal()">&times;</span>
       </div>
       <form onsubmit="saveNoRuleForm(event)">
         <div class="form-scroll-body">
-          <p style="font-size:12px;color:#4b5563;margin-bottom:12px;">
-            新增合同时，已设置的<strong>固定前缀、日期段、固定后缀将做灰色锁定显示</strong>，您只需确认或补全中间编号部分即可。
-          </p>
           <div class="form-grid-4">
             <div class="form-group span-2">
-              <label>固定前缀 <small class="muted">(可留空，如 HT- 或 ZN-CG-)</small></label>
-              <input type="text" id="rule_prefix" placeholder="例如：HT-" oninput="updateNoRulePreview()" />
+              <label>固定前缀 (灰底锁定) <small class="muted">(如 XSZY- 或 HT-)</small></label>
+              <input type="text" id="rule_prefix" placeholder="例如：XSZY-黔-BJ-" oninput="updateNoRulePreview()" />
             </div>
             <div class="form-group span-2">
-              <label>中间日期段格式</label>
+              <label>前缀与日期之间的【默认自定义段】 <small class="muted">(录入时可随时手改)</small></label>
+              <input type="text" id="rule_default_mid" placeholder="如：黔-BJ- (可留空，录入时也能填)" oninput="updateNoRulePreview()" />
+            </div>
+            <div class="form-group span-2">
+              <label>中间日期段格式 (灰底锁定)</label>
               <select id="rule_date_part" onchange="updateNoRulePreview()">
+                <option value="YYYYMM">仅年月 (如 202603)</option>
+                <option value="YYYYMM-">年月 + 横杠 (如 202603-)</option>
                 <option value="YYYY-">年份 + 横杠 (如 2026-)</option>
                 <option value="YYYY">仅年份 (如 2026)</option>
-                <option value="YYYYMM-">年月 + 横杠 (如 202611-)</option>
-                <option value="YYYYMM">仅年月 (如 202611)</option>
-                <option value="YYYYMMDD-">年月日 + 横杠 (如 20261107-)</option>
-                <option value="YYYYMMDD">仅年月日 (如 20261107)</option>
+                <option value="YYYYMMDD">仅年月日 (如 20260318)</option>
+                <option value="YYYYMMDD-">年月日 + 横杠</option>
                 <option value="NONE">不包含日期段</option>
               </select>
             </div>
-            <div class="form-group span-2">
-              <label>默认流水号位数 <small class="muted">(选 0 则中间留空手填)</small></label>
+            <div class="form-group">
+              <label>流水号位数 (可手改)</label>
               <select id="rule_seq_digits" onchange="updateNoRulePreview()">
-                <option value="0">0 位 (中间留空由人工手填)</option>
-                <option value="2">2 位数字 (如 01, 02...)</option>
-                <option value="3" selected>3 位数字 (如 001, 002...)</option>
-                <option value="4">4 位数字 (如 0001, 0002...)</option>
-                <option value="5">5 位数字 (如 00001, 00002...)</option>
+                <option value="0">0 位 (纯手填)</option>
+                <option value="2">2 位 (01)</option>
+                <option value="3" selected>3 位 (001)</option>
+                <option value="4">4 位 (0001)</option>
               </select>
             </div>
-            <div class="form-group span-2">
-              <label>固定后缀 <small class="muted">(可留空，如 -CG 或 -总部)</small></label>
-              <input type="text" id="rule_suffix" placeholder="例如：-CG" oninput="updateNoRulePreview()" />
+            <div class="form-group">
+              <label>固定后缀 (灰底锁定)</label>
+              <input type="text" id="rule_suffix" placeholder="可留空" oninput="updateNoRulePreview()" />
             </div>
             <div class="form-group span-4">
               <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
                 <input type="checkbox" id="rule_reset_yearly" checked />
-                <span><strong>【序号列】按年断号重编</strong>（勾选后：按签订年份从 1 重新编号，如 <code>2025-001</code>、<code>2026-001</code>；不勾选则全表连续编号）</span>
+                <span><strong>【序号列】按年断号重编</strong></span>
               </label>
             </div>
-            <div class="form-group span-4" style="background:#eff6ff;padding:10px;border-radius:4px;border:1px solid #bfdbfe;margin-top:4px;">
-              <label style="color:#1e3a8a;">📌 实时编号结构预览（灰底为自动锁定段，白底为补全输入框）：</label>
-              <div id="rule_live_preview" style="font-size:15px;font-weight:700;color:#2563eb;margin-top:4px;">HT-2026-001</div>
+            <div class="form-group span-4" style="background:#eff6ff;padding:10px;border-radius:4px;border:1px solid #bfdbfe;">
+              <label style="color:#1e3a8a;">📌 合同编号结构实时预览：</label>
+              <div id="rule_live_preview" style="font-size:15px;font-weight:700;color:#2563eb;margin-top:4px;">XSZY-黔-BJ-202603001</div>
             </div>
           </div>
         </div>
         <div class="modal-footer">
           <button type="button" class="btn btn-outline" onclick="closeNoRuleModal()">取消</button>
-          <button type="submit" class="btn btn-primary">💾 保存规则</button>
+          <button type="submit" class="btn btn-primary">💾 保存合同编号规则</button>
         </div>
       </form>
     </div>
   </div>
 
-  <!-- 弹窗 1：新增 / 编辑合同表单 -->
+  <!-- 弹窗 B2：采购立项编号规则设置（贴合 LX20260318024 规律 + 支持灰色预设之间自定义输入） -->
+  <div id="proc_no_rule_modal" class="modal hidden">
+    <div class="modal-content" style="width: 620px; max-width: 95vw;">
+      <div class="modal-header" style="background:#f0fdf4;">
+        <h2 style="color:#0f766e;">🔢 采购立项编号规则设置（如 LX + 年月日 + 3位流水号）</h2>
+        <span class="close-btn" onclick="closeProcNoRuleModal()">&times;</span>
+      </div>
+      <form onsubmit="saveProcNoRuleForm(event)">
+        <div class="form-scroll-body">
+          <div class="form-grid-4">
+            <div class="form-group span-2">
+              <label>固定前缀 (灰底锁定) <small class="muted">(如 LX)</small></label>
+              <input type="text" id="prule_prefix" placeholder="例如：LX" oninput="updateProcNoRulePreview()" />
+            </div>
+            <div class="form-group span-2">
+              <label>前缀与日期之间的【默认自定义段】 <small class="muted">(录入时可随时手改)</small></label>
+              <input type="text" id="prule_default_mid" placeholder="默认留空，需要时可填部门/地区简写" oninput="updateProcNoRulePreview()" />
+            </div>
+            <div class="form-group span-2">
+              <label>中间日期段格式 (随立项时间自动变化)</label>
+              <select id="prule_date_part" onchange="updateProcNoRulePreview()">
+                <option value="YYYYMMDD" selected>年月日 8位 (如 20260318)</option>
+                <option value="YYYYMMDD-">年月日 + 横杠 (如 20260318-)</option>
+                <option value="YYYYMM">年月 6位 (如 202603)</option>
+                <option value="YYYYMM-">年月 + 横杠 (如 202603-)</option>
+                <option value="YYYY">仅年份 (如 2026)</option>
+                <option value="YYYY-">年份 + 横杠 (如 2026-)</option>
+                <option value="NONE">不包含日期段</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>流水号位数 (可手改)</label>
+              <select id="prule_seq_digits" onchange="updateProcNoRulePreview()">
+                <option value="0">0 位 (纯手填)</option>
+                <option value="2">2 位 (01)</option>
+                <option value="3" selected>3 位 (024)</option>
+                <option value="4">4 位 (0024)</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>固定后缀 (灰底锁定)</label>
+              <input type="text" id="prule_suffix" placeholder="可留空" oninput="updateProcNoRulePreview()" />
+            </div>
+            <div class="form-group span-4">
+              <label style="display:flex;align-items:center;gap:6px;cursor:pointer;margin-top:4px;">
+                <input type="checkbox" id="prule_reset_yearly" checked />
+                <span><strong>【采购台账序号列】按年从 1 重新编号</strong></span>
+              </label>
+            </div>
+            <div class="form-group span-4" style="background:#f0fdf4;padding:10px;border-radius:4px;border:1px solid #99f6e4;">
+              <label style="color:#0f766e;">📌 采购立项编号结构实时预览：</label>
+              <div id="prule_live_preview" style="font-size:15px;font-weight:700;color:#0f766e;margin-top:4px;">LX20260318001</div>
+            </div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeProcNoRuleModal()">取消</button>
+          <button type="submit" class="btn btn-primary" style="background:#0f766e;">💾 保存立项编号规则</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 1：新增 / 编辑【合同台账】表单（含夹心式分段编号器 & 双向关联采购立项） -->
   <div id="form_modal" class="modal hidden">
     <div class="modal-content modal-lg">
       <div class="modal-header">
@@ -300,43 +445,50 @@
       <form id="contract_form" onsubmit="submitContractForm(event)">
         <input type="hidden" id="form_id" />
         <div class="form-scroll-body">
-          <!-- 分区 1：合同公共主信息 -->
           <div class="form-section-title">
-            <span>📌 一、合同公共基础信息（支持快捷输入日期如 <code>2026.3.5</code> 或简写 <code>6.3</code> 自动补全当年）</span>
-            <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">⚙️ 设置前缀/后缀规则</button>
+            <span>📌 一、合同公共基础信息 & 关联采购立项（支持顺序可逆双向自动绑定）</span>
+            <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">⚙️ 设置合同编号规则</button>
           </div>
           <div class="form-grid-4">
             <div class="form-group span-2">
               <label style="display:flex;justify-content:space-between;align-items:center;">
-                <span>合同编号 * <small class="muted" id="no_mode_hint">(灰底固定段已锁定，仅需补全中间项)</small></span>
+                <span>合同编号 * <small class="muted" id="no_mode_hint">(灰底预设段中间可穿插手填)</small></span>
                 <span>
-                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;margin-right:8px;" onclick="toggleFreeContractNoMode()" id="toggle_no_mode_btn">✏️ 切换自由手填</a>
-                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoContractNo()">🔄 重置流水号</a>
+                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;margin-right:8px;" onclick="toggleFreeContractNoMode()" id="toggle_no_mode_btn">✏️ 切换纯自由手填</a>
+                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoContractNo(document.getElementById('f_sign_date').value)">🔄 重算流水号</a>
                 </span>
               </label>
-
+              <!-- 夹心式 4 段合同编号器：[灰底前缀] + [可手填穿插段] + [灰底日期段] + [可手填流水号] + [灰底后缀] -->
               <div id="segmented_no_box" class="segmented-no-wrapper">
-                <span id="seg_prefix" class="seg-locked" title="固定前缀（灰色只读）">HT-</span>
-                <span id="seg_date" class="seg-locked" title="日期段（灰色只读）">2026-</span>
-                <input type="text" id="seg_middle_input" class="seg-editable" placeholder="补全编号" oninput="syncSegmentedContractNo()" />
-                <span id="seg_suffix" class="seg-locked" title="固定后缀（灰色只读）"></span>
+                <span id="seg_prefix" class="seg-locked">XSZY-黔-BJ-</span>
+                <input type="text" id="seg_mid_custom_input" class="seg-custom-mid" placeholder="穿插段(选填)" title="可在固定前缀与日期段之间插入自定义字符" oninput="onContractMidCustomChange()" />
+                <span id="seg_date" class="seg-locked">202603</span>
+                <input type="text" id="seg_middle_input" class="seg-editable" placeholder="流水号" title="流水号或后缀前自定义编码" oninput="syncSegmentedContractNo()" />
+                <span id="seg_suffix" class="seg-locked"></span>
               </div>
-
-              <input type="text" name="contract_no" id="f_contract_no" class="hidden" placeholder="如：HT-2026-001" required />
+              <input type="text" name="contract_no" id="f_contract_no" class="hidden" placeholder="如：XSZY-黔-BJ-202603003" required />
             </div>
 
             <div class="form-group span-2">
               <label>合同名称 *</label>
-              <input type="text" name="contract_name" id="f_contract_name" placeholder="如：核心机房三方联合建设合同" required />
+              <input type="text" name="contract_name" id="f_contract_name" placeholder="如：毕节自营公司产品邮寄配送服务合同" required />
+            </div>
+
+            <!-- 双向关联：在合同录入时关联采购立项 -->
+            <div class="form-group span-2" style="background:#f3e8ff;padding:6px 10px;border-radius:4px;border:1px solid #d8b4fe;">
+              <label style="color:#6b21a8;">🔗 关联采购立项条目 <small style="font-weight:400;">(选填，选中后自动双向绑定并共享立项资料链接；也可之后在采购模块反向绑定)</small></label>
+              <select name="procurement_id" id="f_procurement_id" onchange="onSelectLinkedProcurementInContractForm(this)">
+                <option value="">-- 暂不关联采购立项 (或稍后在采购台账中反向关联) --</option>
+              </select>
             </div>
 
             <div class="form-group">
               <label>合同类型 *</label>
               <select name="contract_type" id="f_contract_type" required>
                 <option value="采购">采购</option>
+                <option value="服务">服务</option>
                 <option value="销售">销售</option>
                 <option value="框架">框架</option>
-                <option value="服务">服务</option>
                 <option value="其他">其他</option>
               </select>
             </div>
@@ -349,46 +501,45 @@
                 <option value="已终止">已终止</option>
               </select>
             </div>
-            <div class="form-group span-2">
-              <label>我方签约主体 * <small class="muted">(默认带出，可单次修改)</small></label>
+
+            <div class="form-group">
+              <label>我方签约主体 *</label>
               <input type="text" name="our_entity" id="f_our_entity" required />
             </div>
+            <div class="form-group">
+              <label>签订日期 * <small class="muted">(如 2026.3.18)</small></label>
+              <div class="smart-date-wrap">
+                <input type="text" name="sign_date" id="f_sign_date" placeholder="YYYY-MM-DD" required onblur="onSignDateBlur(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_sign_date', true)" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>开始履约日 *</label>
+              <div class="smart-date-wrap">
+                <input type="text" name="start_date" id="f_start_date" placeholder="YYYY-MM-DD" required onblur="normalizeDateInputElem(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_start_date', false)" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>合同到期日 *</label>
+              <div class="smart-date-wrap">
+                <input type="text" name="expiry_date" id="f_expiry_date" placeholder="YYYY-MM-DD" required onblur="normalizeDateInputElem(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_expiry_date', false)" />
+              </div>
+            </div>
 
-            <div class="form-group">
-              <label>签订日期 * <small class="muted">(如 2026.6.3 或 6.3)</small></label>
-              <div class="smart-date-wrap">
-                <input type="text" name="sign_date" id="f_sign_date" placeholder="YYYY-MM-DD 或 6.3" required onblur="onSignDateBlur(this)" />
-                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_sign_date', true)" title="点击弹出日历选择" />
-              </div>
-            </div>
-            <div class="form-group">
-              <label>开始履约日 * <small class="muted">(默认同签订日)</small></label>
-              <div class="smart-date-wrap">
-                <input type="text" name="start_date" id="f_start_date" placeholder="YYYY-MM-DD 或 6.3" required onblur="normalizeDateInputElem(this)" />
-                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_start_date', false)" title="点击弹出日历选择" />
-              </div>
-            </div>
-            <div class="form-group">
-              <label>合同到期日 * <small class="muted">(渐变色预警)</small></label>
-              <div class="smart-date-wrap">
-                <input type="text" name="expiry_date" id="f_expiry_date" placeholder="YYYY-MM-DD 或 12.31" required onblur="normalizeDateInputElem(this)" />
-                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'f_expiry_date', false)" title="点击弹出日历选择" />
-              </div>
-            </div>
-            <div class="form-group">
-              <label>主合同扫描件 <small class="muted">(PDF/JPG/PNG)</small></label>
+            <div class="form-group span-2">
+              <label>① 主合同扫描件 <small class="muted">(PDF/JPG/PNG，支持手机直接拍照上传)</small></label>
               <input type="file" name="attachment" id="f_attachment" accept=".pdf,.jpg,.jpeg,.png" />
             </div>
-
-            <div class="form-group span-4" style="background:#f0fdf4;padding:8px 12px;border-radius:4px;border:1px solid #bbf7d0;">
-              <label style="color:#166534;">📂 其他关联资料（立项批复/招投标文件/预算表/验收单等，支持按住 Ctrl 一次框选多个文件，自动归入本合同专属文件夹）：</label>
+            <div class="form-group span-2" style="background:#f0fdf4;padding:6px 10px;border-radius:4px;border:1px solid #bbf7d0;">
+              <label style="color:#166534;">③ 合同其他关联资料 <small style="font-weight:400;">(支持多选文件；注：②立项资料请在采购立项模块上传)</small></label>
               <input type="file" name="related_files" id="f_related_files" multiple />
             </div>
           </div>
 
-          <!-- 分区 2：对方单位及各自独立履约义务 -->
           <div class="form-section-title">
-            <span>🏢 二、对方单位及各自独立履约明细（税率输 <code>6</code> 自动转 <code>6%</code>，输 <code>6,9</code> 自动转 <code>*6%,9%</code>）</span>
+            <span>🏢 二、对方单位及各自独立履约明细</span>
             <button type="button" class="btn btn-primary btn-sm" onclick="addCounterpartyCard()">+ 添加一个对方单位履约行</button>
           </div>
           <datalist id="invoice_type_list">
@@ -396,7 +547,6 @@
             <option value="增值税普通发票"></option>
             <option value="数电专票"></option>
             <option value="数电普票"></option>
-            <option value="形式发票 / 收据"></option>
           </datalist>
           <div id="counterparties_container" class="parties-container"></div>
         </div>
@@ -409,11 +559,189 @@
     </div>
   </div>
 
-  <!-- 弹窗 2：合同详情、扫描件与关联资料专属文件夹管理 -->
+  <!-- 弹窗 2：新增 / 编辑【采购项目立项台账】表单（含夹心式分段立项编号器 + 费用承担部门 + 双向关联合同） -->
+  <div id="proc_form_modal" class="modal hidden">
+    <div class="modal-content modal-lg">
+      <div class="modal-header" style="background:#f0fdf4;">
+        <h2 id="proc_form_modal_title" style="color:#0f766e;">🛒 新增采购项目立项台账</h2>
+        <span class="close-btn" onclick="closeProcurementFormModal()">&times;</span>
+      </div>
+      <form id="procurement_form" onsubmit="submitProcurementForm(event)">
+        <input type="hidden" id="p_form_id" />
+        <div class="form-scroll-body">
+          <div class="form-section-title" style="background:#f0fdf4;border-left-color:#0f766e;color:#0f766e;">
+            <span>📌 一、采购立项核心信息（日期支持如 <code>2026.3.18</code>、简写 <code>3.18</code> 或直接粘贴 Excel 序列号如 <code>46099</code>）</span>
+            <button type="button" class="btn btn-outline btn-sm" onclick="openProcNoRuleModal()">⚙️ 设置立项编号规则</button>
+          </div>
+
+          <datalist id="dept_list">
+            <option value="综合管理部"></option>
+            <option value="省区费用预算"></option>
+            <option value="市场营销部"></option>
+            <option value="运营管理部"></option>
+            <option value="财务部"></option>
+            <option value="毕节自营店"></option>
+          </datalist>
+          <datalist id="budget_subject_list">
+            <option value="办公费"></option>
+            <option value="运输费"></option>
+            <option value="其他固定资产采购"></option>
+            <option value="日常安全费用"></option>
+            <option value="其他外包项目"></option>
+            <option value="租赁费"></option>
+            <option value="中介费"></option>
+            <option value="装修费"></option>
+            <option value="其他福利费"></option>
+          </datalist>
+          <datalist id="proc_method_list">
+            <option value="合作谈判"></option>
+            <option value="邀请竞争谈判"></option>
+            <option value="公开竞争谈判"></option>
+            <option value="邀请询比"></option>
+            <option value="公开询比"></option>
+            <option value="单一来源采购"></option>
+          </datalist>
+
+          <div class="form-grid-4">
+            <!-- 夹心式 4 段采购立项编号器：[灰底前缀 LX] + [可手填穿插段] + [灰底日期段 20260318] + [可手填流水号 024] + [灰底后缀] -->
+            <div class="form-group span-2">
+              <label style="display:flex;justify-content:space-between;align-items:center;">
+                <span>采购立项编号 * <small class="muted" id="p_no_mode_hint">(灰底预设段中间可穿插手填)</small></span>
+                <span>
+                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;margin-right:8px;" onclick="toggleFreeProcNoMode()" id="toggle_p_no_mode_btn">✏️ 切换纯自由手填</a>
+                  <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoProcurementNo(document.getElementById('p_approval_date').value)">🔄 重算流水号</a>
+                </span>
+              </label>
+              <div id="p_segmented_no_box" class="segmented-no-wrapper">
+                <span id="p_seg_prefix" class="seg-locked">LX</span>
+                <input type="text" id="p_seg_mid_custom_input" class="seg-custom-mid" placeholder="穿插段(选填)" title="可在固定前缀与日期段之间插入自定义编码" oninput="onProcMidCustomChange()" />
+                <span id="p_seg_date" class="seg-locked">20260318</span>
+                <input type="text" id="p_seg_middle_input" class="seg-editable" placeholder="流水号(如024)" title="可修改流水号或自定义尾码" oninput="syncSegmentedProcNo()" />
+                <span id="p_seg_suffix" class="seg-locked"></span>
+              </div>
+              <input type="text" name="procurement_no" id="p_procurement_no" class="hidden" placeholder="如 LX20260318024" required />
+            </div>
+
+            <div class="form-group span-2">
+              <label>采购项目名称 *</label>
+              <input type="text" name="project_name" id="p_project_name" placeholder="如：毕节自营公司产品邮寄配送服务采购" required />
+            </div>
+
+            <div class="form-group">
+              <label>立项类型 *</label>
+              <select name="project_type" id="p_project_type">
+                <option value="服务类项目">服务类项目</option>
+                <option value="货物类项目">货物类项目</option>
+                <option value="设备采购">设备采购</option>
+                <option value="工程类项目">工程类项目</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+
+            <!-- 立项类型后面的“费用承担部门”字段 -->
+            <div class="form-group" style="background:#fffbeb;padding:4px 8px;border-radius:4px;border:1px solid #fde68a;">
+              <label style="color:#92400e;">费用承担部门 <small class="muted">(可下拉或手填)</small></label>
+              <input type="text" name="cost_department" id="p_cost_department" list="dept_list" placeholder="如：综合部 / 省区费用预算" />
+            </div>
+
+            <div class="form-group">
+              <label>采购预算 (元)</label>
+              <input type="number" step="0.01" name="budget_amount" id="p_budget_amount" placeholder="如 300000" />
+            </div>
+            <div class="form-group">
+              <label>预算科目</label>
+              <input type="text" name="budget_subject" id="p_budget_subject" list="budget_subject_list" placeholder="如：办公费 / 运输费" />
+            </div>
+
+            <div class="form-group">
+              <label>采购类型</label>
+              <select name="procurement_type" id="p_procurement_type">
+                <option value="小额零星采购">小额零星采购</option>
+                <option value="二级集中采购">二级集中采购</option>
+                <option value="一级集中采购">一级集中采购</option>
+                <option value="分散采购">分散采购</option>
+                <option value="其他">其他</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>采购方式</label>
+              <input type="text" name="procurement_method" id="p_procurement_method" list="proc_method_list" value="合作谈判" placeholder="如：合作谈判 / 邀请询比" />
+            </div>
+            <div class="form-group">
+              <label>立项时间 <small class="muted">(改日期自动更新编号日期段)</small></label>
+              <div class="smart-date-wrap">
+                <input type="text" name="approval_date" id="p_approval_date" placeholder="YYYY-MM-DD" onblur="onProcApprovalDateBlur(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'p_approval_date', false);onProcApprovalDateBlur(document.getElementById('p_approval_date'));" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>采购决策/成交确认时间</label>
+              <div class="smart-date-wrap">
+                <input type="text" name="decision_date" id="p_decision_date" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'p_decision_date', false)" />
+              </div>
+            </div>
+
+            <div class="form-group">
+              <label>完结时间</label>
+              <div class="smart-date-wrap">
+                <input type="text" name="completion_date" id="p_completion_date" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
+                <input type="date" class="native-date-Helper" tabindex="-1" onchange="pickDateToInput(this, 'p_completion_date', false)" />
+              </div>
+            </div>
+            <div class="form-group">
+              <label>成交供应商</label>
+              <input type="text" name="supplier_name" id="p_supplier_name" placeholder="如：中国邮政速递物流股份有限公司毕节市分公司" />
+            </div>
+            <div class="form-group">
+              <label>成交金额 (元)</label>
+              <input type="number" step="0.01" name="deal_amount" id="p_deal_amount" placeholder="如 300000" />
+            </div>
+            <div class="form-group">
+              <label>是否签订合同</label>
+              <select name="has_contract" id="p_has_contract">
+                <option value="否">否</option>
+                <option value="是">是</option>
+              </select>
+            </div>
+
+            <!-- 双向关联：在采购台账中选择关联已有合同，或先手填合同号 -->
+            <div class="form-group span-2" style="background:#eff6ff;padding:8px 10px;border-radius:4px;border:1px solid #93c5fd;">
+              <label style="color:#1e3a8a;">🔗 选择关联【合同台账】中的条目 <small style="font-weight:400;">(选中后自动互锁并直连合同扫描件)</small></label>
+              <select name="contract_id" id="p_contract_id" onchange="onSelectLinkedContractInProcForm(this)">
+                <option value="">-- 暂不绑定已有合同 (或右侧直接手填合同编号) --</option>
+              </select>
+            </div>
+            <div class="form-group span-2" style="background:#eff6ff;padding:8px 10px;border-radius:4px;border:1px solid #93c5fd;">
+              <label style="color:#1e3a8a;">合同编号 <small style="font-weight:400;">(选择左侧合同后自动带出；若先录采购后录合同，也可先手填编号，日后录合同时会自动匹配！)</small></label>
+              <input type="text" name="contract_no_manual" id="p_contract_no_manual" placeholder="如：XSZY-黔-BJ-202603003" />
+            </div>
+
+            <div class="form-group span-2">
+              <label>备注</label>
+              <input type="text" name="remark" id="p_remark" placeholder="选填备注说明..." />
+            </div>
+
+            <div class="form-group span-2" style="background:#f3e8ff;padding:8px 10px;border-radius:4px;border:1px solid #d8b4fe;">
+              <label style="color:#6b21a8;">📑 上传立项相关资料 <small style="font-weight:400;">(立项请示/询比价单/成交通知等，支持多文件，自动存入对应立项文件夹并同步至合同台账)</small></label>
+              <input type="file" name="procurement_files" id="p_procurement_files" multiple />
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn btn-outline" onclick="closeProcurementFormModal()">取消</button>
+          <button type="submit" id="btn_submit_procurement" class="btn btn-primary" style="background:#0f766e;">💾 保存采购立项</button>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <!-- 弹窗 3：全能详情与三大文件在线预览中心（合同详情 & 采购立项详情共用） -->
   <div id="detail_modal" class="modal hidden">
     <div class="modal-content modal-xl">
       <div class="modal-header">
-        <h2>合同台账全量详情 · 扫描件与关联资料管理</h2>
+        <h2 id="detail_modal_title">台账全量详情与关联资料在线预览中心</h2>
         <span class="close-btn" onclick="closeDetailModal()">&times;</span>
       </div>
       <div class="detail-split-layout">
