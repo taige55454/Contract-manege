@@ -4,16 +4,54 @@ const multer = require('multer');
 const XLSX = require('xlsx-js-style');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
+const crypto = require('crypto');
 
 const app = express();
 app.disable('x-powered-by');
 app.set('etag', false);
 
-// 安全响应头与本地回环 Host 白名单守卫（防范 DNS Rebinding 攻击）
+// ==================== 0. 网络层与身份识别辅助函数 ====================
+
+// 判断请求是否来自本机回环地址 (127.0.0.1 / ::1)
+function isLoopbackAddress(ipStr) {
+  if (!ipStr) return false;
+  const ip = String(ipStr).trim().toLowerCase();
+  return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+}
+
+// 校验 Host 是否为本机或局域网私有 IP（防范公网 DNS Rebinding 攻击）
+function isAllowedLanOrLocalHost(hostname) {
+  if (!hostname) return true;
+  const h = String(hostname).trim().toLowerCase();
+  if (h === '127.0.0.1' || h === 'localhost' || h === '[::1]') return true;
+  if (/^192\.168\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^10\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^172\.(1[6-9]|2\d|3[0-1])\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^169\.254\.\d{1,3}\.\d{1,3}$/.test(h)) return true;
+  if (/^[a-z0-9_-]+(\.local)?$/i.test(h)) return true;
+  return false;
+}
+
+// 获取主机所有真实局域网 IPv4 地址列表
+function getHostLanIPs() {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    if (/vmware|virtualbox|vbox|hyper-v|wsl|docker|vethernet|loopback/i.test(name)) continue;
+    for (const net of nets[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) {
+        ips.push(net.address);
+      }
+    }
+  }
+  return ips.length > 0 ? ips : ['127.0.0.1'];
+}
+
 app.use((req, res, next) => {
-  const hostHeader = String(req.headers.host || '').split(':')[0].toLowerCase();
-  if (hostHeader && hostHeader !== '127.0.0.1' && hostHeader !== 'localhost') {
-    return res.status(403).send('Forbidden: Localhost access only');
+  const hostHeader = String(req.headers.host || '').replace(/^\[(.*)\](:\d+)?$/, '$1').split(':')[0];
+  if (!isAllowedLanOrLocalHost(hostHeader)) {
+    return res.status(403).send('Forbidden: LAN or Localhost access only');
   }
   res.setHeader('X-Content-Type-Options', 'nosniff');
   res.setHeader('X-Frame-Options', 'SAMEORIGIN');
@@ -56,28 +94,16 @@ function cleanTmpDir() {
 }
 cleanTmpDir();
 
-// 2. 中间件配置
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
-
-app.use('/uploads', express.static(UPLOAD_DIR, {
-  etag: false,
-  setHeaders: (res) => {
-    res.setHeader('Content-Disposition', 'inline');
-    res.setHeader('Cache-Control', 'no-store');
-  }
-}));
-
-// 3. 初始化 SQLite 数据库
+// 2. 初始化 SQLite 数据库（开启 WAL + busy_timeout 5000ms 支持内网多机并发写入）
 const dbPath = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
 const db = new Database(dbPath);
+db.pragma('busy_timeout = 5000');
 db.pragma('foreign_keys = ON');
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('temp_store = MEMORY');
-db.pragma('cache_size = -4000'); // 限制页缓存 4MB
-db.pragma('mmap_size = 0');      // 关闭 mmap 防止虚增工作集内存
+db.pragma('cache_size = -4000');
+db.pragma('mmap_size = 0');
 
 const DEFAULT_NO_RULE = JSON.stringify({
   prefix: 'HT-',
@@ -85,6 +111,17 @@ const DEFAULT_NO_RULE = JSON.stringify({
   seq_digits: 3,
   suffix: '',
   reset_yearly: true
+});
+
+function hashPasscode(rawCode) {
+  return crypto.createHash('sha256').update(`contract_lan_salt:${String(rawCode)}`).digest('hex');
+}
+
+// 默认内网访问设置：开启内网访问，初始默认口令为 888888（主机可在顶部随时修改）
+const DEFAULT_LAN_AUTH = JSON.stringify({
+  enabled: true,
+  passcode_hash: hashPasscode('888888'),
+  passcode_plain: '888888'
 });
 
 db.exec(`
@@ -95,6 +132,7 @@ db.exec(`
 
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_our_entity', '本单位默认签约主体（点击顶部可修改）');
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('contract_no_rule', '${DEFAULT_NO_RULE}');
+  INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_auth_config', '${DEFAULT_LAN_AUTH}');
 
   CREATE TABLE IF NOT EXISTS contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,6 +285,263 @@ const STMTS = {
   updateContractMainAttachment: db.prepare(`UPDATE contracts SET attachment_path = ?, attachment_original_name = ?, updated_at = datetime('now', 'localtime') WHERE id = ?`)
 };
 
+// ==================== 内网访问口令鉴权、签名 Cookie 与防暴力破解核心引擎 ====================
+
+// 每次进程启动生成随机 256-bit 签名密钥（重启程序或修改口令后，旧内网会话自动失效）
+const SESSION_SECRET = crypto.randomBytes(32).toString('hex');
+const AUTH_COOKIE_NAME = 'cm_lan_token';
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 内网单次口令授权有效期 12 小时
+
+// 防暴力破解内存限流表：同一 IP 连续失败 5 次锁定 15 分钟
+const loginRateLimitMap = new Map();
+const MAX_LOGIN_FAILS = 5;
+const LOCKOUT_DURATION_MS = 15 * 60 * 1000;
+
+const rateLimitCleanupTimer = setInterval(() => {
+  const now = Date.now();
+  for (const [ip, record] of loginRateLimitMap.entries()) {
+    if (now - record.lastAttempt > LOCKOUT_DURATION_MS) {
+      loginRateLimitMap.delete(ip);
+    }
+  }
+}, 10 * 60 * 1000);
+if (typeof rateLimitCleanupTimer.unref === 'function') {
+  rateLimitCleanupTimer.unref();
+}
+
+function getLanAuthConfig() {
+  const row = STMTS.getSetting.get('lan_auth_config');
+  let parsed = {};
+  try { parsed = row ? JSON.parse(row.value) : {}; } catch (e) {}
+  const plain = typeof parsed.passcode_plain === 'string' && parsed.passcode_plain.length >= 4
+    ? parsed.passcode_plain
+    : '888888';
+  return {
+    enabled: parsed.enabled !== false,
+    passcode_hash: parsed.passcode_hash || hashPasscode(plain),
+    passcode_plain: plain
+  };
+}
+
+function parseCookies(req) {
+  const header = req.headers.cookie;
+  const out = {};
+  if (!header) return out;
+  for (const part of header.split(';')) {
+    const idx = part.indexOf('=');
+    if (idx > 0) {
+      const k = part.slice(0, idx).trim();
+      const v = part.slice(idx + 1).trim();
+      try { out[k] = decodeURIComponent(v); } catch (e) { out[k] = v; }
+    }
+  }
+  return out;
+}
+
+function createSignedLanToken(passcodeHash) {
+  const exp = Date.now() + TOKEN_TTL_MS;
+  const pwdFp = passcodeHash.slice(0, 16);
+  const payload = `${exp}.${pwdFp}`;
+  const sig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  return `${payload}.${sig}`;
+}
+
+function verifySignedLanToken(token, currentPasscodeHash) {
+  if (!token || typeof token !== 'string') return false;
+  const parts = token.split('.');
+  if (parts.length !== 3) return false;
+  const [expStr, pwdFp, sig] = parts;
+  const exp = Number(expStr);
+  if (!Number.isFinite(exp) || Date.now() > exp) return false;
+  if (pwdFp !== currentPasscodeHash.slice(0, 16)) return false;
+
+  const payload = `${expStr}.${pwdFp}`;
+  const expectedSig = crypto.createHmac('sha256', SESSION_SECRET).update(payload).digest('hex');
+  try {
+    return crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expectedSig));
+  } catch (e) {
+    return false;
+  }
+}
+
+function isRequestAuthenticated(req) {
+  // 1. 本机 127.0.0.1 访问永远享有免密最高权限
+  if (isLoopbackAddress(req.socket.remoteAddress)) {
+    return { ok: true, isLocalhost: true };
+  }
+  // 2. 内网其他机器访问：先检查主机是否开启了“允许内网访问”
+  const cfg = getLanAuthConfig();
+  if (!cfg.enabled) {
+    return { ok: false, isLocalhost: false, reason: '主机管理员已关闭内网共享访问权限' };
+  }
+  // 3. 校验签名 Cookie
+  const cookies = parseCookies(req);
+  const token = cookies[AUTH_COOKIE_NAME];
+  if (verifySignedLanToken(token, cfg.passcode_hash)) {
+    return { ok: true, isLocalhost: false };
+  }
+  return { ok: false, isLocalhost: false, reason: '需要输入内网访问验证口令' };
+}
+
+// 中间件配置
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
+
+// 公开前端静态外壳文件（HTML/CSS/JS），但拦截所有未授权的 /uploads 扫描件与 /api 业务数据请求
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
+
+// ==================== 鉴权与内网安全管理公开接口 ====================
+
+// 查询当前客户端的鉴权状态（前端启动时第一时间调用）
+app.get('/api/auth/status', (req, res) => {
+  const auth = isRequestAuthenticated(req);
+  const cfg = getLanAuthConfig();
+  const currentPort = req.socket.localPort;
+  res.json({
+    success: true,
+    authenticated: auth.ok,
+    is_localhost: auth.isLocalhost,
+    lan_enabled: cfg.enabled,
+    reason: auth.reason || '',
+    // 仅当本机 127.0.0.1 访问时，返回当前口令明文与内网 IP 列表方便管理员查看和复制
+    lan_info: auth.isLocalhost ? {
+      enabled: cfg.enabled,
+      passcode: cfg.passcode_plain,
+      port: currentPort,
+      lan_urls: getHostLanIPs().map(ip => `http://${ip}:${currentPort}`)
+    } : null
+  });
+});
+
+// 内网其他电脑提交验证口令登录（含防暴力破解保护）
+app.post('/api/auth/login', (req, res) => {
+  const clientIp = String(req.socket.remoteAddress || 'unknown');
+  if (isLoopbackAddress(clientIp)) {
+    return res.json({ success: true, message: '本机免密直连' });
+  }
+
+  const cfg = getLanAuthConfig();
+  if (!cfg.enabled) {
+    return res.status(403).json({ success: false, message: '主机已关闭内网访问通道，请联系主机管理员开启' });
+  }
+
+  const now = Date.now();
+  const rateRecord = loginRateLimitMap.get(clientIp) || { fails: 0, lockUntil: 0, lastAttempt: now };
+  if (rateRecord.lockUntil > now) {
+    const waitMin = Math.ceil((rateRecord.lockUntil - now) / 60000);
+    return res.status(429).json({
+      success: false,
+      message: `口令连续输错次数过多，已触发安全锁定，请 ${waitMin} 分钟后再试`
+    });
+  }
+
+  const inputCode = String(req.body.passcode || '').trim();
+  if (!inputCode) {
+    return res.status(400).json({ success: false, message: '请输入内网访问验证口令' });
+  }
+
+  const inputHash = hashPasscode(inputCode);
+  let isMatch = false;
+  try {
+    isMatch = crypto.timingSafeEqual(Buffer.from(inputHash), Buffer.from(cfg.passcode_hash));
+  } catch (e) {
+    isMatch = false;
+  }
+
+  if (!isMatch) {
+    rateRecord.fails += 1;
+    rateRecord.lastAttempt = now;
+    if (rateRecord.fails >= MAX_LOGIN_FAILS) {
+      rateRecord.lockUntil = now + LOCKOUT_DURATION_MS;
+    }
+    loginRateLimitMap.set(clientIp, rateRecord);
+    const left = Math.max(0, MAX_LOGIN_FAILS - rateRecord.fails);
+    return res.status(401).json({
+      success: false,
+      message: left > 0
+        ? `验证口令错误（还剩 ${left} 次尝试机会）`
+        : '验证口令连续错误 5 次，当前 IP 已被临时锁定 15 分钟'
+    });
+  }
+
+  // 验证通过：清除失败计数并下发 HttpOnly 签名 Cookie
+  loginRateLimitMap.delete(clientIp);
+  const token = createSignedLanToken(cfg.passcode_hash);
+  res.setHeader(
+    'Set-Cookie',
+    `${AUTH_COOKIE_NAME}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor(TOKEN_TTL_MS / 1000)}`
+  );
+  res.json({ success: true, message: '口令验证通过，欢迎进入合同台账系统' });
+});
+
+// 内网电脑主动退出锁屏
+app.post('/api/auth/logout', (req, res) => {
+  res.setHeader('Set-Cookie', `${AUTH_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0`);
+  res.json({ success: true, message: '已锁定并退出当前内网会话' });
+});
+
+// 【仅限本机 127.0.0.1 管理员】修改内网访问开关与验证口令
+app.put('/api/settings/lan-security', (req, res) => {
+  if (!isLoopbackAddress(req.socket.remoteAddress)) {
+    return res.status(403).json({ success: false, message: '安全限制：仅允许在运行服务的本机电脑上修改内网口令与安全设置！' });
+  }
+
+  const enabled = req.body.enabled !== false && req.body.enabled !== 'false';
+  const newPasscode = String(req.body.passcode || '').trim();
+  if (newPasscode.length < 4 || newPasscode.length > 32) {
+    return res.status(400).json({ success: false, message: '内网验证口令长度需在 4 ~ 32 位之间' });
+  }
+
+  const newConfig = {
+    enabled,
+    passcode_hash: hashPasscode(newPasscode),
+    passcode_plain: newPasscode
+  };
+  STMTS.upsertSetting.run('lan_auth_config', JSON.stringify(newConfig));
+  loginRateLimitMap.clear();
+
+  const currentPort = req.socket.localPort;
+  res.json({
+    success: true,
+    message: '内网安全设置已更新（若修改了口令，此前已登录的其他内网电脑需使用新口令重新验证）',
+    lan_info: {
+      enabled: newConfig.enabled,
+      passcode: newConfig.passcode_plain,
+      port: currentPort,
+      lan_urls: getHostLanIPs().map(ip => `http://${ip}:${currentPort}`)
+    }
+  });
+});
+
+// ==================== 全局安全拦截守卫：保护 /uploads 扫描件与所有业务 API ====================
+
+app.use('/uploads', (req, res, next) => {
+  const auth = isRequestAuthenticated(req);
+  if (!auth.ok) {
+    return res.status(401).send('Unauthorized: 请先完成内网访问口令验证后再查看扫描件或关联资料');
+  }
+  next();
+}, express.static(UPLOAD_DIR, {
+  etag: false,
+  setHeaders: (res) => {
+    res.setHeader('Content-Disposition', 'inline');
+    res.setHeader('Cache-Control', 'no-store');
+  }
+}));
+
+app.use('/api', (req, res, next) => {
+  const auth = isRequestAuthenticated(req);
+  if (!auth.ok) {
+    return res.status(401).json({
+      success: false,
+      require_auth: true,
+      lan_enabled: getLanAuthConfig().enabled,
+      message: auth.reason || '请先输入内网访问验证口令'
+    });
+  }
+  next();
+});
+
 // ==================== 文件命名、专属文件夹同步与孤儿垃圾清扫核心函数 ====================
 
 function sanitizeFilenamePart(str, maxLen = 80) {
@@ -318,9 +613,6 @@ function moveFileSafe(srcPath, destPath) {
   }
 }
 
-/**
- * 安全移动/重命名关联资料专属文件夹（带 Windows 文件占用锁检测保护）
- */
 function moveFolderSafe(oldFolderAbs, newFolderAbs) {
   const absOld = path.resolve(oldFolderAbs);
   const absNew = path.resolve(newFolderAbs);
@@ -363,9 +655,6 @@ function finalizeUploadedFile(tempFile, contractNo, contractName, signDate) {
   };
 }
 
-/**
- * 将上传的多个“其他关联资料”归档至该合同专属文件夹：uploads/related/{合同编号+合同名称+签订日期}/
- */
 function archiveRelatedFilesForContract(contractId, contractNo, contractName, signDate, tempFiles) {
   if (!Array.isArray(tempFiles) || tempFiles.length === 0) return null;
 
@@ -402,9 +691,6 @@ function archiveRelatedFilesForContract(contractId, contractNo, contractName, si
   return relFolderPath;
 }
 
-/**
- * 当修改了合同编号、合同名称或签订日期时，自动同步重命名该合同的关联资料专属文件夹，并更新所有附件路径
- */
 function syncRelatedFolderOnContractChange(contractId, oldFolderRelPath, newNo, newName, newSignDate) {
   const existingFiles = STMTS.getRelatedByContractId.all(contractId);
   if (existingFiles.length === 0) {
@@ -447,9 +733,6 @@ function syncRelatedFolderOnContractChange(contractId, oldFolderRelPath, newNo, 
   return expectedRelFolder;
 }
 
-/**
- * 自动清扫孤儿扫描件与孤儿关联资料文件夹
- */
 function sweepOrphanUploads() {
   if (!fs.existsSync(UPLOAD_DIR)) return;
   try {
@@ -774,10 +1057,9 @@ function parseCounterparties(body) {
   };
 }
 
-// 4. Multer 配置（带防重复解码的智能 UTF-8 文件名还原）
+// 4. Multer 配置
 function decodeUploadFilename(file) {
   if (!file._utf8Decoded) {
-    // 若包含非 ASCII 且全在 0x00~0xFF 范围内，说明是 busboy 默认按 latin1 解析的 UTF-8 字节
     if (/[\u0080-\u00ff]/.test(file.originalname) && !/[\u0100-\uffff]/.test(file.originalname)) {
       file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
     }
@@ -986,7 +1268,7 @@ function dateStrToExcelSerialInt(dateStr) {
   return Math.round(utcMs / 86400000) + 25569;
 }
 
-// ==================== API 路由 ====================
+// ==================== 业务 API 路由 ====================
 
 app.get('/api/settings/our-entity', (req, res) => {
   const row = STMTS.getSetting.get('default_our_entity');
@@ -1155,7 +1437,6 @@ app.get('/api/contracts/export', (req, res) => {
           };
           const safeTarget = String(linkMeta.relPath).replace(/"/g, '""');
           const safeLabel = String(linkMeta.displayText).replace(/"/g, '""');
-          // 采用 Excel 原生 HYPERLINK 公式，100% 避免 xlsx-js-style 对中文路径 l.Target 的 Latin1 转码乱码问题
           return {
             v: linkMeta.displayText,
             t: 's',
@@ -1708,7 +1989,7 @@ app.use((err, req, res, next) => {
 });
 
 // ==================== 5. 可控服务启动与全量资源销毁接口 ====================
-function startServer(port = 0, host = '127.0.0.1') {
+function startServer(port = 0, host = '0.0.0.0') {
   return new Promise((resolve, reject) => {
     const activeSockets = new Set();
     const server = app.listen(port, host, () => {
@@ -1717,6 +1998,8 @@ function startServer(port = 0, host = '127.0.0.1') {
         port: actualPort,
         server,
         shutdown: async () => {
+          clearInterval(rateLimitCleanupTimer);
+          loginRateLimitMap.clear();
           cleanTmpDir();
           sweepOrphanUploads();
           if (typeof server.closeAllConnections === 'function') {
@@ -1746,9 +2029,9 @@ function startServer(port = 0, host = '127.0.0.1') {
 }
 
 if (require.main === module) {
-  const PORT = process.env.PORT || 3000;
-  startServer(PORT, '127.0.0.1').then(({ port, shutdown }) => {
-    console.log(`✅ 服务已启动: http://127.0.0.1:${port}`);
+  const PORT = process.env.PORT !== undefined ? Number(process.env.PORT) : 0;
+  startServer(PORT, '0.0.0.0').then(({ port, shutdown }) => {
+    console.log(`✅ 服务已启动 (动态端口: ${port}, 本机免密: http://127.0.0.1:${port})`);
     process.on('SIGINT', async () => { await shutdown(); process.exit(0); });
     process.on('SIGTERM', async () => { await shutdown(); process.exit(0); });
   });
