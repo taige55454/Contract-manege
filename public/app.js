@@ -1,11 +1,11 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.2.0 满血终极版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.3.0 满血终极版)
  * 特性：
  * 1. 夹心式 4 段自定义分段编号器（[灰底前缀] + [穿插段] + [灰底日期段] + [零空洞流水号] + [灰底后缀]）
- * 2. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan)
- * 3. 智能日期输入解析（支持 2026.3.18、简写 3.18、以及 Excel 序列号如 46099 自动转 YYYY-MM-DD）
- * 4. 详情弹窗内直接支持【一键补传/替换主合同扫描件】、【一键补传关联附件/立项资料】与【单文件物理删除】
- * 5. 预览弹窗关闭即刻销毁 iframe/img 句柄释放内存 + 多机协同静默同步（不打断表单输入）
+ * 2. 自定义下拉选项与预设词库引擎（8 大分类自由定制 + 历史老数据自动兜底防丢保护 + 一键恢复默认）
+ * 3. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan)
+ * 4. 智能日期输入解析（支持 2026.3.18、简写 3.18、以及 Excel 序列号如 46099 自动转 YYYY-MM-DD）
+ * 5. 详情弹窗内直接支持【主扫描件/立项资料/关联附件】一键补传与单文件物理删除 + 奇葩文件名转义免疫
  */
 
 let currentTab = 'contract'; // 'contract' | 'procurement'
@@ -16,6 +16,17 @@ let defaultOurEntity = '毕节自营公司';
 let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
+let dropdownPresets = {
+  contract_types: ['采购', '销售', '服务', '租赁', '劳动', '工程', '其他'],
+  contract_statuses: ['生效中', '履行完毕', '已解除', '待签署', '已归档'],
+  project_types: ['服务类项目', '物资采购类', '工程维保类', '信息化建设', '零星采购', '其他'],
+  cost_departments: ['综合部', '市场部', '财务部', '运营部', '揽投部', '寄递事业部', '渠道平台部', '安保部'],
+  procurement_types: ['小额零星采购', '分散采购', '集中采购', '单一来源采购', '紧急采购'],
+  procurement_methods: ['合作谈判', '询价采购', '竞争性磋商', '公开招标', '直接采购', '比选', '电商直购'],
+  budget_subjects: ['业务外包费', '办公费', '车辆运行维护费', '宣传营销费', '房屋租赁及物业费', '信息化运维费', '安全保卫费', '低值易耗品'],
+  invoice_types: ['增值税专用发票', '增值税普通发票', '免税普通发票', '财政票据/收据']
+};
+
 let isFreeContractNoMode = false;
 let isFreeProcNoMode = false;
 let isSubmitting = false;
@@ -23,7 +34,7 @@ let isSilentSyncing = false;
 
 const LAN_TOKEN_KEY = 'cm_lan_session_token';
 
-// ==================== 1. 鉴权请求封装与通用工具 ====================
+// ==================== 1. 鉴权请求封装与通用安全转义工具 ====================
 function getLanToken() {
   return localStorage.getItem(LAN_TOKEN_KEY) || '';
 }
@@ -58,6 +69,15 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;')
     .replace(/'/g, '&#39;');
+}
+
+// 专门用于内联 onclick="fn('...')" 的 JS 字符串参数转义，彻底免疫单引号与反斜杠文件名
+function escapeJsStr(str) {
+  return String(str ?? '')
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/"/g, '&quot;')
+    .replace(/\r|\n/g, ' ');
 }
 
 function formatMoney(val) {
@@ -120,7 +140,132 @@ function renderDueChip(dateStr) {
   return `<span>${escapeHtml(dateStr)}</span>`;
 }
 
-// ==================== 2. 顶部双模块切换与初始化 ====================
+// ==================== 2. 自定义下拉选项与预设词库引擎（含老数据防丢兜底） ====================
+function populateSelectWithOptions(selectId, optionsArr, placeholderText = null) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const prevVal = el.value;
+  let html = '';
+  if (placeholderText !== null) {
+    html += `<option value="">${escapeHtml(placeholderText)}</option>`;
+  }
+  for (const item of (optionsArr || [])) {
+    html += `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`;
+  }
+  el.innerHTML = html;
+  if (prevVal && (optionsArr.includes(prevVal) || prevVal === '')) {
+    el.value = prevVal;
+  }
+}
+
+function populateDatalistWithOptions(datalistId, optionsArr) {
+  const el = document.getElementById(datalistId);
+  if (!el) return;
+  el.innerHTML = (optionsArr || []).map(item => `<option value="${escapeHtml(item)}"></option>`).join('');
+}
+
+// 编辑老记录时，若老记录的值不在当前预设列表中，自动临时补入该选项，确保 100% 零数据丢失
+function setSelectValueWithFallback(selectId, val) {
+  const el = document.getElementById(selectId);
+  if (!el) return;
+  const cleanVal = String(val ?? '').trim();
+  if (!cleanVal) return;
+  const exists = Array.from(el.options).some(opt => opt.value === cleanVal);
+  if (!exists) {
+    el.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(cleanVal)}">${escapeHtml(cleanVal)} (历史值)</option>`);
+  }
+  el.value = cleanVal;
+}
+
+function applyDropdownPresetsToDOM() {
+  // 1. 顶部筛选栏下拉框（保留“全部”占位项与当前已选值）
+  populateSelectWithOptions('filter_type', dropdownPresets.contract_types, '全部类型');
+  populateSelectWithOptions('filter_status', dropdownPresets.contract_statuses, '全部状态');
+  populateSelectWithOptions('proc_filter_type', dropdownPresets.project_types, '全部立项类型');
+
+  // 2. 合同与采购立项表单内的下拉框
+  populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null);
+  populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null);
+  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null);
+  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null);
+
+  // 3. 可选可手填的 Datalist 建议列表
+  populateDatalistWithOptions('cost_dept_list', dropdownPresets.cost_departments);
+  populateDatalistWithOptions('budget_subject_list', dropdownPresets.budget_subjects);
+  populateDatalistWithOptions('proc_method_list', dropdownPresets.procurement_methods);
+  populateDatalistWithOptions('invoice_type_list', dropdownPresets.invoice_types);
+}
+
+async function loadDropdownPresets() {
+  try {
+    const res = await apiFetch('/api/settings/presets');
+    const json = await res.json();
+    if (json.success && json.presets) {
+      dropdownPresets = json.presets;
+    }
+  } catch (e) {}
+  applyDropdownPresetsToDOM();
+}
+
+function openPresetsModal() {
+  document.getElementById('preset_contract_types').value = (dropdownPresets.contract_types || []).join('、');
+  document.getElementById('preset_contract_statuses').value = (dropdownPresets.contract_statuses || []).join('、');
+  document.getElementById('preset_project_types').value = (dropdownPresets.project_types || []).join('、');
+  document.getElementById('preset_cost_departments').value = (dropdownPresets.cost_departments || []).join('、');
+  document.getElementById('preset_procurement_types').value = (dropdownPresets.procurement_types || []).join('、');
+  document.getElementById('preset_procurement_methods').value = (dropdownPresets.procurement_methods || []).join('、');
+  document.getElementById('preset_budget_subjects').value = (dropdownPresets.budget_subjects || []).join('、');
+  document.getElementById('preset_invoice_types').value = (dropdownPresets.invoice_types || []).join('、');
+  document.getElementById('presets_modal').classList.remove('hidden');
+}
+
+function closePresetsModal() {
+  document.getElementById('presets_modal').classList.add('hidden');
+}
+
+async function savePresetsForm(e) {
+  e.preventDefault();
+  const payload = {
+    presets: {
+      contract_types: document.getElementById('preset_contract_types').value,
+      contract_statuses: document.getElementById('preset_contract_statuses').value,
+      project_types: document.getElementById('preset_project_types').value,
+      cost_departments: document.getElementById('preset_cost_departments').value,
+      procurement_types: document.getElementById('preset_procurement_types').value,
+      procurement_methods: document.getElementById('preset_procurement_methods').value,
+      budget_subjects: document.getElementById('preset_budget_subjects').value,
+      invoice_types: document.getElementById('preset_invoice_types').value
+    }
+  };
+  const res = await apiFetch('/api/settings/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const json = await res.json();
+  if (json.success) {
+    dropdownPresets = json.presets;
+    applyDropdownPresetsToDOM();
+    closePresetsModal();
+  }
+}
+
+async function restoreDefaultPresets() {
+  if (!confirm('确定将所有下拉选项恢复为系统出厂默认设置吗？（不会影响已录入的历史台账数据）')) return;
+  const res = await apiFetch('/api/settings/presets', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ reset_defaults: true })
+  });
+  const json = await res.json();
+  if (json.success) {
+    dropdownPresets = json.presets;
+    applyDropdownPresetsToDOM();
+    openPresetsModal();
+  }
+}
+
+// ==================== 3. 顶部双模块切换与初始化 ====================
 function initYearDropdowns() {
   const curYear = new Date().getFullYear();
   const cYear = document.getElementById('filter_year');
@@ -152,7 +297,7 @@ async function switchModuleTab(tab) {
   }
 }
 
-// ==================== 3. 内网协同安全锁与默认主体设置 ====================
+// ==================== 4. 内网协同安全锁与默认主体设置 ====================
 async function checkLanAuthStatus() {
   try {
     const res = await fetch('/api/lan-auth/status', {
@@ -289,7 +434,7 @@ async function saveOurEntityForm(e) {
   }
 }
 
-// ==================== 4. 合同与采购夹心式编号规则设置 ====================
+// ==================== 5. 合同与采购夹心式编号规则设置 ====================
 async function loadContractNoRuleSettings() {
   try {
     const res = await apiFetch('/api/settings/no-rule');
@@ -424,7 +569,7 @@ async function saveProcNoRuleForm(e) {
   }
 }
 
-// ==================== 5. 夹心式 4 段编号构建器实时同步逻辑 ====================
+// ==================== 6. 夹心式 4 段编号构建器实时同步逻辑 ====================
 function syncSegmentedContractNo() {
   if (isFreeContractNoMode) return;
   const pfx = document.getElementById('seg_prefix').textContent || '';
@@ -513,7 +658,7 @@ function toggleFreeProcNoMode(forceFree) {
   document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
 }
 
-// ==================== 6. 合同管理台账主表渲染（支持一对多跨行合并 rowspan） ====================
+// ==================== 7. 合同管理台账主表渲染（支持一对多跨行合并 rowspan） ====================
 function buildContractQueryParams() {
   const p = new URLSearchParams();
   const no = document.getElementById('filter_no')?.value.trim();
@@ -609,7 +754,7 @@ function renderContractLedgerTable(list) {
         <td rowspan="${span}" class="text-center">
           <button class="btn btn-outline btn-sm" onclick="openDetailModal('contract', ${c.id})">详情</button>
           <button class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteContractRecord(${c.id}, '${escapeHtml(c.contract_no)}')">删除</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteContractRecord(${c.id}, '${escapeJsStr(c.contract_no)}')">删除</button>
         </td>
       ` : '';
 
@@ -648,11 +793,12 @@ function renderContractLedgerTable(list) {
   tbody.innerHTML = htmlRows.join('');
 }
 
-// ==================== 7. 合同新增/编辑弹窗与动态对方单位卡片 ====================
+// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片 ====================
 function addCounterpartyCard(data = {}) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
   const idx = container.children.length + 1;
+  const defaultInv = (dropdownPresets.invoice_types && dropdownPresets.invoice_types[0]) || '增值税专用发票';
   const card = document.createElement('div');
   card.className = 'party-card';
   card.innerHTML = `
@@ -705,7 +851,7 @@ function addCounterpartyCard(data = {}) {
       </div>
       <div class="form-group">
         <label>发票类型</label>
-        <input type="text" class="cp-invoice" list="invoice_type_list" value="${escapeHtml(data.invoice_type || '增值税专用发票')}" />
+        <input type="text" class="cp-invoice" list="invoice_type_list" value="${escapeHtml(data.invoice_type || defaultInv)}" />
       </div>
 
       <div class="form-group">
@@ -803,6 +949,7 @@ function onSelectLinkedProcurementInContractForm(sel) {
 }
 
 async function openFormModal(editId = null) {
+  applyDropdownPresetsToDOM();
   const form = document.getElementById('contract_form');
   form.reset();
   document.getElementById('counterparties_container').innerHTML = '';
@@ -831,8 +978,8 @@ async function openFormModal(editId = null) {
     toggleFreeContractNoMode(true);
     document.getElementById('f_contract_no').value = c.contract_no;
     document.getElementById('f_contract_name').value = c.contract_name;
-    document.getElementById('f_contract_type').value = c.contract_type;
-    document.getElementById('f_status').value = c.status;
+    setSelectValueWithFallback('f_contract_type', c.contract_type);
+    setSelectValueWithFallback('f_status', c.status);
     document.getElementById('f_our_entity').value = c.our_entity;
     document.getElementById('f_sign_date').value = c.sign_date;
     document.getElementById('f_start_date').value = c.start_date;
@@ -906,7 +1053,7 @@ async function deleteContractRecord(id, no) {
   }
 }
 
-// ==================== 8. 采购项目立项台账主表与表单逻辑 ====================
+// ==================== 9. 采购项目立项台账主表与表单逻辑 ====================
 function buildProcQueryParams() {
   const p = new URLSearchParams();
   const kw = document.getElementById('proc_filter_kw')?.value.trim();
@@ -986,7 +1133,7 @@ function renderProcurementTable(list) {
         <td class="text-center">
           <button class="btn btn-outline btn-sm" onclick="openDetailModal('procurement', ${p.id})">详情</button>
           <button class="btn btn-outline btn-sm" onclick="openProcurementFormModal(${p.id})">编辑</button>
-          <button class="btn btn-danger btn-sm" onclick="deleteProcRecord(${p.id}, '${escapeHtml(p.procurement_no)}')">删除</button>
+          <button class="btn btn-danger btn-sm" onclick="deleteProcRecord(${p.id}, '${escapeJsStr(p.procurement_no)}')">删除</button>
         </td>
       </tr>
     `;
@@ -1016,14 +1163,17 @@ function onSelectLinkedContractInProcForm(sel) {
 }
 
 async function openProcurementFormModal(editId = null) {
+  applyDropdownPresetsToDOM();
   const form = document.getElementById('procurement_form');
   form.reset();
   const today = new Date().toISOString().slice(0, 10);
+  const defaultMethod = (dropdownPresets.procurement_methods && dropdownPresets.procurement_methods[0]) || '合作谈判';
 
   if (!editId) {
     document.getElementById('p_form_id').value = '';
     document.getElementById('proc_form_modal_title').textContent = '🛒 新增采购项目立项台账';
     document.getElementById('p_approval_date').value = today;
+    document.getElementById('p_procurement_method').value = defaultMethod;
     document.getElementById('p_seg_mid_custom_input').value = procRule.default_mid || '';
     toggleFreeProcNoMode(false);
     await populateContractDropdownInProcForm(null);
@@ -1038,12 +1188,12 @@ async function openProcurementFormModal(editId = null) {
     toggleFreeProcNoMode(true);
     document.getElementById('p_procurement_no').value = p.procurement_no;
     document.getElementById('p_project_name').value = p.project_name;
-    document.getElementById('p_project_type').value = p.project_type;
+    setSelectValueWithFallback('p_project_type', p.project_type);
     document.getElementById('p_cost_department').value = p.cost_department || '';
     document.getElementById('p_budget_amount').value = p.budget_amount || '';
     document.getElementById('p_budget_subject').value = p.budget_subject || '';
-    document.getElementById('p_procurement_type').value = p.procurement_type || '小额零星采购';
-    document.getElementById('p_procurement_method').value = p.procurement_method || '合作谈判';
+    setSelectValueWithFallback('p_procurement_type', p.procurement_type);
+    document.getElementById('p_procurement_method').value = p.procurement_method || defaultMethod;
     document.getElementById('p_approval_date').value = p.approval_date || '';
     document.getElementById('p_decision_date').value = p.decision_date || '';
     document.getElementById('p_completion_date').value = p.completion_date || '';
@@ -1123,7 +1273,7 @@ async function deleteProcRecord(id, no) {
   }
 }
 
-// ==================== 9. 全能详情与三大文件在线预览/一键补传/单文件删除中心 ====================
+// ==================== 10. 全能详情与三大文件在线预览/一键补传/单文件删除中心 ====================
 async function quickUploadContractMainScan(contractId, inputEl) {
   if (!inputEl.files || !inputEl.files[0]) return;
   const fd = new FormData();
@@ -1164,7 +1314,7 @@ async function deleteSingleContractRelatedFile(contractId, fileId) {
   }
 }
 
-async function quickUploadProcFilesInDetail(procId, inputEl) {
+async function quickUploadProcFilesInDetail(procId, inputEl, refreshMode = 'procurement', refreshId = null) {
   if (!inputEl.files || inputEl.files.length === 0) return;
   const fd = new FormData();
   for (const f of inputEl.files) fd.append('procurement_files', f);
@@ -1172,20 +1322,22 @@ async function quickUploadProcFilesInDetail(procId, inputEl) {
     const res = await apiFetch(`/api/procurements/${procId}/files`, { method: 'POST', body: fd });
     const json = await res.json();
     if (!json.success) throw new Error(json.message);
-    await openDetailModal('procurement', procId);
-    await loadProcurements();
+    await openDetailModal(refreshMode, refreshId || procId);
+    if (refreshMode === 'contract') await loadContracts();
+    else await loadProcurements();
   } catch (err) {
     alert(err.message || '上传立项资料失败');
   }
 }
 
-async function deleteSingleProcFileInDetail(procId, fileId) {
+async function deleteSingleProcFileInDetail(procId, fileId, refreshMode = 'procurement', refreshId = null) {
   if (!confirm('确认从磁盘物理删除该份立项资料？')) return;
   const res = await apiFetch(`/api/procurements/${procId}/files/${fileId}`, { method: 'DELETE' });
   const json = await res.json();
   if (json.success) {
-    await openDetailModal('procurement', procId);
-    await loadProcurements();
+    await openDetailModal(refreshMode, refreshId || procId);
+    if (refreshMode === 'contract') await loadContracts();
+    else await loadProcurements();
   }
 }
 
@@ -1210,6 +1362,7 @@ async function openDetailModal(mode, id) {
         <h4>📌 合同基础信息</h4>
         <div class="detail-row"><span class="label">年度序号 / 合同编号</span><span class="val">${escapeHtml(c.seq_no)} / ${escapeHtml(c.contract_no)}</span></div>
         <div class="detail-row"><span class="label">合同名称</span><span class="val">${escapeHtml(c.contract_name)}</span></div>
+        <div class="detail-row"><span class="label">合同类型 / 状态</span><span class="val">${escapeHtml(c.contract_type)} / ${escapeHtml(c.status)}</span></div>
         <div class="detail-row"><span class="label">我方签约主体</span><span class="val">${escapeHtml(c.our_entity)}</span></div>
         <div class="detail-row"><span class="label">签订 / 履约 / 到期日</span><span class="val">${escapeHtml(c.sign_date)} / ${escapeHtml(c.start_date)} / ${escapeHtml(c.expiry_date)}</span></div>
       </div>
@@ -1226,7 +1379,7 @@ async function openDetailModal(mode, id) {
           ? `<div class="related-list-item">
                <span class="fname">${escapeHtml(c.attachment_original_name || c.attachment_path)}</span>
                <div class="factions">
-                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(c.attachment_path)}', '${escapeHtml(c.attachment_original_name || c.attachment_path)}')">预览</button>
+                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(c.attachment_path)}', '${escapeJsStr(c.attachment_original_name || c.attachment_path)}')">预览</button>
                  <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(c.attachment_path)}?download=1`)}">下载</a>
                </div>
              </div>`
@@ -1234,18 +1387,27 @@ async function openDetailModal(mode, id) {
       </div>
 
       <div class="detail-card">
-        <h4>② 关联采购立项及立项资料 (${procFiles.length}份)</h4>
+        <h4>
+          <span>② 关联采购立项及立项资料 (${procFiles.length}份)</span>
+          ${c.linked_procurement ? `
+            <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
+              + 补传立项资料
+              <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${c.linked_procurement.id}, this, 'contract', ${c.id})" />
+            </label>
+          ` : ''}
+        </h4>
         ${c.linked_procurement
           ? `<div style="margin-bottom:6px;font-weight:600;color:#6b21a8;">立项号：${escapeHtml(c.linked_procurement.procurement_no)} (${escapeHtml(c.linked_procurement.project_name)})</div>` +
-            procFiles.map(pf => `
+            (procFiles.map(pf => `
               <div class="related-list-item">
                 <span class="fname">${escapeHtml(pf.file_original_name)}</span>
                 <div class="factions">
-                  <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(pf.file_path)}', '${escapeHtml(pf.file_original_name)}')">预览</button>
+                  <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(pf.file_path)}', '${escapeJsStr(pf.file_original_name)}')">预览</button>
                   <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(pf.file_path)}?download=1`)}">下载</a>
+                  <button class="btn btn-danger btn-sm" onclick="deleteSingleProcFileInDetail(${c.linked_procurement.id}, ${pf.id}, 'contract', ${c.id})">删除</button>
                 </div>
               </div>
-            `).join('')
+            `).join('') || `<div style="color:#9ca3af;">该立项暂未上传附件</div>`)
           : `<div style="color:#9ca3af;">未关联采购立项</div>`}
       </div>
 
@@ -1261,7 +1423,7 @@ async function openDetailModal(mode, id) {
           <div class="related-list-item">
             <span class="fname">${escapeHtml(rf.file_original_name)}</span>
             <div class="factions">
-              <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(rf.file_path)}', '${escapeHtml(rf.file_original_name)}')">预览</button>
+              <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(rf.file_path)}', '${escapeJsStr(rf.file_original_name)}')">预览</button>
               <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(rf.file_path)}?download=1`)}">下载</a>
               <button class="btn btn-danger btn-sm" onclick="deleteSingleContractRelatedFile(${c.id}, ${rf.id})">删除</button>
             </div>
@@ -1294,6 +1456,7 @@ async function openDetailModal(mode, id) {
         <div class="detail-row"><span class="label">立项编号</span><span class="val">${escapeHtml(p.procurement_no)}</span></div>
         <div class="detail-row"><span class="label">项目名称</span><span class="val">${escapeHtml(p.project_name)}</span></div>
         <div class="detail-row"><span class="label">立项类型 / 费用承担部门</span><span class="val">${escapeHtml(p.project_type)} / ${escapeHtml(p.cost_department || '-')}</span></div>
+        <div class="detail-row"><span class="label">采购类型 / 采购方式</span><span class="val">${escapeHtml(p.procurement_type || '-')} / ${escapeHtml(p.procurement_method || '-')}</span></div>
         <div class="detail-row"><span class="label">预算金额 / 成交金额</span><span class="val">${formatMoney(p.budget_amount)} / ${formatMoney(p.deal_amount)}</span></div>
         <div class="detail-row"><span class="label">成交供应商</span><span class="val">${escapeHtml(p.supplier_name || '-')}</span></div>
       </div>
@@ -1303,16 +1466,16 @@ async function openDetailModal(mode, id) {
           <span>📁 立项相关资料 (${files.length}份)</span>
           <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
             + 补传立项资料
-            <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${p.id}, this)" />
+            <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${p.id}, this, 'procurement', ${p.id})" />
           </label>
         </h4>
         ${files.map(f => `
           <div class="related-list-item">
             <span class="fname">${escapeHtml(f.file_original_name)}</span>
             <div class="factions">
-              <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(f.file_path)}', '${escapeHtml(f.file_original_name)}')">预览</button>
+              <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(f.file_path)}', '${escapeJsStr(f.file_original_name)}')">预览</button>
               <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(f.file_path)}?download=1`)}">下载</a>
-              <button class="btn btn-danger btn-sm" onclick="deleteSingleProcFileInDetail(${p.id}, ${f.id})">删除</button>
+              <button class="btn btn-danger btn-sm" onclick="deleteSingleProcFileInDetail(${p.id}, ${f.id}, 'procurement', ${p.id})">删除</button>
             </div>
           </div>
         `).join('') || `<div style="color:#9ca3af;">暂未上传立项资料</div>`}
@@ -1324,7 +1487,7 @@ async function openDetailModal(mode, id) {
           ? `<div class="related-list-item">
                <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 主扫描件</span>
                <div class="factions">
-                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(p.linked_contract.attachment_path)}', '${escapeHtml(p.linked_contract.contract_no)}')">预览</button>
+                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(p.linked_contract.attachment_path)}', '${escapeJsStr(p.linked_contract.contract_no)}')">预览</button>
                </div>
              </div>`
           : `<div style="color:#9ca3af;">暂未关联已上传扫描件的合同</div>`}
@@ -1372,7 +1535,7 @@ function closeDetailModal() {
   if (box) box.innerHTML = ''; // 立即销毁 iframe/img 释放内存
 }
 
-// ==================== 10. Excel 导出动作绑定 ====================
+// ==================== 11. Excel 导出动作绑定 ====================
 function exportExcel(mode) {
   const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildContractQueryParams();
   window.location.href = withTokenUrl(`/api/export/excel?${params.toString()}`);
@@ -1387,9 +1550,13 @@ function exportCombinedWorkbook() {
   window.location.href = withTokenUrl('/api/export/combined');
 }
 
-// ==================== 11. 多机局域网协同：静默同步（带弹窗防打扰锁） ====================
+// ==================== 12. 多机局域网协同：静默同步（带弹窗防打扰锁） ====================
 function hasOpenModal() {
-  const ids = ['lan_auth_overlay', 'lan_security_modal', 'our_entity_modal', 'no_rule_modal', 'proc_no_rule_modal', 'form_modal', 'proc_form_modal', 'detail_modal'];
+  const ids = [
+    'lan_auth_overlay', 'lan_security_modal', 'presets_modal',
+    'our_entity_modal', 'no_rule_modal', 'proc_no_rule_modal',
+    'form_modal', 'proc_form_modal', 'detail_modal'
+  ];
   return ids.some(id => {
     const el = document.getElementById(id);
     return el && !el.classList.contains('hidden');
@@ -1400,6 +1567,7 @@ async function silentSyncAll() {
   if (isSilentSyncing || isSubmitting || hasOpenModal()) return;
   isSilentSyncing = true;
   try {
+    await loadDropdownPresets();
     if (currentTab === 'procurement') {
       await loadProcNoRuleSettings();
       await loadProcurements();
@@ -1418,8 +1586,9 @@ setInterval(() => {
   if (!document.hidden) silentSyncAll();
 }, 30000);
 
-// ==================== 12. 应用启动初始化 ====================
+// ==================== 13. 应用启动初始化 ====================
 async function initAppData() {
+  await loadDropdownPresets();
   await loadOurEntitySetting();
   await loadContractNoRuleSettings();
   await loadProcNoRuleSettings();
