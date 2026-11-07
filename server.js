@@ -345,7 +345,6 @@ function moveFolderSafe(oldFolderAbs, newFolderAbs) {
     }
   }
 
-  // 若目标文件夹已存在，逐个安全迁移内部文件后删除旧空目录
   fs.mkdirSync(absNew, { recursive: true });
   for (const item of fs.readdirSync(absOld)) {
     moveFileSafe(path.join(absOld, item), path.join(absNew, item));
@@ -775,12 +774,23 @@ function parseCounterparties(body) {
   };
 }
 
-// 4. Multer 配置
+// 4. Multer 配置（带防重复解码的智能 UTF-8 文件名还原）
+function decodeUploadFilename(file) {
+  if (!file._utf8Decoded) {
+    // 若包含非 ASCII 且全在 0x00~0xFF 范围内，说明是 busboy 默认按 latin1 解析的 UTF-8 字节
+    if (/[\u0080-\u00ff]/.test(file.originalname) && !/[\u0100-\uffff]/.test(file.originalname)) {
+      file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    }
+    file._utf8Decoded = true;
+  }
+  return file.originalname;
+}
+
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, TMP_UPLOAD_DIR),
   filename: (req, file, cb) => {
-    file.originalname = Buffer.from(file.originalname, 'latin1').toString('utf8');
-    const ext = path.extname(file.originalname).toLowerCase();
+    const origName = decodeUploadFilename(file);
+    const ext = path.extname(origName).toLowerCase();
     cb(null, `tmp_${Date.now()}_${Math.round(Math.random() * 1e6)}${ext}`);
   }
 });
@@ -792,7 +802,7 @@ const uploadContractFiles = multer({
   storage,
   limits: { fileSize: 30 * 1024 * 1024, files: 35 },
   fileFilter: (req, file, cb) => {
-    const decodedName = Buffer.from(file.originalname, 'latin1').toString('utf8');
+    const decodedName = decodeUploadFilename(file);
     const ext = path.extname(decodedName).toLowerCase();
     if (file.fieldname === 'attachment') {
       if (MAIN_SCAN_MIMES.includes(file.mimetype)) {
@@ -1143,13 +1153,13 @@ app.get('/api/contracts/export', (req, res) => {
             color: { rgb: linkMeta.colorRgb || '2563EB' },
             underline: true
           };
+          const safeTarget = String(linkMeta.relPath).replace(/"/g, '""');
+          const safeLabel = String(linkMeta.displayText).replace(/"/g, '""');
+          // 采用 Excel 原生 HYPERLINK 公式，100% 避免 xlsx-js-style 对中文路径 l.Target 的 Latin1 转码乱码问题
           return {
             v: linkMeta.displayText,
             t: 's',
-            l: {
-              Target: linkMeta.relPath,
-              Tooltip: linkMeta.tooltip || `点击打开: ${linkMeta.relPath}`
-            },
+            f: `HYPERLINK("${safeTarget}","${safeLabel}")`,
             s: baseStyle
           };
         }
@@ -1208,7 +1218,6 @@ app.get('/api/contracts/export', (req, res) => {
         ? {
             relPath: row.attachment_path.replace(/\\/g, '/'),
             displayText: `📎 打开扫描件 (${row.attachment_original_name || path.basename(row.attachment_path)})`,
-            tooltip: `点击打开合同扫描件: ${row.attachment_path}`,
             colorRgb: '2563EB'
           }
         : null;
@@ -1222,7 +1231,6 @@ app.get('/api/contracts/export', (req, res) => {
         ? {
             relPath: folderRelPath,
             displayText: `📂 打开关联资料夹 (共${relatedCount}份: ${path.basename(folderRelPath)})`,
-            tooltip: `点击打开该合同关联资料专属文件夹: ${folderRelPath}（内含 ${relatedCount} 份关联资料）`,
             colorRgb: '0D9488'
           }
         : null;
@@ -1350,7 +1358,6 @@ app.post('/api/contracts', multiUploadFields, (req, res) => {
       : cleanSignDate;
     const cleanExpiryDate = smartParseDate(expiry_date, '合同到期日期', true);
 
-    // 预检编号唯一性，避免文件落地后再触发数据库约束异常
     if (STMTS.checkDuplicateNoOnCreate.get(cleanNo)) {
       throw new Error('合同编号已存在，请确保唯一性');
     }
@@ -1391,7 +1398,6 @@ app.post('/api/contracts', multiUploadFields, (req, res) => {
       const newContractId = info.lastInsertRowid;
       syncContractParties(newContractId, counterpartiesList);
 
-      // 数据库记录成功写入后再归档物理文件
       if (mainTempFile) {
         archivedFile = finalizeUploadedFile(mainTempFile, cleanNo, cleanName, cleanSignDate);
         STMTS.updateContractMainAttachment.run(
@@ -1455,7 +1461,6 @@ app.put('/api/contracts/:id', multiUploadFields, (req, res) => {
       : cleanSignDate;
     const cleanExpiryDate = smartParseDate(expiry_date, '合同到期日期', true);
 
-    // 关键保护：在移动或重命名任何磁盘文件之前，先校验新合同编号是否与其他记录冲突！
     if (STMTS.checkDuplicateNoOnUpdate.get(cleanNo, req.params.id)) {
       throw new Error('合同编号已被其他记录占用，请修改后重试');
     }
@@ -1470,7 +1475,6 @@ app.put('/api/contracts/:id', multiUploadFields, (req, res) => {
     const relatedTempFiles = (req.files && req.files.related_files) ? req.files.related_files : [];
 
     const updateTx = db.transaction(() => {
-      // 1. 先执行数据库主表更新，确保所有 SQL 约束 100% 通过
       db.prepare(`
         UPDATE contracts SET
           contract_no = ?, contract_name = ?, contract_summary = ?, contract_type = ?,
@@ -1493,7 +1497,6 @@ app.put('/api/contracts/:id', multiUploadFields, (req, res) => {
         req.params.id
       );
 
-      // 2. 同步重命名“其他关联资料”专属文件夹（若文件被 Word 打开锁住，将抛出异常并自动回滚第 1 步的 SQL）
       syncRelatedFolderOnContractChange(
         Number(req.params.id),
         existing.related_folder_path,
@@ -1502,7 +1505,6 @@ app.put('/api/contracts/:id', multiUploadFields, (req, res) => {
         cleanSignDate
       );
 
-      // 3. 同步主合同扫描件命名与覆盖
       let attachment_path = existing.attachment_path;
       let attachment_original_name = existing.attachment_original_name;
 
@@ -1528,7 +1530,6 @@ app.put('/api/contracts/:id', multiUploadFields, (req, res) => {
 
       STMTS.updateContractMainAttachment.run(attachment_path, attachment_original_name, req.params.id);
 
-      // 4. 若本次编辑追加上传了新的“其他关联资料”，一并归档进专属文件夹
       if (relatedTempFiles.length > 0) {
         archiveRelatedFilesForContract(
           Number(req.params.id),
