@@ -1,18 +1,14 @@
-const { app, BrowserWindow, Tray, Menu, nativeImage, dialog, shell } = require('electron');
+const { app, Tray, Menu, nativeImage, dialog, shell, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
-// ==================== 0. 铬内核深度轻量化与内存压降优化（稳定优先） ====================
-app.commandLine.appendSwitch('disable-renderer-backgrounding');
-app.commandLine.appendSwitch('disable-background-timer-throttling');
+// ==================== 0. 纯浏览器模式：彻底禁用内置 GPU 硬件加速与渲染器冗余开销 ====================
+app.disableHardwareAcceleration();
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
 app.commandLine.appendSwitch('disable-extensions');
-app.commandLine.appendSwitch('disable-component-extensions-with-background-pages');
 app.commandLine.appendSwitch('disable-sync');
-app.commandLine.appendSwitch('disable-translate');
-app.commandLine.appendSwitch('mute-audio'); // 修复此前多余的前置空格
-app.commandLine.appendSwitch('disk-cache-size', '1048576');
-app.commandLine.appendSwitch('media-cache-size', '1048576');
-app.commandLine.appendSwitch('js-flags', '--max-old-space-size=128 --expose-gc');
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=96 --expose-gc');
 
 // ==================== 1. 强制单实例运行 (Single Instance Lock) ====================
 const gotTheLock = app.requestSingleInstanceLock();
@@ -22,10 +18,14 @@ if (!gotTheLock) {
   process.exit(0);
 }
 
-let mainWindow = null;
 let tray = null;
-let isQuitting = false;
+let isShuttingDown = false;
 let backendController = null;
+let localAppUrl = '';
+let dataRootDir = '';
+
+// 阻止无窗口时自动退出，保持后台超轻量级托盘服务常驻
+app.on('window-all-closed', () => {});
 
 function resolveDataRoot() {
   if (!app.isPackaged) {
@@ -64,99 +64,63 @@ function createBuiltinTrayIcon() {
   return nativeImage.createFromBitmap(buf, { width: size, height: size });
 }
 
-app.on('second-instance', () => {
-  if (mainWindow) {
-    if (!mainWindow.isVisible()) mainWindow.show();
-    if (mainWindow.isMinimized()) mainWindow.restore();
-    mainWindow.focus();
+// 安全调用系统默认浏览器打开合同台账页面（若系统未关联默认浏览器则自动复制网址并提示）
+function openInSystemBrowser() {
+  if (localAppUrl && /^http:\/\/127\.0\.0\.1:\d+$/.test(localAppUrl)) {
+    shell.openExternal(localAppUrl).catch(() => {
+      clipboard.writeText(localAppUrl);
+      dialog.showMessageBox({
+        type: 'info',
+        title: '合同台账系统已启动',
+        message: `未检测到系统默认浏览器，已自动将系统网址复制到剪贴板：\n${localAppUrl}\n\n请打开任意浏览器粘贴访问。`
+      });
+    });
+    triggerMainGC();
   }
+}
+
+// 当用户再次双击 .exe 图标时，自动在系统浏览器中唤醒页面
+app.on('second-instance', () => {
+  openInSystemBrowser();
 });
 
-// ==================== 2. 创建主窗口与系统托盘 ====================
-async function createWindowAndTray(port, dataRoot) {
+// ==================== 2. 初始化系统托盘并自动弹出系统浏览器 ====================
+function setupTrayAndLaunchBrowser(port, dataRoot) {
+  localAppUrl = `http://127.0.0.1:${port}`;
+  dataRootDir = dataRoot;
+
   const appIcon = createBuiltinTrayIcon();
-  const localUrl = `http://127.0.0.1:${port}`;
-
-  mainWindow = new BrowserWindow({
-    width: 1520,
-    height: 920,
-    minWidth: 1150,
-    minHeight: 680,
-    title: '企业合同台账管理系统',
-    icon: appIcon,
-    autoHideMenuBar: true,
-    backgroundColor: '#f3f4f6',
-    webPreferences: {
-      nodeIntegration: false,
-      contextIsolation: true,
-      spellcheck: false,
-      enableWebSQL: false,
-      v8CacheOptions: 'none',
-      plugins: true // 启用内置 PDF 扫描件预览插件
-    }
-  });
-
-  // 安全加固：禁止渲染层意外弹出未知外部窗口，防止恶意跳转
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith(localUrl)) {
-      return { action: 'allow' };
-    }
-    return { action: 'deny' };
-  });
-
-  await mainWindow.loadURL(localUrl);
-
-  // 页面首次加载完毕后清理启动期临时缓存并执行一次 GC
-  mainWindow.webContents.once('did-finish-load', () => {
-    setTimeout(() => {
-      if (mainWindow && !mainWindow.isDestroyed()) {
-        mainWindow.webContents.session.clearCache().catch(() => {});
-      }
-      triggerMainGC();
-    }, 1500);
-  });
-
-  // 点击右上角 [X] 时隐藏到系统托盘，并主动释放渲染缓存与 V8 垃圾内存
-  mainWindow.on('close', (event) => {
-    if (!isQuitting) {
-      event.preventDefault();
-      mainWindow.hide();
-      mainWindow.webContents.session.clearCache().catch(() => {});
-      triggerMainGC();
-    }
-  });
-
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
   tray = new Tray(appIcon);
-  tray.setToolTip('企业合同台账管理系统 (单击唤醒窗口)');
+  tray.setToolTip(`企业合同台账管理系统 (纯浏览器极速模式: ${localAppUrl})`);
 
   const contextMenu = Menu.buildFromTemplate([
     {
-      label: '📂 打开合同台账主界面',
+      label: '🌐 在系统浏览器中打开合同台账主界面 (单击托盘图标亦可)',
       click: () => {
-        if (mainWindow) {
-          mainWindow.show();
-          if (mainWindow.isMinimized()) mainWindow.restore();
-          mainWindow.focus();
+        openInSystemBrowser();
+      }
+    },
+    {
+      label: '🗄️ 打开数据与 uploads 扫描件/关联资料目录 (Excel放此目录可点超链接)',
+      click: () => {
+        if (dataRootDir && fs.existsSync(dataRootDir)) {
+          shell.openPath(dataRootDir);
         }
       }
     },
     {
-      label: '🗄️ 打开数据与 uploads 扫描件目录 (Excel放此目录即可点击超链接)',
+      label: `📋 复制本地访问地址 (${localAppUrl})`,
       click: () => {
-        shell.openPath(dataRoot);
-      }
-    },
-    {
-      label: '🌐 在系统浏览器中打开网页版',
-      click: () => {
-        shell.openExternal(localUrl);
+        clipboard.writeText(localAppUrl);
       }
     },
     { type: 'separator' },
+    {
+      label: '🧹 立即执行后台内存垃圾回收 (GC)',
+      click: () => {
+        triggerMainGC();
+      }
+    },
     {
       label: '❌ 彻底退出并释放所有资源',
       click: () => {
@@ -168,39 +132,25 @@ async function createWindowAndTray(port, dataRoot) {
   tray.setContextMenu(contextMenu);
 
   tray.on('click', () => {
-    if (!mainWindow) return;
-    if (mainWindow.isVisible() && !mainWindow.isMinimized()) {
-      mainWindow.focus();
-    } else {
-      mainWindow.show();
-      if (mainWindow.isMinimized()) mainWindow.restore();
-      mainWindow.focus();
-    }
+    openInSystemBrowser();
   });
+  tray.on('double-click', () => {
+    openInSystemBrowser();
+  });
+
+  openInSystemBrowser();
+  setTimeout(() => triggerMainGC(), 1500);
 }
 
 // ==================== 3. 彻底退出与全链路资源销毁 ====================
-let isShuttingDown = false;
-
 async function performFullExit() {
   if (isShuttingDown) return;
   isShuttingDown = true;
-  isQuitting = true;
 
   try {
     if (tray) {
       tray.destroy();
       tray = null;
-    }
-
-    const windows = BrowserWindow.getAllWindows();
-    for (const win of windows) {
-      if (!win.isDestroyed()) {
-        try {
-          await win.webContents.session.clearCache();
-        } catch (e) {}
-        win.destroy();
-      }
     }
 
     if (backendController && typeof backendController.shutdown === 'function') {
@@ -218,10 +168,6 @@ async function performFullExit() {
     }, 200).unref();
   }
 }
-
-app.on('before-quit', () => {
-  isQuitting = true;
-});
 
 app.on('will-quit', (event) => {
   if (!isShuttingDown) {
@@ -252,7 +198,7 @@ app.whenReady().then(async () => {
     const { startServer } = require('./server');
     backendController = await startServer(0, '127.0.0.1');
 
-    await createWindowAndTray(backendController.port, dataRoot);
+    setupTrayAndLaunchBrowser(backendController.port, dataRoot);
   } catch (err) {
     dialog.showErrorBox('系统启动失败', `无法初始化后台服务或数据库：\n${err.message}`);
     performFullExit();
