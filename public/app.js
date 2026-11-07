@@ -24,10 +24,6 @@ function fmtMoney(val) {
 
 // ==================== 前端智能日期与智能税率即时识别 ====================
 
-/**
- * 将用户输入的各种简写日期（如 "2026-6-3", "2026.3.5", "2026/2/4", "6-3", "6.3"）
- * 自动转换为标准 "YYYY-MM-DD"
- */
 function smartParseDateClient(rawVal) {
   if (!rawVal || !String(rawVal).trim()) return '';
   let s = String(rawVal).trim()
@@ -71,7 +67,10 @@ function smartParseDateClient(rawVal) {
 
 function normalizeDateInputElem(inputEl) {
   const val = inputEl.value.trim();
-  if (!val) return;
+  if (!val) {
+    inputEl.style.borderColor = '#d1d5db';
+    return;
+  }
   const parsed = smartParseDateClient(val);
   if (parsed) {
     inputEl.value = parsed;
@@ -84,7 +83,6 @@ function normalizeDateInputElem(inputEl) {
 function onSignDateBlur(inputEl) {
   normalizeDateInputElem(inputEl);
   syncStartDateDefault();
-  // 新增模式下，若签订日期跨年且编号包含日期段，自动同步刷新日期段
   const formId = document.getElementById('form_id').value;
   if (!formId && !isFreeContractNoMode) {
     fillAutoContractNo(inputEl.value);
@@ -101,11 +99,6 @@ function pickDateToInput(datePickerEl, targetInputId, isSignDate) {
   }
 }
 
-/**
- * 智能税率格式化：
- * "6" -> "6%"
- * "6,9" / "6，9" / "6%,9%" -> "*6%,9%"
- */
 function smartFormatTaxRateClient(rawVal) {
   if (!rawVal || !String(rawVal).trim()) return '';
   let str = String(rawVal).trim()
@@ -129,7 +122,6 @@ function normalizeTaxInputElem(inputEl) {
   inputEl.value = smartFormatTaxRateClient(inputEl.value);
 }
 
-// 到期日由绿到红平滑光谱颜色计算
 function renderDueAlertBadge(dateStr, contractStatus = '生效中', prefixLabel = '') {
   if (!dateStr || !String(dateStr).trim()) return '<span style="color:#9ca3af;">-</span>';
   if (contractStatus === '已终止') {
@@ -251,7 +243,6 @@ async function saveNoRuleForm(e) {
   await loadContracts();
 }
 
-// 同步分段灰显输入框的值到隐藏的 f_contract_no
 function syncSegmentedContractNo() {
   if (isFreeContractNoMode) return;
   const prefix = document.getElementById('seg_prefix').innerText;
@@ -295,7 +286,8 @@ async function fillAutoContractNo(signDateVal = '') {
       const p = result.parts;
       document.getElementById('seg_prefix').innerText = p.prefix || '';
       document.getElementById('seg_date').innerText = p.date_seg || '';
-      document.getElementById('seg_middle_input').value = p.middle_default || '';
+      const middleEl = document.getElementById('seg_middle_input');
+      middleEl.value = p.middle_default || '';
       document.getElementById('seg_suffix').innerText = p.suffix || '';
       document.getElementById('f_contract_no').value = result.next_no;
       document.getElementById('display_no_rule').innerText = result.next_no;
@@ -303,7 +295,7 @@ async function fillAutoContractNo(signDateVal = '') {
   } catch (e) {}
 }
 
-// ==================== 默认我方签约主体管理（使用自定义模态框，彻底解决 prompt 无反应） ====================
+// ==================== 默认我方签约主体管理 ====================
 async function loadDefaultOurEntity() {
   try {
     const res = await fetch('/api/settings/our-entity');
@@ -342,7 +334,6 @@ async function saveOurEntityForm(e) {
   document.getElementById('display_default_entity').innerText = defaultOurEntity;
   closeOurEntityModal();
 
-  // 若当前正处于新增合同弹窗，同步更新表单内的我方主体
   const formModal = document.getElementById('form_modal');
   const formId = document.getElementById('form_id').value;
   if (!formModal.classList.contains('hidden') && !formId) {
@@ -350,7 +341,6 @@ async function saveOurEntityForm(e) {
   }
 }
 
-// 解析单条合同的多方履约行列表
 function parseContractParties(c) {
   let parties = [];
   try { parties = JSON.parse(c.counterparties_json || '[]'); } catch (e) {}
@@ -413,7 +403,6 @@ function populateYearFilterOptions(yearsFromDb = []) {
   if (currentVal) select.value = currentVal;
 }
 
-// 加载台账列表（含序号列、多方分行合并、按合同为单位隔行换色）
 async function loadContracts() {
   const params = getFilterParams();
   const res = await fetch(`/api/contracts?${params.toString()}`);
@@ -479,7 +468,6 @@ async function loadContracts() {
             <td class="text-center" rowspan="${spanCount}">${renderDueAlertBadge(c.expiry_date, c.status)}</td>
             <td class="text-center" rowspan="${spanCount}"><span class="badge badge-${escapeHtml(c.status)}">${escapeHtml(c.status)}</span></td>
           ` : ''}
-          <!-- 各对方单位独立履约列 -->
           <td class="summary-cell" title="${escapeHtml(p.item_summary || '')}">${escapeHtml(p.item_summary || '-')}</td>
           <td><strong>${escapeHtml(p.company_name)}</strong></td>
           <td>${escapeHtml(p.credit_code)}</td>
@@ -523,7 +511,7 @@ function resetFilters() {
   document.getElementById('filter_date_from').value = '';
   document.getElementById('filter_date_to').value = '';
   document.getElementById('sort_by').value = 'seq_no';
-  document.getElementById('sort_order').value = 'DESC';
+  document.getElementById('sort_order').value = 'ASC';
   loadContracts();
 }
 
@@ -722,7 +710,6 @@ function collectCounterpartiesFromDOM() {
   });
 }
 
-// 打开新增 / 编辑弹窗
 async function openFormModal(id = null) {
   const form = document.getElementById('contract_form');
   form.reset();
@@ -735,7 +722,6 @@ async function openFormModal(id = null) {
   startDateInput.dataset.autoSync = id ? 'false' : 'true';
 
   if (id) {
-    // 编辑已录入合同时：默认给完整自由输入的权限
     setContractNoEditorMode(true);
     const c = currentContracts.find(item => item.id === id);
     if (c) {
@@ -752,7 +738,6 @@ async function openFormModal(id = null) {
       parties.forEach(p => addCounterpartyCard(p));
     }
   } else {
-    // 新增合同时：默认启用“灰底锁定固定段 + 仅补全中间项”模式
     setContractNoEditorMode(false);
     const todayStr = new Date().toISOString().slice(0, 10);
     document.getElementById('f_our_entity').value = defaultOurEntity;
@@ -776,7 +761,6 @@ async function submitContractForm(e) {
     syncSegmentedContractNo();
   }
 
-  // 提交前统一触发一次日期规范化校验
   const signEl = document.getElementById('f_sign_date');
   const startEl = document.getElementById('f_start_date');
   const expiryEl = document.getElementById('f_expiry_date');
