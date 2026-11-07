@@ -8,7 +8,7 @@ const testDataRoot = path.join(__dirname, '.test_data_ci');
 process.env.DATA_ROOT = testDataRoot;
 process.env.DB_PATH = path.join(testDataRoot, 'test_ci.sqlite');
 
-const { startServer } = require('./server');
+const { startServer, sweepOrphanUploads } = require('./server');
 
 function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
   return new Promise((resolve, reject) => {
@@ -37,7 +37,7 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
   try {
     controller = await startServer(0, '127.0.0.1');
     const port = controller.port;
-    console.log(`🧪 执行打包前全功能冒烟测试 (Port: ${port})...`);
+    console.log(`🧪 执行打包前全功能与垃圾回收冒烟测试 (Port: ${port})...`);
 
     // 1. 验证默认我方主体修改接口
     const entityRes = await requestJson(port, '/api/settings/our-entity', 'PUT', {
@@ -55,7 +55,7 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
     });
     assert.strictEqual(ruleRes.success, true, '保存合同编号规则应成功');
 
-    // 3. 故意先录入较晚日期的合同，再录入较早日期的合同，检验是否自动按 001、002 正序排列
+    // 3. 验证先录入晚签合同、再录入早签合同，系统自动按 001、002 正序重编
     const c2 = await requestJson(port, '/api/contracts', 'POST', {
       contract_no: 'ZN-2026-002-CG',
       contract_name: '第二份合同(较晚签订)',
@@ -99,11 +99,14 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
     });
     assert.strictEqual(c1.success, true);
 
-    // 4. 验证导出 Excel 二进制流：
-    //    - 第1行(r=0)为黄色目录结构说明横幅
-    //    - 第2行(r=1)为表头
-    //    - 第3行(r=2)必须是 2026-001（正序排第一），第4行(r=3)必须是 2026-002（正序排第二）
-    //    - 日期单元格必须是纯整数 (Number.isInteger)，不含任何时分秒小数
+    // 4. 验证孤儿垃圾文件清扫机制 (sweepOrphanUploads)
+    const orphanFile = path.join(testDataRoot, 'uploads', 'orphan_garbage_file.pdf');
+    fs.writeFileSync(orphanFile, 'dummy orphan content');
+    assert.strictEqual(fs.existsSync(orphanFile), true);
+    sweepOrphanUploads();
+    assert.strictEqual(fs.existsSync(orphanFile), false, '未被数据库引用的孤儿扫描件应被自动清扫');
+
+    // 5. 验证导出 Excel 二进制流：正序排列 + 纯整数日期无时分秒
     const excelBuffer = await new Promise((resolve, reject) => {
       http.get(`http://127.0.0.1:${port}/api/contracts/export?scope=all`, res => {
         assert.strictEqual(res.statusCode, 200, '导出状态码应为 200');
@@ -121,11 +124,11 @@ function requestJson(port, reqPath, method = 'GET', payloadObj = null) {
     assert.strictEqual(Number.isInteger(ws['F3'].v), true, '导出签订日期序列号必须为纯整数（绝不含时分秒小数）');
     assert.strictEqual(Number.isInteger(ws['AB4'].v), true, '导出质保金到期日序列号必须为纯整数（绝不含时分秒小数）');
 
-    // 5. 验证彻底释放端口与 SQLite 文件句柄
+    // 6. 验证彻底释放端口与 SQLite 文件句柄
     await controller.shutdown();
     controller = null;
     fs.rmSync(testDataRoot, { recursive: true, force: true });
-    console.log('✅ 纯年月日无时分秒、扫描件相对路径超链接、按001/002正序导出与资源释放测试全部通过！');
+    console.log('✅ 稳定性、安全性、孤儿文件清扫、纯年月日导出与资源释放测试全部通过！');
     process.exit(0);
   } catch (err) {
     console.error('❌ 冒烟测试失败:', err);
