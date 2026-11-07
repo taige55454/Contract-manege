@@ -6,6 +6,8 @@ const path = require('path');
 const fs = require('fs');
 
 const app = express();
+app.disable('x-powered-by');
+app.set('etag', false);
 
 // 1. 解析可读写的数据根目录
 const DATA_ROOT = process.env.DATA_ROOT || __dirname;
@@ -26,24 +28,26 @@ function cleanTmpDir() {
 cleanTmpDir();
 
 // 2. 中间件配置
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ extended: true, limit: '5mb' }));
+app.use(express.static(path.join(__dirname, 'public'), { etag: false, maxAge: 0 }));
 
 app.use('/uploads', express.static(UPLOAD_DIR, {
+  etag: false,
   setHeaders: (res) => {
     res.setHeader('Content-Disposition', 'inline');
     res.setHeader('Cache-Control', 'no-store');
   }
 }));
 
-// 3. 初始化 SQLite 数据库（配置低内存高吞吐 PRAGMA）
+// 3. 初始化 SQLite 数据库（配置极低内存占用 PRAGMA）
 const dbPath = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
 const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('temp_store = MEMORY');
-db.pragma('cache_size = -8000'); // 限制缓存约 8MB，兼顾极速查询与低内存占用
+db.pragma('cache_size = -4000'); // 限制页缓存为 4MB，降低常驻内存
+db.pragma('mmap_size = 0');      // 关闭 mmap 映射，防止操作系统计入进程私有工作集内存
 db.pragma('foreign_keys = ON');
 
 const DEFAULT_NO_RULE = JSON.stringify({
@@ -131,7 +135,6 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_party_contract_id ON contract_parties(contract_id);
 `);
 
-// 自动平滑升级旧版数据库表结构
 function ensureSchemaUpgraded() {
   const contractCols = db.prepare(`PRAGMA table_info(contracts)`).all().map(c => c.name);
   const addContractColIfMissing = (colName, colDef) => {
@@ -167,11 +170,6 @@ ensureSchemaUpgraded();
 
 // ==================== 智能日期、智能税率与按年断号重编核心函数 ====================
 
-/**
- * 灵活日期解析：
- * 支持 "2026-06-03", "2026-6-3", "2026.3.5", "2026/2/4", "2026年3月5日", "20260603"
- * 支持省略年份自动补全当年："6-3", "6.3", "6/3", "6月3日" -> "{当前年}-06-03"
- */
 function smartParseDate(rawInput, fieldLabel = '日期', isRequired = false) {
   if (rawInput === undefined || rawInput === null || String(rawInput).trim() === '') {
     if (isRequired) throw new Error(`${fieldLabel}不能为空`);
@@ -187,28 +185,21 @@ function smartParseDate(rawInput, fieldLabel = '日期', isRequired = false) {
   const currentYear = new Date().getFullYear();
   let year, month, day;
 
-  // 1. 纯 8 位数字：20260603
   if (/^\d{8}$/.test(s)) {
     year = parseInt(s.slice(0, 4), 10);
     month = parseInt(s.slice(4, 6), 10);
     day = parseInt(s.slice(6, 8), 10);
-  }
-  // 2. 完整年月日：2026-6-3 或 2026-06-03
-  else if (/^(\d{4})-(\d{1,2})-(\d{1,2})$/.test(s)) {
+  } else if (/^(\d{4})-(\d{1,2})-(\d{1,2})$/.test(s)) {
     const m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
     year = parseInt(m[1], 10);
     month = parseInt(m[2], 10);
     day = parseInt(m[3], 10);
-  }
-  // 3. 两位简写年份：26-6-3 -> 2026-06-03
-  else if (/^(\d{2})-(\d{1,2})-(\d{1,2})$/.test(s)) {
+  } else if (/^(\d{2})-(\d{1,2})-(\d{1,2})$/.test(s)) {
     const m = s.match(/^(\d{2})-(\d{1,2})-(\d{1,2})$/);
     year = 2000 + parseInt(m[1], 10);
     month = parseInt(m[2], 10);
     day = parseInt(m[3], 10);
-  }
-  // 4. 缺省年份（如 6-3、6.3、6/3）：自动默认为当年补全
-  else if (/^(\d{1,2})-(\d{1,2})$/.test(s)) {
+  } else if (/^(\d{1,2})-(\d{1,2})$/.test(s)) {
     const m = s.match(/^(\d{1,2})-(\d{1,2})$/);
     year = currentYear;
     month = parseInt(m[1], 10);
@@ -229,12 +220,6 @@ function smartParseDate(rawInput, fieldLabel = '日期', isRequired = false) {
   return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
 }
 
-/**
- * 智能税率解析与规范化：
- * - 输入 "6" -> "6%"
- * - 输入 "6,9" 或 "6，9" 或 "6%, 9%" 或 "6%、9%" -> "*6%,9%"
- * - 输入 "*6,13" -> "*6%,13%"
- */
 function validateAndNormalizeTaxRate(taxRateRaw) {
   if (taxRateRaw === undefined || taxRateRaw === null || !String(taxRateRaw).trim()) return '';
   let str = String(taxRateRaw).trim()
@@ -253,9 +238,6 @@ function validateAndNormalizeTaxRate(taxRateRaw) {
     if (/^\d+(\.\d+)?$/.test(part)) {
       return `${part}%`;
     }
-    if (/^\d+(\.\d+)?%$/.test(part)) {
-      return part;
-    }
     return part;
   });
 
@@ -265,7 +247,6 @@ function validateAndNormalizeTaxRate(taxRateRaw) {
   return formattedParts[0];
 }
 
-// 获取合同编号与序号规则
 function getContractNoRule() {
   const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'contract_no_rule'`).get();
   let parsed = {};
@@ -281,15 +262,10 @@ function getContractNoRule() {
       ? Math.min(8, Math.max(0, Number(parsed.seq_digits)))
       : 3,
     suffix: typeof parsed.suffix === 'string' ? parsed.suffix : '',
-    reset_yearly: parsed.reset_yearly !== false // 默认开启按年断号重编
+    reset_yearly: parsed.reset_yearly !== false
   };
 }
 
-/**
- * 重算全表序号（支持按年断号重编 或 全表连续编号）：
- * - 按年断号重编（默认）：按 sign_date 所属年份分组，组内按 sign_date ASC, id ASC 从 1 递增，生成如 2026-001, 2026-002
- * - 不按年断号：全表按 sign_date ASC, id ASC 从 1 递增，生成 001, 002
- */
 const updateSeqStmt = db.prepare(`UPDATE contracts SET seq_year = ?, seq_no = ?, seq_label = ? WHERE id = ?`);
 const recalculateAllSequences = db.transaction(() => {
   const rule = getContractNoRule();
@@ -341,7 +317,6 @@ function formatDateSegment(datePartRule, baseDateStr = '') {
   }
 }
 
-// 计算下一个合同编号及分段结构（供前端灰色锁定展示 + 中间补全）
 function generateNextContractNoParts(customRule = null, signDateStr = '') {
   const rule = customRule || getContractNoRule();
   const dateSeg = formatDateSegment(rule.date_part, signDateStr);
@@ -446,7 +421,6 @@ function parseNullableFloat(val) {
   return Number.isFinite(num) ? num : null;
 }
 
-// 解析并校验多方独立履约数据（包含灵活日期与智能税率转换）
 function parseCounterparties(body) {
   let list = [];
   if (body.counterparties_json) {
@@ -546,8 +520,7 @@ const upload = multer({
   }
 });
 
-// 支持丰富筛选条件：关键词、相对方、类型、状态、签订年份、指定时间段（签订日/开始日/到期日/保证金/质保金）
-function buildQuery(queryParams) {
+function buildQuery(queryParams, defaultSortOrder = 'ASC') {
   const {
     contract_no, counterparty, contract_type, status,
     sign_year, date_field, date_from, date_to,
@@ -612,12 +585,14 @@ function buildQuery(queryParams) {
     'perf_bond_return_date', 'warranty_bond_expiry_date', 'created_at'
   ];
   const sortField = allowedSortFields.includes(sort_by) ? sort_by : 'seq_no';
-  const order = (sort_order && sort_order.toUpperCase() === 'ASC') ? 'ASC' : 'DESC';
+  const order = sort_order
+    ? (sort_order.toUpperCase() === 'DESC' ? 'DESC' : 'ASC')
+    : defaultSortOrder;
 
   if (sortField === 'seq_no') {
     sql += ` ORDER BY seq_year ${order}, seq_no ${order}, id ${order}`;
   } else {
-    sql += ` ORDER BY CASE WHEN ${sortField} = '' OR ${sortField} IS NULL THEN 1 ELSE 0 END, ${sortField} ${order}, id DESC`;
+    sql += ` ORDER BY CASE WHEN ${sortField} = '' OR ${sortField} IS NULL THEN 1 ELSE 0 END, ${sortField} ${order}, seq_year ASC, seq_no ASC`;
   }
 
   return { sql, params };
@@ -639,15 +614,12 @@ function syncContractParties(contractId, partiesList) {
     syncPartiesStmt.run(
       contractId, p.party_index, p.company_name, p.credit_code, p.contact_person, p.contact_phone,
       p.bank_account_name, p.bank_account_no, p.bank_name, p.bank_code,
-      itemOrEmpty(p.item_summary), p.amount, p.amount_excl_tax, p.tax_rate, p.invoice_type, p.currency,
+      p.item_summary ? String(p.item_summary).trim() : '',
+      p.amount, p.amount_excl_tax, p.tax_rate, p.invoice_type, p.currency,
       p.perf_bond_amount, p.perf_bond_pay_date, p.perf_bond_return_date,
       p.warranty_bond_amount, p.warranty_bond_expiry_date, p.remark
     );
   }
-}
-
-function itemOrEmpty(v) {
-  return v ? String(v).trim() : '';
 }
 
 function getContractPartiesList(row) {
@@ -681,9 +653,23 @@ function getContractPartiesList(row) {
   return parties;
 }
 
+/**
+ * 将 "YYYY-MM-DD" 转换为 Excel 原生纯整数日期序列号（不含任何小数位，彻底根除 12:00:43 等时分秒显示）
+ * Excel 1900 日期系统基准：1970-01-01 对应序列号 25569
+ */
+function dateStrToExcelSerialInt(dateStr) {
+  if (!dateStr || !String(dateStr).trim()) return null;
+  const m = String(dateStr).trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mo = Number(m[2]);
+  const d = Number(m[3]);
+  const utcMs = Date.UTC(y, mo - 1, d);
+  return Math.round(utcMs / 86400000) + 25569;
+}
+
 // ==================== API 路由 ====================
 
-// [GET/PUT] 默认我方签约主体设置
 app.get('/api/settings/our-entity', (req, res) => {
   const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
   res.json({ success: true, default_our_entity: row ? row.value : '' });
@@ -696,7 +682,6 @@ app.put('/api/settings/our-entity', (req, res) => {
   res.json({ success: true, default_our_entity: val, message: '默认我方主体已更新' });
 });
 
-// [GET/PUT] 合同编号固定前缀/后缀与按年断号重编规则
 app.get('/api/settings/contract-no-rule', (req, res) => {
   const rule = getContractNoRule();
   const parts = generateNextContractNoParts(rule);
@@ -723,17 +708,15 @@ app.put('/api/settings/contract-no-rule', (req, res) => {
   res.json({ success: true, rule: newRule, sample_next_no: parts.full_no, parts, message: '编号与按年重编规则已保存' });
 });
 
-// [GET] 获取下一个自动生成的合同编号及灰显分段信息
 app.get('/api/contracts/next-no', (req, res) => {
   const rule = getContractNoRule();
   const parts = generateNextContractNoParts(rule, req.query.sign_date || '');
   res.json({ success: true, next_no: parts.full_no, parts, rule });
 });
 
-// [GET] 获取合同台账列表及存在的所有签订年份（供前端年份筛选下拉框使用）
 app.get('/api/contracts', (req, res) => {
   try {
-    const { sql, params } = buildQuery(req.query);
+    const { sql, params } = buildQuery(req.query, 'ASC');
     const rows = db.prepare(sql).all(...params);
     const yearsRows = db.prepare(`SELECT DISTINCT seq_year FROM contracts WHERE seq_year IS NOT NULL ORDER BY seq_year DESC`).all();
     const years = yearsRows.map(r => r.seq_year);
@@ -744,57 +727,58 @@ app.get('/api/contracts', (req, res) => {
 });
 
 // ==================== [GET] 导出深度美化的 Excel 台账 ====================
+// 1. 强制按照序号 001、002 往下正序排列
+// 2. 日期采用纯整数 Excel Serial Number (yyyy-mm-dd)，彻底消除 12:00:43 时分秒
+// 3. 最后一列改为相对路径超链接 (uploads/xxx.pdf)，并在第1行生成醒目的目录结构说明横幅
 app.get('/api/contracts/export', (req, res) => {
   try {
-    const queryObj = req.query.scope === 'all'
-      ? { sort_by: req.query.sort_by, sort_order: req.query.sort_order }
-      : req.query;
+    // 导出时强制按年度序号 001、002 往下正序排列 (ASC)
+    const exportQuery = req.query.scope === 'all'
+      ? { sort_by: 'seq_no', sort_order: 'ASC' }
+      : { ...req.query, sort_by: 'seq_no', sort_order: 'ASC' };
 
-    const { sql, params } = buildQuery(queryObj);
+    const { sql, params } = buildQuery(exportQuery, 'ASC');
     const rows = db.prepare(sql).all(...params);
 
-    // 共 30 列（索引 0~29）：
-    // 索引 0~8 为合同公共列（跨行合并），索引 9~28 为各相对方独立履约列，索引 29 为扫描件归档名（跨行合并）
     const headers = [
       '序号', '合同编号', '合同名称', '合同类型', '我方签约主体', '签订日期', '开始履约日', '合同到期日', '合同状态',
       '履约摘要(分项)', '对方单位名称', '统一信用代码', '联系人', '联系方式', '收款账户名称', '收款账号', '开户行', '开户行号',
       '含税金额', '不含税价', '税率', '发票类型', '币种',
       '履约保证金', '保证金缴纳日', '保证金应退日', '质保金金额', '质保金到期日', '分项备注',
-      '扫描件归档名'
+      '合同扫描件(相对路径超链接)'
     ];
 
-    // 精确定义每一列的属性：水平对齐方式、数据类型、列宽
     const colSpecs = [
       { wch: 12, align: 'center', type: 'text' },   // 0: 序号
       { wch: 20, align: 'center', type: 'text' },   // 1: 合同编号
       { wch: 24, align: 'left',   type: 'text' },   // 2: 合同名称
       { wch: 10, align: 'center', type: 'text' },   // 3: 合同类型
       { wch: 24, align: 'left',   type: 'text' },   // 4: 我方签约主体
-      { wch: 13, align: 'center', type: 'date' },   // 5: 签订日期
-      { wch: 13, align: 'center', type: 'date' },   // 6: 开始履约日
-      { wch: 13, align: 'center', type: 'date' },   // 7: 合同到期日
+      { wch: 13, align: 'center', type: 'date' },   // 5: 签订日期 (纯年月日)
+      { wch: 13, align: 'center', type: 'date' },   // 6: 开始履约日 (纯年月日)
+      { wch: 13, align: 'center', type: 'date' },   // 7: 合同到期日 (纯年月日)
       { wch: 10, align: 'center', type: 'text' },   // 8: 合同状态
       { wch: 30, align: 'left',   type: 'text' },   // 9: 履约摘要(分项)
       { wch: 24, align: 'left',   type: 'text' },   // 10: 对方单位名称
-      { wch: 22, align: 'center', type: 'code' },   // 11: 统一信用代码 (强制防科学计数)
+      { wch: 22, align: 'center', type: 'code' },   // 11: 统一信用代码 (防科学计数)
       { wch: 11, align: 'center', type: 'text' },   // 12: 联系人
-      { wch: 15, align: 'center', type: 'code' },   // 13: 联系方式 (强制文本)
+      { wch: 15, align: 'center', type: 'code' },   // 13: 联系方式 (防科学计数)
       { wch: 24, align: 'left',   type: 'text' },   // 14: 收款账户名称
-      { wch: 24, align: 'center', type: 'code' },   // 15: 收款账号 (强制防科学计数)
+      { wch: 24, align: 'center', type: 'code' },   // 15: 收款账号 (防科学计数)
       { wch: 22, align: 'left',   type: 'text' },   // 16: 开户行
-      { wch: 16, align: 'center', type: 'code' },   // 17: 开户行号 (强制防科学计数)
+      { wch: 16, align: 'center', type: 'code' },   // 17: 开户行号 (防科学计数)
       { wch: 16, align: 'right',  type: 'money' },  // 18: 含税金额 (会计格式)
       { wch: 16, align: 'right',  type: 'money' },  // 19: 不含税价 (会计格式)
       { wch: 12, align: 'center', type: 'text' },   // 20: 税率
       { wch: 16, align: 'center', type: 'text' },   // 21: 发票类型
       { wch: 8,  align: 'center', type: 'text' },   // 22: 币种
       { wch: 15, align: 'right',  type: 'money' },  // 23: 履约保证金 (会计格式)
-      { wch: 13, align: 'center', type: 'date' },   // 24: 保证金缴纳日
-      { wch: 13, align: 'center', type: 'date' },   // 25: 保证金应退日
+      { wch: 13, align: 'center', type: 'date' },   // 24: 保证金缴纳日 (纯年月日)
+      { wch: 13, align: 'center', type: 'date' },   // 25: 保证金应退日 (纯年月日)
       { wch: 15, align: 'right',  type: 'money' },  // 26: 质保金金额 (会计格式)
-      { wch: 13, align: 'center', type: 'date' },   // 27: 质保金到期日
+      { wch: 13, align: 'center', type: 'date' },   // 27: 质保金到期日 (纯年月日)
       { wch: 22, align: 'left',   type: 'text' },   // 28: 分项备注
-      { wch: 32, align: 'left',   type: 'text' }    // 29: 扫描件归档名
+      { wch: 36, align: 'center', type: 'link' }    // 29: 扫描件相对路径超链接
     ];
 
     const thinBorder = {
@@ -804,7 +788,20 @@ app.get('/api/contracts/export', (req, res) => {
       right:  { style: 'thin', color: { rgb: 'CBD5E1' } }
     };
 
-    // 构建表头行（深蓝商务底色 + 白色加粗居中文字）
+    // 第 0 行（Excel 第1行）：醒目的扫描件超链接必要目录结构说明横幅
+    const bannerText = '💡 【扫描件超链接使用说明】最后一列为相对路径超链接（指向 ./uploads/ 文件夹）。请将本 Excel 表放置在与【uploads】文件夹同级的目录下（例如直接放入程序数据目录 ContractData 下，或将本表与 uploads 文件夹一起打包拷贝），即可直接点击最后一列蓝色超链接打开合同扫描件！';
+    const bannerRow = headers.map((_, idx) => ({
+      v: idx === 0 ? bannerText : '',
+      t: 's',
+      s: {
+        font: { name: 'Microsoft YaHei', sz: 10, bold: true, color: { rgb: '92400E' } },
+        fill: { fgColor: { rgb: 'FEF3C7' } },
+        alignment: { horizontal: 'left', vertical: 'center', wrapText: true },
+        border: thinBorder
+      }
+    }));
+
+    // 第 1 行（Excel 第2行）：深蓝商务表头
     const headerRow = headers.map(h => ({
       v: h,
       t: 's',
@@ -816,13 +813,15 @@ app.get('/api/contracts/export', (req, res) => {
       }
     }));
 
-    const aoa = [headerRow];
-    const merges = [];
+    const aoa = [bannerRow, headerRow];
+    // 合并第 0 行说明横幅（跨全部 30 列：c:0 -> c:29）
+    const merges = [
+      { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
+    ];
     const mergeColIndices = [0, 1, 2, 3, 4, 5, 6, 7, 8, 29];
-    const rowHeights = [{ hpt: 28 }];
+    const rowHeights = [{ hpt: 26 }, { hpt: 28 }];
 
-    // 辅助：构造带完整样式与精准类型的单元格对象
-    function buildStyledCell(rawVal, colIdx, bgRgb) {
+    function buildStyledCell(rawVal, colIdx, bgRgb, linkMeta = null) {
       const spec = colSpecs[colIdx];
       const baseStyle = {
         font: { name: 'Microsoft YaHei', sz: 10, color: { rgb: '1F2937' } },
@@ -831,7 +830,30 @@ app.get('/api/contracts/export', (req, res) => {
         border: thinBorder
       };
 
-      // 1. 长数字编号/账号/信用代码：强制文本 '@'，严防科学计数法
+      // 1. 扫描件相对路径超链接列
+      if (spec.type === 'link') {
+        if (linkMeta && linkMeta.relPath) {
+          baseStyle.font = {
+            name: 'Microsoft YaHei',
+            sz: 10,
+            color: { rgb: '2563EB' },
+            underline: true
+          };
+          return {
+            v: linkMeta.displayText,
+            t: 's',
+            l: {
+              Target: linkMeta.relPath,
+              Tooltip: `点击打开扫描件: ${linkMeta.relPath}（需将本Excel置于 uploads 文件夹同级目录）`
+            },
+            s: baseStyle
+          };
+        }
+        baseStyle.font.color = { rgb: '9CA3AF' };
+        return { v: '未上传', t: 's', s: baseStyle };
+      }
+
+      // 2. 长数字编号/账号/信用代码：强制文本 '@'，严防科学计数法
       if (spec.type === 'code') {
         baseStyle.numFmt = '@';
         return {
@@ -841,7 +863,7 @@ app.get('/api/contracts/export', (req, res) => {
         };
       }
 
-      // 2. 金额列：会计数字格式 #,##0.00
+      // 3. 金额列：会计数字格式 #,##0.00
       if (spec.type === 'money') {
         if (rawVal === null || rawVal === undefined || rawVal === '') {
           return { v: '', t: 's', s: baseStyle };
@@ -854,22 +876,20 @@ app.get('/api/contracts/export', (req, res) => {
         return { v: String(rawVal), t: 's', s: baseStyle };
       }
 
-      // 3. 日期列：转换为 Excel 真实日期对象并指定 yyyy-mm-dd 格式
+      // 4. 日期列：使用纯整数 Excel 日期序列号 (t: 'n', numFmt: 'yyyy-mm-dd')，彻底杜绝时分秒
       if (spec.type === 'date') {
         if (!rawVal || !String(rawVal).trim()) {
           return { v: '', t: 's', s: baseStyle };
         }
-        const dStr = String(rawVal).trim();
-        const m = dStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-        if (m) {
-          const dObj = new Date(Number(m[1]), Number(m[2]) - 1, Number(m[3]), 12, 0, 0);
+        const serialInt = dateStrToExcelSerialInt(rawVal);
+        if (serialInt !== null) {
           baseStyle.numFmt = 'yyyy-mm-dd';
-          return { v: dObj, t: 'd', s: baseStyle };
+          return { v: serialInt, t: 'n', s: baseStyle };
         }
-        return { v: dStr, t: 's', s: baseStyle };
+        return { v: String(rawVal).trim(), t: 's', s: baseStyle };
       }
 
-      // 4. 普通文本列
+      // 5. 普通文本列
       return {
         v: rawVal !== null && rawVal !== undefined ? String(rawVal) : '',
         t: 's',
@@ -877,13 +897,20 @@ app.get('/api/contracts/export', (req, res) => {
       };
     }
 
-    let currentRowIdx = 1;
+    // 数据行从索引 2 开始（因为 0 是横幅说明，1 是表头）
+    let currentRowIdx = 2;
 
-    // 以“整份合同”为单位进行隔行换色：偶数合同纯白 FFFFFF，奇数合同淡蓝灰 F1F5F9
     rows.forEach((row, contractIndex) => {
       const parties = getContractPartiesList(row);
       const startRow = currentRowIdx;
       const bgRgb = (contractIndex % 2 === 1) ? 'F1F5F9' : 'FFFFFF';
+
+      const linkMeta = row.attachment_path
+        ? {
+            relPath: row.attachment_path.replace(/\\/g, '/'),
+            displayText: `📎 点击打开扫描件 (${row.attachment_original_name || path.basename(row.attachment_path)})`
+          }
+        : null;
 
       for (const p of parties) {
         const rawValues = [
@@ -916,10 +943,10 @@ app.get('/api/contracts/export', (req, res) => {
           p.warranty_bond_amount !== null && p.warranty_bond_amount !== undefined ? p.warranty_bond_amount : '',
           p.warranty_bond_expiry_date || '',
           p.remark || row.remark || '',
-          row.attachment_original_name || '未上传'
+          '' // 第 29 列通过 linkMeta 专门渲染超链接
         ];
 
-        const styledRow = rawValues.map((val, colIdx) => buildStyledCell(val, colIdx, bgRgb));
+        const styledRow = rawValues.map((val, colIdx) => buildStyledCell(val, colIdx, bgRgb, colIdx === 29 ? linkMeta : null));
         aoa.push(styledRow);
         rowHeights.push({ hpt: 22 });
         currentRowIdx++;
@@ -936,7 +963,7 @@ app.get('/api/contracts/export', (req, res) => {
       }
     });
 
-    const worksheet = XLSX.utils.aoa_to_sheet(aoa, { cellDates: true });
+    const worksheet = XLSX.utils.aoa_to_sheet(aoa);
     worksheet['!merges'] = merges;
     worksheet['!cols'] = colSpecs.map(c => ({ wch: c.wch }));
     worksheet['!rows'] = rowHeights;
@@ -955,14 +982,12 @@ app.get('/api/contracts/export', (req, res) => {
   }
 });
 
-// [GET] 获取单条合同详情
 app.get('/api/contracts/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该合同记录' });
   res.json({ success: true, data: row });
 });
 
-// [POST] 新增合同
 app.post('/api/contracts', upload.single('attachment'), (req, res) => {
   let archivedFile = null;
   try {
@@ -1039,7 +1064,6 @@ app.post('/api/contracts', upload.single('attachment'), (req, res) => {
   }
 });
 
-// [PUT] 编辑合同
 app.put('/api/contracts/:id', upload.single('attachment'), (req, res) => {
   let newlyArchivedFile = null;
   try {
