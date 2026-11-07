@@ -1,6 +1,17 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Microsoft YaHei", sans-serif; background: #f3f4f6; color: #1f2937; font-size: 13px; }
 
+/* 内网访问口令全屏锁屏遮罩 */
+.auth-overlay { position: fixed; inset: 0; background: linear-gradient(135deg, #0f172a 0%, #1e3a8a 100%); display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 20px; }
+.auth-card { background: #ffffff; width: 420px; max-width: 95vw; border-radius: 10px; padding: 28px 26px; box-shadow: 0 25px 50px -12px rgba(0,0,0,0.45); text-align: center; }
+.auth-icon { font-size: 42px; margin-bottom: 10px; }
+.auth-card h2 { font-size: 19px; font-weight: 700; color: #111827; margin-bottom: 8px; }
+.auth-desc { font-size: 13px; color: #4b5563; line-height: 1.55; margin-bottom: 18px; text-align: left; }
+.auth-input { width: 100%; padding: 10px 14px; font-size: 15px; border: 2px solid #cbd5e1; border-radius: 6px; margin-bottom: 12px; text-align: center; letter-spacing: 2px; font-weight: 600; outline: none; }
+.auth-input:focus { border-color: #2563eb; background: #eff6ff; }
+.auth-error { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; padding: 8px 10px; border-radius: 5px; font-size: 12.5px; margin-bottom: 12px; text-align: left; }
+.auth-submit-btn { width: 100%; padding: 10px; font-size: 14px; font-weight: 600; }
+
 .app-header { background: #ffffff; padding: 12px 24px; border-bottom: 1px solid #e5e7eb; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
 .app-header h1 { font-size: 18px; font-weight: 600; color: #111827; }
 .header-sub { font-size: 12px; color: #6b7280; margin-top: 2px; }
