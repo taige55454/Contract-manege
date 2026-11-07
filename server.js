@@ -1,9 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.4.1 生产终极完整版)
- * 已内置：
- * 1. 动态状态解耦引擎（支持自定义“履行中/已超期”等同义词自动流转 + 预设词库防漏保底）
- * 2. 东八区本地时区零点精准判断（getLocalTodayStr）
- * 3. 夹心式 4 段编号 + 零空洞流水号 + 顺序可逆双向互锁 + 三大资料库归档 + 双子表 Excel 导出
+ * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.4.2 终极无瑕生产版)
  */
 
 const express = require('express');
@@ -57,7 +53,6 @@ function triggerSafeGC() {
   }
 }
 
-// 获取本地时区（北京时间）的 YYYY-MM-DD 字符串
 function getLocalTodayStr() {
   const d = new Date();
   const yyyy = d.getFullYear();
@@ -280,7 +275,6 @@ function normalizePresetArray(input, fallbackArr) {
   return cleaned.length > 0 ? cleaned : [...fallbackArr];
 }
 
-// 【改动点 1】确保合同状态预设列表中永远包含至少一个“生效态”和一个“到期态”，防止用户误删后无法筛选
 function ensureContractStatusPresetsIntegrity(statusArr) {
   const arr = Array.isArray(statusArr) ? [...statusArr] : [...DEFAULT_DROPDOWN_PRESETS.contract_statuses];
   if (!arr.some(s => /生效|履行|执行|正常|进行/.test(s))) {
@@ -312,7 +306,6 @@ function getDropdownPresets() {
   return copy;
 }
 
-// 【改动点 2】动态从当前自定义词库中解析“生效态”与“到期态”名称（例如用户改名为“履行中”和“已超期”也能自动识别）
 function resolveDynamicStatusLabels() {
   const presets = getDropdownPresets();
   const list = presets.contract_statuses || DEFAULT_DROPDOWN_PRESETS.contract_statuses;
@@ -321,7 +314,6 @@ function resolveDynamicStatusLabels() {
   return { activeLabel, expiredLabel, list };
 }
 
-// 自动将已过期的“生效态”合同刷新为“到期态”（严格保护草稿/已终止等其他状态）
 function autoRefreshExpiredContractStatus() {
   try {
     const today = getLocalTodayStr();
@@ -336,7 +328,6 @@ function autoRefreshExpiredContractStatus() {
   } catch (e) {}
 }
 
-// 录入或编辑合同时，根据到期日与当前自定义状态词库智能双向校准状态
 function computeSmartContractStatus(rawStatus, expiryDateStr) {
   const { activeLabel, expiredLabel } = resolveDynamicStatusLabels();
   const status = String(rawStatus || activeLabel).trim();
@@ -943,12 +934,26 @@ const upload = multer({
   limits: { fileSize: 50 * 1024 * 1024, files: 30 }
 });
 
-// ==================== 8. 中间件与内网访问安全口令控制 ====================
+// ==================== 8. 中间件与内网 12小时持久化签名口令控制 ====================
 app.disable('x-powered-by');
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-const SECRET_SEED = crypto.randomBytes(32).toString('hex');
+const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 严格实现 12 小时免重复输入
+
+function getOrCreateSecretSeed() {
+  try {
+    const row = STMTS.getSetting.get('lan_secret_seed');
+    if (row && row.setting_value && row.setting_value.length >= 32) {
+      return row.setting_value;
+    }
+  } catch (e) {}
+  const newSeed = crypto.randomBytes(32).toString('hex');
+  try { STMTS.setSetting.run('lan_secret_seed', newSeed); } catch (e) {}
+  return newSeed;
+}
+
+const SECRET_SEED = getOrCreateSecretSeed();
 
 function getLanSecurityConfig() {
   try {
@@ -966,7 +971,23 @@ function isLocalhostRequest(req) {
 }
 
 function makeLanToken(passcode) {
-  return crypto.createHmac('sha256', SECRET_SEED).update(String(passcode || '')).digest('hex');
+  const ts = String(Date.now());
+  const sig = crypto.createHmac('sha256', SECRET_SEED).update(`${passcode}|${ts}`).digest('hex');
+  return `${ts}.${sig}`;
+}
+
+function verifyLanToken(tokenStr, passcode) {
+  if (!tokenStr) return false;
+  const parts = String(tokenStr).split('.');
+  if (parts.length === 2) {
+    const [tsStr, sig] = parts;
+    const issuedAt = Number(tsStr);
+    if (!issuedAt || isNaN(issuedAt)) return false;
+    if (Date.now() - issuedAt > TOKEN_TTL_MS) return false;
+    const expectedSig = crypto.createHmac('sha256', SECRET_SEED).update(`${passcode}|${tsStr}`).digest('hex');
+    return sig === expectedSig;
+  }
+  return false;
 }
 
 function isRequestAuthorized(req) {
@@ -974,9 +995,8 @@ function isRequestAuthorized(req) {
   const cfg = getLanSecurityConfig();
   if (!cfg.enabled) return false;
   if (!cfg.passcode) return true;
-  const expected = makeLanToken(cfg.passcode);
   const clientToken = String(req.headers['x-lan-token'] || req.headers['x-access-token'] || req.query.token || '').trim();
-  return clientToken === expected;
+  return verifyLanToken(clientToken, cfg.passcode);
 }
 
 app.use(express.static(PUBLIC_DIR));
@@ -1342,7 +1362,10 @@ function queryFilteredContracts(query = {}) {
     if (kwNo) {
       const hitBase = [c.seq_no, c.contract_no, c.contract_name, c.remark, c.linked_procurement?.procurement_no]
         .some(v => String(v || '').toLowerCase().includes(kwNo));
-      const hitSummary = c.counterparties.some(cp => String(cp.summary || '').toLowerCase().includes(kwNo));
+      const hitSummary = c.counterparties.some(cp =>
+        String(cp.summary || '').toLowerCase().includes(kwNo) ||
+        String(cp.remark || '').toLowerCase().includes(kwNo)
+      );
       if (!hitBase && !hitSummary) return false;
     }
     if (kwCp) {
@@ -2002,6 +2025,10 @@ app.delete('/api/procurements/:id', (req, res) => {
 });
 
 // ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎 ====================
+function escapeExcelFormulaStr(str) {
+  return String(str || '').replace(/"/g, '""');
+}
+
 function createContractWorksheet(contracts) {
   const headers = [
     '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
@@ -2030,17 +2057,19 @@ function createContractWorksheet(contracts) {
     const parties = c.counterparties && c.counterparties.length > 0 ? c.counterparties : [{}];
     const startRow = currentRowIdx;
 
-    const scanRelLink = c.attachment_path
-      ? `uploads/${c.attachment_path}`
-      : `uploads/`;
-    const procFolderRelLink = c.linked_procurement
-      ? `uploads/procurement/${buildFolderKey(c.linked_procurement.procurement_no, c.linked_procurement.project_name)}`
-      : `uploads/procurement/`;
-    const relatedFolderRelLink = `uploads/related/${buildFolderKey(c.contract_no, c.contract_name)}`;
+    const scanRelLink = escapeExcelFormulaStr(c.attachment_path ? `uploads/${c.attachment_path}` : `uploads/`);
+    const procFolderRelLink = escapeExcelFormulaStr(
+      c.linked_procurement
+        ? `uploads/procurement/${buildFolderKey(c.linked_procurement.procurement_no, c.linked_procurement.project_name)}`
+        : `uploads/procurement/`
+    );
+    const relatedFolderRelLink = escapeExcelFormulaStr(`uploads/related/${buildFolderKey(c.contract_no, c.contract_name)}`);
 
     parties.forEach((cp, pIdx) => {
       const rIdx = currentRowIdx++;
       rowGroupParity[rIdx] = cIdx % 2;
+
+      const combinedRemark = [cp.remark, c.remark].filter(Boolean).join('；');
 
       aoa.push([
         c.seq_no || '',
@@ -2072,7 +2101,7 @@ function createContractWorksheet(contracts) {
         Number(cp.warranty_bond_amount || 0),
         cp.warranty_bond_status || '无',
         cp.warranty_bond_expiry_date || '',
-        cp.remark || c.remark || '',
+        combinedRemark,
         c.attachment_path ? '📄 打开合同扫描件' : '未上传扫描件',
         c.linked_procurement ? '📁 打开立项资料夹' : '未关联立项夹',
         (c.related_files && c.related_files.length > 0) ? `📎 打开附件夹(${c.related_files.length}份)` : '打开附件夹'
@@ -2177,10 +2206,12 @@ function createProcurementWorksheet(procurements) {
 
   procurements.forEach((p, idx) => {
     const rIdx = idx + 2;
-    const procFolderLink = `uploads/procurement/${buildFolderKey(p.procurement_no, p.project_name)}`;
-    const contractScanLink = (p.linked_contract && p.linked_contract.attachment_path)
-      ? `uploads/${p.linked_contract.attachment_path}`
-      : `uploads/`;
+    const procFolderLink = escapeExcelFormulaStr(`uploads/procurement/${buildFolderKey(p.procurement_no, p.project_name)}`);
+    const contractScanLink = escapeExcelFormulaStr(
+      (p.linked_contract && p.linked_contract.attachment_path)
+        ? `uploads/${p.linked_contract.attachment_path}`
+        : `uploads/`
+    );
 
     aoa.push([
       p.seq_no || '',
