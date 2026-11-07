@@ -2328,20 +2328,23 @@ app.use((err, req, res, next) => {
   next();
 });
 
+
 // ==================== 14. 服务启动与优雅退出全量资源释放 ====================
 const activeSockets = new Set();
 let serverInstance = null;
 
-function startServer(customPort = PORT) {
-  serverInstance = app.listen(customPort, HOST, () => {
+function startServer(customPort = PORT, customHost = HOST) {
+  serverInstance = app.listen(customPort, customHost, () => {
+    const addr = serverInstance.address();
+    const actualPort = addr && typeof addr === 'object' ? addr.port : customPort;
     console.log(`========================================================`);
     console.log(`🚀 合同与采购立项全生命周期管理系统已启动！`);
-    console.log(`👉 本机访问地址: http://localhost:${customPort}`);
+    console.log(`👉 本机访问地址: http://localhost:${actualPort}`);
     const interfaces = os.networkInterfaces();
     for (const name of Object.keys(interfaces)) {
       for (const net of interfaces[name] || []) {
         if (net.family === 'IPv4' && !net.internal) {
-          console.log(`🌐 局域网共享地址: http://${net.address}:${customPort}`);
+          console.log(`🌐 局域网共享地址: http://${net.address}:${actualPort}`);
         }
       }
     }
@@ -2356,38 +2359,52 @@ function startServer(customPort = PORT) {
   return serverInstance;
 }
 
+/**
+ * 标准异步资源释放函数（支持 await shutdown()，供 test-smoke.js 与 Electron 主进程安全调用）
+ * 不直接强行调用 process.exit，让测试脚本或主进程自然优雅走完断言并退出
+ */
+function shutdown() {
+  return new Promise((resolve) => {
+    try {
+      cleanTmpDir();
+      sweepOrphanUploads();
+    } catch (e) {}
+
+    for (const socket of activeSockets) {
+      try {
+        socket.destroy();
+      } catch (e) {}
+    }
+    activeSockets.clear();
+
+    const closeDb = () => {
+      try {
+        if (db && db.open) {
+          db.pragma('wal_checkpoint(TRUNCATE)');
+          db.close();
+        }
+      } catch (e) {}
+      resolve();
+    };
+
+    if (serverInstance) {
+      const srv = serverInstance;
+      serverInstance = null;
+      srv.close(() => closeDb());
+      setTimeout(() => closeDb(), 1000).unref();
+    } else {
+      closeDb();
+    }
+  });
+}
+
 let isShuttingDown = false;
-function gracefulShutdown(signal) {
+async function gracefulShutdown(signal) {
   if (isShuttingDown) return;
   isShuttingDown = true;
   console.log(`\n[${signal}] 正在安全释放资源并清理临时文件...`);
-
-  try {
-    cleanTmpDir();
-    sweepOrphanUploads();
-  } catch (e) {}
-
-  for (const socket of activeSockets) {
-    try { socket.destroy(); } catch (e) {}
-  }
-  activeSockets.clear();
-
-  const closeDbAndExit = () => {
-    try {
-      if (db && db.open) {
-        db.pragma('wal_checkpoint(TRUNCATE)');
-        db.close();
-      }
-    } catch (e) {}
-    process.exit(0);
-  };
-
-  if (serverInstance) {
-    serverInstance.close(() => closeDbAndExit());
-    setTimeout(() => closeDbAndExit(), 1500).unref();
-  } else {
-    closeDbAndExit();
-  }
+  await shutdown();
+  process.exit(0);
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
@@ -2403,7 +2420,14 @@ process.on('exit', () => {
 });
 
 if (require.main === module) {
-  startServer(PORT);
+  startServer(PORT, HOST);
 }
 
-module.exports = { app, db, startServer, gracefulShutdown };
+module.exports = {
+  app,
+  db,
+  startServer,
+  shutdown,
+  closeServer: shutdown,
+  gracefulShutdown
+};
