@@ -10,16 +10,14 @@
   <header class="app-header">
     <div>
       <h1>📄 企业合同台账管理系统</h1>
-      <p class="header-sub">按年断号重编序号 · 固定前缀/后缀灰显补全 · 智能日期与税率识别 · 扫描件相对路径超链接导出</p>
+      <p class="header-sub">纯浏览器超轻架构 · 按年断号重编 · 智能日期/税率 · 扫描件与关联资料专属文件夹超链接导出</p>
     </div>
     <div class="header-actions">
-      <!-- 合同编号固定前缀/后缀规则快捷设置栏 -->
       <div class="default-entity-bar" title="配置合同编号的固定前缀、日期格式、流水号位数、固定后缀及序号按年重编规则">
         <span>🔢 编号格式：</span>
         <strong id="display_no_rule">加载中...</strong>
         <button type="button" class="btn btn-outline btn-sm" onclick="openNoRuleModal()">修改编号规则</button>
       </div>
-      <!-- 默认我方主体快捷设置栏 -->
       <div class="default-entity-bar" title="新建合同时将自动带出此主体名称，也可在单份合同中修改">
         <span>🏢 默认我方主体：</span>
         <strong id="display_default_entity">加载中...</strong>
@@ -31,13 +29,13 @@
       <button type="button" class="btn btn-primary" onclick="openFormModal()">+ 新增合同</button>
       <div class="dropdown">
         <button type="button" class="btn btn-success">导出美化 Excel ▾</button>
-        <div class="dropdown-menu" style="min-width: 310px;">
-          <div style="padding: 8px 12px; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: 11.5px; color: #92400e; line-height: 1.4;">
-            💡 <strong>扫描件超链接目录提示：</strong><br/>
-            导出表最后一列为相对路径超链接 (<code>uploads/...</code>)。请将导出的 Excel 放在 <strong><code>uploads</code> 文件夹同级目录</strong>下（可在右下角托盘菜单打开数据目录），点击超链接即可直接打开扫描件！
+        <div class="dropdown-menu" style="min-width: 335px;">
+          <div style="padding: 8px 12px; background: #fffbeb; border-bottom: 1px solid #fde68a; font-size: 11.5px; color: #92400e; line-height: 1.45;">
+            💡 <strong>扫描件与关联资料文件夹超链接说明：</strong><br/>
+            导出表最后两列分别为【合同扫描件】与【其他关联资料专属文件夹 (<code>uploads/related/合同名/</code>)】相对路径超链接。请将导出的 Excel 放在 <strong><code>uploads</code> 同级目录</strong>下，点击超链接即可直接打开扫描件或关联资料文件夹！
           </div>
-          <a href="javascript:void(0)" onclick="exportExcel('filtered')">📥 导出当前筛选结果 (按序号001正序+超链接)</a>
-          <a href="javascript:void(0)" onclick="exportExcel('all')">📥 导出全部合同台账 (按序号001正序+超链接)</a>
+          <a href="javascript:void(0)" onclick="exportExcel('filtered')">📥 导出当前筛选结果 (按001正序+双超链接)</a>
+          <a href="javascript:void(0)" onclick="exportExcel('all')">📥 导出全部合同台账 (按001正序+双超链接)</a>
         </div>
       </div>
     </div>
@@ -67,7 +65,6 @@
         <option value="已终止">已终止</option>
       </select>
 
-      <!-- 指定时间段组合筛选 -->
       <div class="filter-date-range">
         <select id="filter_date_field" title="选择要筛选的时间维度">
           <option value="sign_date">签订日期</option>
@@ -112,7 +109,6 @@
             <th class="merged-col-th text-center">开始履约日</th>
             <th class="merged-col-th text-center">合同到期日(预警)</th>
             <th class="merged-col-th text-center">状态</th>
-            <!-- 以下为每个对方单位各自独立的履约行字段 -->
             <th>履约摘要(各写各的)</th>
             <th>对方单位名称</th>
             <th>统一信用代码</th>
@@ -126,8 +122,8 @@
             <th>履约保证金 / 应退预警</th>
             <th>质保金 / 到期预警</th>
             <th>分项备注</th>
-            <!-- 以下为公共合并归档与操作列 -->
-            <th class="merged-col-th">扫描件(点击预览)</th>
+            <th class="merged-col-th">合同扫描件</th>
+            <th class="merged-col-th">其他关联资料(多文件)</th>
             <th class="merged-col-th text-center">操作</th>
           </tr>
         </thead>
@@ -249,7 +245,6 @@
                 </span>
               </label>
 
-              <!-- 模式 A：分段补全输入器（新增合同默认启用） -->
               <div id="segmented_no_box" class="segmented-no-wrapper">
                 <span id="seg_prefix" class="seg-locked" title="固定前缀（灰色只读）">HT-</span>
                 <span id="seg_date" class="seg-locked" title="日期段（灰色只读）">2026-</span>
@@ -257,7 +252,6 @@
                 <span id="seg_suffix" class="seg-locked" title="固定后缀（灰色只读）"></span>
               </div>
 
-              <!-- 模式 B：完整自由输入框（编辑已有合同默认启用） -->
               <input type="text" name="contract_no" id="f_contract_no" class="hidden" placeholder="如：HT-2026-001" required />
             </div>
 
@@ -312,8 +306,13 @@
               </div>
             </div>
             <div class="form-group">
-              <label>扫描件上传 <small class="muted">(PDF/JPG/PNG ≤20MB)</small></label>
+              <label>主合同扫描件 <small class="muted">(PDF/JPG/PNG)</small></label>
               <input type="file" name="attachment" id="f_attachment" accept=".pdf,.jpg,.jpeg,.png" />
+            </div>
+
+            <div class="form-group span-4" style="background:#f0fdf4;padding:8px 12px;border-radius:4px;border:1px solid #bbf7d0;">
+              <label style="color:#166534;">📂 其他关联资料（立项批复/招投标文件/预算表/验收单等，支持按住 Ctrl 一次框选多个文件，自动归入本合同专属文件夹）：</label>
+              <input type="file" name="related_files" id="f_related_files" multiple />
             </div>
           </div>
 
@@ -340,11 +339,11 @@
     </div>
   </div>
 
-  <!-- 弹窗 2：合同详情与扫描件在线预览 -->
+  <!-- 弹窗 2：合同详情、扫描件与关联资料专属文件夹管理 -->
   <div id="detail_modal" class="modal hidden">
     <div class="modal-content modal-xl">
       <div class="modal-header">
-        <h2>合同台账全量详情与扫描件预览</h2>
+        <h2>合同台账全量详情 · 扫描件与关联资料管理</h2>
         <span class="close-btn" onclick="closeDetailModal()">&times;</span>
       </div>
       <div class="detail-split-layout">
