@@ -2,13 +2,14 @@
   "name": "contract-manager",
   "version": "2.1.0",
   "description": "Enterprise Contract Ledger Desktop Application (Single-Instance & System Tray)",
+  "author": "Enterprise Contract Team",
   "main": "main.js",
   "scripts": {
     "start": "electron .",
     "server": "node server.js",
     "test": "electron test-smoke.js",
     "postinstall": "electron-builder install-app-deps",
-    "dist:win": "electron-builder --win --x64"
+    "dist:win": "electron-builder --win --x64 --publish never"
   },
   "dependencies": {
     "better-sqlite3": "^11.3.0",
@@ -43,13 +44,13 @@
           "target": "nsis",
           "arch": ["x64"]
         }
-      ],
-      "artifactName": "${productName}-${version}-${target}.${ext}"
+      ]
     },
     "portable": {
-      "artifactName": "${productName}-${version}-Portable.exe"
+      "artifactName": "${productName}-${version}-Portable.${ext}"
     },
     "nsis": {
+      "artifactName": "${productName}-${version}-Setup.${ext}",
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
