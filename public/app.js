@@ -1,10 +1,11 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (100% 匹配 index.html)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.2.0 满血终极版)
  * 特性：
  * 1. 夹心式 4 段自定义分段编号器（[灰底前缀] + [穿插段] + [灰底日期段] + [零空洞流水号] + [灰底后缀]）
  * 2. 支持一对多对方单位履约行渲染与单元格跨行合并 (rowspan)
  * 3. 智能日期输入解析（支持 2026.3.18、简写 3.18、以及 Excel 序列号如 46099 自动转 YYYY-MM-DD）
- * 4. 顺序可逆双向关联 + 三大资料库在线预览 + 多机协同静默同步（不打断表单输入）
+ * 4. 详情弹窗内直接支持【一键补传/替换主合同扫描件】、【一键补传关联附件/立项资料】与【单文件物理删除】
+ * 5. 预览弹窗关闭即刻销毁 iframe/img 句柄释放内存 + 多机协同静默同步（不打断表单输入）
  */
 
 let currentTab = 'contract'; // 'contract' | 'procurement'
@@ -1122,7 +1123,72 @@ async function deleteProcRecord(id, no) {
   }
 }
 
-// ==================== 9. 全能详情与三大文件在线预览中心 ====================
+// ==================== 9. 全能详情与三大文件在线预览/一键补传/单文件删除中心 ====================
+async function quickUploadContractMainScan(contractId, inputEl) {
+  if (!inputEl.files || !inputEl.files[0]) return;
+  const fd = new FormData();
+  fd.append('attachment', inputEl.files[0]);
+  try {
+    const res = await apiFetch(`/api/contracts/${contractId}/attachment`, { method: 'POST', body: fd });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    await openDetailModal('contract', contractId);
+    await loadContracts();
+  } catch (err) {
+    alert(err.message || '上传失败');
+  }
+}
+
+async function quickUploadContractRelated(contractId, inputEl) {
+  if (!inputEl.files || inputEl.files.length === 0) return;
+  const fd = new FormData();
+  for (const f of inputEl.files) fd.append('related_files', f);
+  try {
+    const res = await apiFetch(`/api/contracts/${contractId}/related-files`, { method: 'POST', body: fd });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    await openDetailModal('contract', contractId);
+    await loadContracts();
+  } catch (err) {
+    alert(err.message || '上传失败');
+  }
+}
+
+async function deleteSingleContractRelatedFile(contractId, fileId) {
+  if (!confirm('确认从磁盘物理删除该份附件？')) return;
+  const res = await apiFetch(`/api/contracts/${contractId}/related-files/${fileId}`, { method: 'DELETE' });
+  const json = await res.json();
+  if (json.success) {
+    await openDetailModal('contract', contractId);
+    await loadContracts();
+  }
+}
+
+async function quickUploadProcFilesInDetail(procId, inputEl) {
+  if (!inputEl.files || inputEl.files.length === 0) return;
+  const fd = new FormData();
+  for (const f of inputEl.files) fd.append('procurement_files', f);
+  try {
+    const res = await apiFetch(`/api/procurements/${procId}/files`, { method: 'POST', body: fd });
+    const json = await res.json();
+    if (!json.success) throw new Error(json.message);
+    await openDetailModal('procurement', procId);
+    await loadProcurements();
+  } catch (err) {
+    alert(err.message || '上传立项资料失败');
+  }
+}
+
+async function deleteSingleProcFileInDetail(procId, fileId) {
+  if (!confirm('确认从磁盘物理删除该份立项资料？')) return;
+  const res = await apiFetch(`/api/procurements/${procId}/files/${fileId}`, { method: 'DELETE' });
+  const json = await res.json();
+  if (json.success) {
+    await openDetailModal('procurement', procId);
+    await loadProcurements();
+  }
+}
+
 async function openDetailModal(mode, id) {
   const fieldsBox = document.getElementById('detail_fields');
   const toolbar = document.getElementById('attachment_toolbar');
@@ -1149,7 +1215,13 @@ async function openDetailModal(mode, id) {
       </div>
 
       <div class="detail-card">
-        <h4>① 主合同扫描件</h4>
+        <h4>
+          <span>① 主合同扫描件</span>
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
+            + 上传/替换扫描件
+            <input type="file" accept=".pdf,.jpg,.jpeg,.png" class="hidden" onchange="quickUploadContractMainScan(${c.id}, this)" />
+          </label>
+        </h4>
         ${c.attachment_path
           ? `<div class="related-list-item">
                <span class="fname">${escapeHtml(c.attachment_original_name || c.attachment_path)}</span>
@@ -1178,13 +1250,20 @@ async function openDetailModal(mode, id) {
       </div>
 
       <div class="detail-card">
-        <h4>③ 合同其他关联资料 (${relFiles.length}份)</h4>
+        <h4>
+          <span>③ 合同其他关联资料 (${relFiles.length}份)</span>
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
+            + 补传资料
+            <input type="file" multiple class="hidden" onchange="quickUploadContractRelated(${c.id}, this)" />
+          </label>
+        </h4>
         ${relFiles.map(rf => `
           <div class="related-list-item">
             <span class="fname">${escapeHtml(rf.file_original_name)}</span>
             <div class="factions">
               <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(rf.file_path)}', '${escapeHtml(rf.file_original_name)}')">预览</button>
               <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(rf.file_path)}?download=1`)}">下载</a>
+              <button class="btn btn-danger btn-sm" onclick="deleteSingleContractRelatedFile(${c.id}, ${rf.id})">删除</button>
             </div>
           </div>
         `).join('') || `<div style="color:#9ca3af;">暂无其他关联资料</div>`}
@@ -1220,13 +1299,20 @@ async function openDetailModal(mode, id) {
       </div>
 
       <div class="detail-card">
-        <h4>📁 立项相关资料 (${files.length}份)</h4>
+        <h4>
+          <span>📁 立项相关资料 (${files.length}份)</span>
+          <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
+            + 补传立项资料
+            <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${p.id}, this)" />
+          </label>
+        </h4>
         ${files.map(f => `
           <div class="related-list-item">
             <span class="fname">${escapeHtml(f.file_original_name)}</span>
             <div class="factions">
               <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeHtml(f.file_path)}', '${escapeHtml(f.file_original_name)}')">预览</button>
               <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(f.file_path)}?download=1`)}">下载</a>
+              <button class="btn btn-danger btn-sm" onclick="deleteSingleProcFileInDetail(${p.id}, ${f.id})">删除</button>
             </div>
           </div>
         `).join('') || `<div style="color:#9ca3af;">暂未上传立项资料</div>`}
