@@ -10,11 +10,12 @@ process.env.DB_PATH = path.join(testDataRoot, 'test_ci.sqlite');
 const { startServer } = require('./server');
 
 (async () => {
-  const controller = await startServer(0, '127.0.0.1');
-  const port = controller.port;
-  console.log(`🧪 执行打包前冒烟测试 (Port: ${port})...`);
-
+  let controller = null;
   try {
+    controller = await startServer(0, '127.0.0.1');
+    const port = controller.port;
+    console.log(`🧪 执行打包前冒烟测试 (Port: ${port})...`);
+
     // 1. 验证设置默认我方签约主体
     const putEntityPayload = JSON.stringify({ default_our_entity: '华南智云科技股份有限公司' });
     const entityRes = await new Promise((resolve, reject) => {
@@ -86,14 +87,23 @@ const { startServer } = require('./server');
     // 3. 验证带跨行合并单元格的 Excel 导出
     const exportStatus = await new Promise((resolve, reject) => {
       http.get(`http://127.0.0.1:${port}/api/contracts/export?scope=all`, res => {
+        res.resume();
         resolve(res.statusCode);
       }).on('error', reject);
     });
     assert.strictEqual(exportStatus, 200, 'Excel 合并单元格导出应返回 200');
 
-  } finally {
+    // 4. 验证彻底释放端口与 SQLite 文件句柄（若句柄未释放，Windows 下 rmSync 会抛 EBUSY）
     await controller.shutdown();
+    controller = null;
     fs.rmSync(testDataRoot, { recursive: true, force: true });
     console.log('✅ 多方分行合并、Excel合并导出与资源彻底释放测试全部通过！');
+    process.exit(0);
+  } catch (err) {
+    console.error('❌ 冒烟测试失败:', err);
+    if (controller) {
+      try { await controller.shutdown(); } catch (e) {}
+    }
+    process.exit(1);
   }
 })();
