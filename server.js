@@ -44,6 +44,13 @@ db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
 
+const DEFAULT_NO_RULE = JSON.stringify({
+  prefix: 'HT-',
+  date_part: 'YYYY-',
+  seq_digits: 3,
+  suffix: ''
+});
+
 db.exec(`
   CREATE TABLE IF NOT EXISTS app_settings (
     key TEXT PRIMARY KEY,
@@ -51,6 +58,7 @@ db.exec(`
   );
 
   INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_our_entity', '本单位默认签约主体（点击顶部可修改）');
+  INSERT OR IGNORE INTO app_settings (key, value) VALUES ('contract_no_rule', '${DEFAULT_NO_RULE}');
 
   CREATE TABLE IF NOT EXISTS contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -140,7 +148,83 @@ function ensureSchemaUpgraded() {
 }
 ensureSchemaUpgraded();
 
-// ==================== 工具与安全校验函数 ====================
+// ==================== 工具与合同编号生成函数 ====================
+
+function getContractNoRule() {
+  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'contract_no_rule'`).get();
+  let parsed = {};
+  try {
+    parsed = row ? JSON.parse(row.value) : {};
+  } catch (e) {}
+  return {
+    prefix: typeof parsed.prefix === 'string' ? parsed.prefix : 'HT-',
+    date_part: ['NONE', 'YYYY', 'YYYY-', 'YYYYMM', 'YYYYMM-', 'YYYYMMDD', 'YYYYMMDD-'].includes(parsed.date_part)
+      ? parsed.date_part
+      : 'YYYY-',
+    seq_digits: Number.isInteger(Number(parsed.seq_digits))
+      ? Math.min(8, Math.max(0, Number(parsed.seq_digits)))
+      : 3,
+    suffix: typeof parsed.suffix === 'string' ? parsed.suffix : ''
+  };
+}
+
+function formatDateSegment(datePartRule) {
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  switch (datePartRule) {
+    case 'YYYY': return yyyy;
+    case 'YYYY-': return `${yyyy}-`;
+    case 'YYYYMM': return `${yyyy}${mm}`;
+    case 'YYYYMM-': return `${yyyy}${mm}-`;
+    case 'YYYYMMDD': return `${yyyy}${mm}${dd}`;
+    case 'YYYYMMDD-': return `${yyyy}${mm}${dd}-`;
+    case 'NONE':
+    default:
+      return '';
+  }
+}
+
+// 根据当前保存的【前缀 + 日期段 + 流水号位数 + 后缀】规则，计算下一个可用合同编号
+function generateNextContractNo(customRule = null) {
+  const rule = customRule || getContractNoRule();
+  const dateSeg = formatDateSegment(rule.date_part);
+  const head = `${rule.prefix || ''}${dateSeg}`;
+  const tail = `${rule.suffix || ''}`;
+  const digits = Number(rule.seq_digits || 0);
+
+  if (digits <= 0) {
+    return `${head}${tail}`;
+  }
+
+  const allNos = db.prepare(`SELECT contract_no FROM contracts`).all().map(r => r.contract_no);
+  let maxSeq = 0;
+
+  for (const no of allNos) {
+    if (!no || typeof no !== 'string') continue;
+    if (no.startsWith(head) && (tail === '' || no.endsWith(tail))) {
+      const middleLen = no.length - head.length - tail.length;
+      if (middleLen > 0) {
+        const middleStr = no.slice(head.length, no.length - tail.length);
+        if (/^\d+$/.test(middleStr)) {
+          const num = parseInt(middleStr, 10);
+          if (num > maxSeq) maxSeq = num;
+        }
+      }
+    }
+  }
+
+  let nextSeq = maxSeq + 1;
+  let candidate = `${head}${String(nextSeq).padStart(digits, '0')}${tail}`;
+  const existingSet = new Set(allNos);
+  while (existingSet.has(candidate)) {
+    nextSeq++;
+    candidate = `${head}${String(nextSeq).padStart(digits, '0')}${tail}`;
+  }
+
+  return candidate;
+}
 
 function sanitizeFilenamePart(str) {
   if (!str) return '未命名';
@@ -409,6 +493,38 @@ app.put('/api/settings/our-entity', (req, res) => {
   res.json({ success: true, default_our_entity: val, message: '默认我方主体已保存' });
 });
 
+// [GET/PUT] 合同编号固定前缀/后缀与流水号规则设置
+app.get('/api/settings/contract-no-rule', (req, res) => {
+  const rule = getContractNoRule();
+  const sample_next_no = generateNextContractNo(rule);
+  res.json({ success: true, rule, sample_next_no });
+});
+
+app.put('/api/settings/contract-no-rule', (req, res) => {
+  const prefix = String(req.body.prefix ?? '').trim();
+  const suffix = String(req.body.suffix ?? '').trim();
+  const date_part = ['NONE', 'YYYY', 'YYYY-', 'YYYYMM', 'YYYYMM-', 'YYYYMMDD', 'YYYYMMDD-'].includes(req.body.date_part)
+    ? req.body.date_part
+    : 'YYYY-';
+  const seq_digits = Number.isInteger(Number(req.body.seq_digits))
+    ? Math.min(8, Math.max(0, Number(req.body.seq_digits)))
+    : 3;
+
+  const newRule = { prefix, date_part, seq_digits, suffix };
+  db.prepare(`INSERT INTO app_settings (key, value) VALUES ('contract_no_rule', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value`)
+    .run(JSON.stringify(newRule));
+
+  const sample_next_no = generateNextContractNo(newRule);
+  res.json({ success: true, rule: newRule, sample_next_no, message: '合同编号规则已保存' });
+});
+
+// [GET] 获取下一个自动生成的合同编号
+app.get('/api/contracts/next-no', (req, res) => {
+  const rule = getContractNoRule();
+  const next_no = generateNextContractNo(rule);
+  res.json({ success: true, next_no, rule });
+});
+
 // [GET] 获取合同台账列表
 app.get('/api/contracts', (req, res) => {
   try {
@@ -499,7 +615,7 @@ app.get('/api/contracts/export', (req, res) => {
     const worksheet = xlsx.utils.aoa_to_sheet(aoa);
     worksheet['!merges'] = merges;
     worksheet['!cols'] = [
-      { wch: 16 }, { wch: 22 }, { wch: 10 }, { wch: 22 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
+      { wch: 18 }, { wch: 22 }, { wch: 10 }, { wch: 22 }, { wch: 12 }, { wch: 12 }, { wch: 12 }, { wch: 10 },
       { wch: 28 }, { wch: 24 }, { wch: 20 }, { wch: 10 }, { wch: 14 }, { wch: 22 }, { wch: 20 }, { wch: 20 }, { wch: 14 },
       { wch: 14 }, { wch: 14 }, { wch: 12 }, { wch: 16 }, { wch: 8 },
       { wch: 14 }, { wch: 13 }, { wch: 13 }, { wch: 14 }, { wch: 13 }, { wch: 20 },
