@@ -1,5 +1,11 @@
 let currentContracts = [];
 let defaultOurEntity = '';
+let contractNoRule = {
+  prefix: 'HT-',
+  date_part: 'YYYY-',
+  seq_digits: 3,
+  suffix: ''
+};
 
 function escapeHtml(str) {
   if (str === null || str === undefined) return '';
@@ -52,6 +58,97 @@ function renderDueAlertBadge(dateStr, contractStatus = '生效中', prefixLabel 
   return `<span class="due-chip" style="background:${bg};color:${fg};" title="${escapeHtml(tip)}">
     ${prefix}${escapeHtml(dateStr)} <small>(${escapeHtml(tip)})</small>
   </span>`;
+}
+
+// ==================== 合同编号固定前缀/后缀与流水号规则管理 ====================
+async function loadContractNoRule() {
+  try {
+    const res = await fetch('/api/settings/contract-no-rule');
+    const result = await res.json();
+    if (result.success) {
+      contractNoRule = result.rule;
+      document.getElementById('display_no_rule').innerText = result.sample_next_no || '未设置';
+    }
+  } catch (e) {}
+}
+
+function formatClientDatePart(datePartRule) {
+  const now = new Date();
+  const yyyy = String(now.getFullYear());
+  const mm = String(now.getMonth() + 1).padStart(2, '0');
+  const dd = String(now.getDate()).padStart(2, '0');
+  switch (datePartRule) {
+    case 'YYYY': return yyyy;
+    case 'YYYY-': return `${yyyy}-`;
+    case 'YYYYMM': return `${yyyy}${mm}`;
+    case 'YYYYMM-': return `${yyyy}${mm}-`;
+    case 'YYYYMMDD': return `${yyyy}${mm}${dd}`;
+    case 'YYYYMMDD-': return `${yyyy}${mm}${dd}-`;
+    default: return '';
+  }
+}
+
+function updateNoRulePreview() {
+  const prefix = document.getElementById('rule_prefix').value.trim();
+  const datePart = document.getElementById('rule_date_part').value;
+  const digits = Number(document.getElementById('rule_seq_digits').value || 0);
+  const suffix = document.getElementById('rule_suffix').value.trim();
+  const dateStr = formatClientDatePart(datePart);
+  const seqStr = digits > 0 ? String(1).padStart(digits, '0') : '[手填编号]';
+  document.getElementById('rule_live_preview').innerText = `${prefix}${dateStr}${seqStr}${suffix}`;
+}
+
+function openNoRuleModal() {
+  document.getElementById('rule_prefix').value = contractNoRule.prefix || '';
+  document.getElementById('rule_date_part').value = contractNoRule.date_part || 'YYYY-';
+  document.getElementById('rule_seq_digits').value = String(contractNoRule.seq_digits ?? 3);
+  document.getElementById('rule_suffix').value = contractNoRule.suffix || '';
+  updateNoRulePreview();
+  document.getElementById('no_rule_modal').classList.remove('hidden');
+}
+
+function closeNoRuleModal() {
+  document.getElementById('no_rule_modal').classList.add('hidden');
+}
+
+async function saveNoRuleForm(e) {
+  e.preventDefault();
+  const payload = {
+    prefix: document.getElementById('rule_prefix').value.trim(),
+    date_part: document.getElementById('rule_date_part').value,
+    seq_digits: Number(document.getElementById('rule_seq_digits').value),
+    suffix: document.getElementById('rule_suffix').value.trim()
+  };
+
+  const res = await fetch('/api/settings/contract-no-rule', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  });
+  const result = await res.json();
+  if (!result.success) return alert(result.message);
+
+  contractNoRule = result.rule;
+  document.getElementById('display_no_rule').innerText = result.sample_next_no;
+  closeNoRuleModal();
+
+  // 如果当前正处于“新增合同”弹窗打开状态，同步刷新里面的合同编号
+  const formModal = document.getElementById('form_modal');
+  const formId = document.getElementById('form_id').value;
+  if (!formModal.classList.contains('hidden') && !formId) {
+    document.getElementById('f_contract_no').value = result.sample_next_no;
+  }
+}
+
+async function fillAutoContractNo() {
+  try {
+    const res = await fetch('/api/contracts/next-no');
+    const result = await res.json();
+    if (result.success) {
+      document.getElementById('f_contract_no').value = result.next_no;
+      document.getElementById('display_no_rule').innerText = result.next_no;
+    }
+  } catch (e) {}
 }
 
 // ==================== 默认我方签约主体管理 ====================
@@ -254,6 +351,7 @@ document.addEventListener('DOMContentLoaded', async () => {
       startDateInput.dataset.autoSync = 'false';
     });
   }
+  await loadContractNoRule();
   await loadDefaultOurEntity();
   await loadContracts();
 });
@@ -411,7 +509,7 @@ function collectCounterpartiesFromDOM() {
 }
 
 // 打开新增 / 编辑弹窗
-function openFormModal(id = null) {
+async function openFormModal(id = null) {
   const form = document.getElementById('contract_form');
   form.reset();
   document.getElementById('form_id').value = id || '';
@@ -438,9 +536,10 @@ function openFormModal(id = null) {
       parties.forEach(p => addCounterpartyCard(p));
     }
   } else {
-    // 新增合同时自动带出默认我方签约主体（可修改）
+    // 新增合同时：自动带出默认我方签约主体（可改）+ 自动按前缀/后缀规则生成下一个合同编号（可改）
     document.getElementById('f_our_entity').value = defaultOurEntity;
     addCounterpartyCard();
+    await fillAutoContractNo();
   }
 
   document.getElementById('form_modal').classList.remove('hidden');
@@ -471,7 +570,8 @@ async function submitContractForm(e) {
   if (!result.success) return alert(result.message);
 
   closeFormModal();
-  loadContracts();
+  await loadContractNoRule();
+  await loadContracts();
 }
 
 async function deleteContract(id) {
@@ -479,7 +579,8 @@ async function deleteContract(id) {
   const res = await fetch(`/api/contracts/${id}`, { method: 'DELETE' });
   const result = await res.json();
   if (!result.success) return alert(result.message);
-  loadContracts();
+  await loadContractNoRule();
+  await loadContracts();
 }
 
 async function openDetailModal(id) {
