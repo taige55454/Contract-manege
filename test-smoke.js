@@ -33,9 +33,33 @@ const { startServer } = require('./server');
     });
     assert.strictEqual(entityRes.success, true, '设置默认我方主体应成功');
 
-    // 2. 验证一合同多方不同履约义务（各自独立摘要、金额、税率、保证金）
+    // 2. 验证设置合同编号固定前缀、后缀与流水号规则
+    const putRulePayload = JSON.stringify({
+      prefix: 'ZN-',
+      date_part: 'YYYY-',
+      seq_digits: 3,
+      suffix: '-CG'
+    });
+    const ruleRes = await new Promise((resolve, reject) => {
+      const req = http.request({
+        hostname: '127.0.0.1', port, path: '/api/settings/contract-no-rule', method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(putRulePayload) }
+      }, res => {
+        let body = '';
+        res.on('data', c => body += c);
+        res.on('end', () => resolve(JSON.parse(body)));
+      });
+      req.on('error', reject);
+      req.write(putRulePayload);
+      req.end();
+    });
+    assert.strictEqual(ruleRes.success, true, '保存合同编号前缀/后缀规则应成功');
+    const expectedYear = new Date().getFullYear();
+    assert.strictEqual(ruleRes.sample_next_no, `ZN-${expectedYear}-001-CG`, '自动生成的首个合同编号格式应匹配前缀+年份+001+后缀');
+
+    // 3. 验证一合同多方不同履约义务（使用自动生成的合同编号入库）
     const postPayload = JSON.stringify({
-      contract_no: 'HT-MULTI-2026-001',
+      contract_no: ruleRes.sample_next_no,
       contract_name: '智慧园区软硬件三方联建合同',
       contract_type: '采购',
       our_entity: '华南智云科技股份有限公司',
@@ -84,7 +108,17 @@ const { startServer } = require('./server');
     });
     assert.strictEqual(createRes.success, true, '新增多方独立履约合同应成功');
 
-    // 3. 验证带跨行合并单元格的 Excel 导出
+    // 4. 验证入库第 1 条后，下一个自动合同编号流水号自动递增为 002
+    const nextNoRes = await new Promise((resolve, reject) => {
+      http.get(`http://127.0.0.1:${port}/api/contracts/next-no`, res => {
+        let body = '';
+        res.on('data', c => body += c);
+        res.on('end', () => resolve(JSON.parse(body)));
+      }).on('error', reject);
+    });
+    assert.strictEqual(nextNoRes.next_no, `ZN-${expectedYear}-002-CG`, '第二份合同编号应自动递增为 002');
+
+    // 5. 验证带跨行合并单元格的 Excel 导出
     const exportStatus = await new Promise((resolve, reject) => {
       http.get(`http://127.0.0.1:${port}/api/contracts/export?scope=all`, res => {
         res.resume();
@@ -93,11 +127,11 @@ const { startServer } = require('./server');
     });
     assert.strictEqual(exportStatus, 200, 'Excel 合并单元格导出应返回 200');
 
-    // 4. 验证彻底释放端口与 SQLite 文件句柄（若句柄未释放，Windows 下 rmSync 会抛 EBUSY）
+    // 6. 验证彻底释放端口与 SQLite 文件句柄
     await controller.shutdown();
     controller = null;
     fs.rmSync(testDataRoot, { recursive: true, force: true });
-    console.log('✅ 多方分行合并、Excel合并导出与资源彻底释放测试全部通过！');
+    console.log('✅ 编号前缀/后缀自动递增、多方分行合并、Excel合并导出与资源彻底释放测试全部通过！');
     process.exit(0);
   } catch (err) {
     console.error('❌ 冒烟测试失败:', err);
