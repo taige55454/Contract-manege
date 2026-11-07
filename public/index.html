@@ -29,7 +29,6 @@
         <h1>📄 企业合同与采购立项台账系统</h1>
         <p class="header-sub">双台账双向互锁 · 夹心式智能编码 · 三大资料库跨模块穿透 · 双子表一键总导出</p>
       </div>
-      <!-- 模块导航切换栏 -->
       <div class="module-tabs">
         <button type="button" id="tab_btn_contract" class="module-tab active" onclick="switchModuleTab('contract')">
           📄 合同管理台账
@@ -49,13 +48,11 @@
 
       <button type="button" id="btn_lan_logout" class="btn btn-outline btn-sm hidden" onclick="logoutLanSession()">🔒 锁定退出</button>
 
-      <!-- 全局下拉选项自定义预设入口（沿用原版 default-entity-bar 胶囊样式） -->
       <div class="default-entity-bar" style="background:#eff6ff;border-color:#bfdbfe;color:#1e40af;" title="自由增删改：合同类型、合同状态、立项类型、承担部门、采购类型、采购方式等下拉选项">
         <span>🎛️ 下拉选项：</span>
         <button type="button" class="btn btn-outline btn-sm" onclick="openPresetsModal()">自定义预设</button>
       </div>
 
-      <!-- 合同模块专属顶部动作组 -->
       <div id="header_group_contract" class="header-module-group">
         <div class="default-entity-bar">
           <span>🔢 合同编号：</span>
@@ -80,7 +77,6 @@
         </div>
       </div>
 
-      <!-- 采购模块专属顶部动作组 -->
       <div id="header_group_procurement" class="header-module-group hidden">
         <div class="default-entity-bar" style="background:#f0fdf4;border-color:#99f6e4;color:#115e59;">
           <span>🔢 立项编号：</span>
@@ -100,7 +96,6 @@
         </div>
       </div>
 
-      <!-- 全局常驻：一键同时导出双子表总台账按钮 -->
       <button type="button" class="btn btn-combined-export" onclick="exportCombinedWorkbook()" title="生成同一个 Excel 文件：第1子表为《合同台账》，第2子表为《采购项目台账》，均含完整超链接与隔行换色">
         📊 同时导出双台账总表(含2个子表)
       </button>
@@ -255,7 +250,7 @@
     </section>
   </main>
 
-  <!-- 弹窗 S：本机管理员专属【内网协同口令与动态随机端口】设置弹窗 -->
+  <!-- 弹窗 S：内网协同口令与动态随机端口设置 -->
   <div id="lan_security_modal" class="modal hidden">
     <div class="modal-content" style="width: 560px; max-width: 95vw;">
       <div class="modal-header">
@@ -266,7 +261,7 @@
         <div class="form-scroll-body">
           <div style="background:#f0fdf4;border:1px solid #86efac;padding:10px 12px;border-radius:6px;margin-bottom:12px;font-size:12.5px;color:#166534;line-height:1.55;">
             🛡️ <strong>多重安全保障已覆盖【合同台账 + 采购立项台账】：</strong><br/>
-            1. 本机 (`127.0.0.1`) 永远免密直连；内网其他电脑或手机需验证 1 次口令（12 小时有效）。<br/>
+            1. 本机 (`127.0.0.1`) 永远免密直连；内网其他电脑或手机验证 1 次口令后 12 小时内有效。<br/>
             2. 每次重启软件自动更换随机端口；随时修改口令可立即将所有内网连接踢出锁屏。
           </div>
           <div class="form-group" style="margin-bottom:12px;">
@@ -293,7 +288,7 @@
     </div>
   </div>
 
-  <!-- 弹窗 P：自定义下拉选项与预设词库配置弹窗（沿用原版 modal + form-scroll-body 样式） -->
+  <!-- 弹窗 P：自定义下拉选项与预设词库配置 -->
   <div id="presets_modal" class="modal hidden">
     <div class="modal-content" style="width: 720px; max-width: 95vw;">
       <div class="modal-header" style="background:#eff6ff;">
@@ -311,7 +306,7 @@
               <textarea id="preset_contract_types" rows="2" placeholder="如：采购、服务、销售、框架、其他"></textarea>
             </div>
             <div class="form-group span-2">
-              <label>📄 2. 合同状态（下拉选择项）</label>
+              <label>📄 2. 合同状态（支持自定义同义词自动流转）</label>
               <textarea id="preset_contract_statuses" rows="2" placeholder="如：草稿、生效中、已到期、已终止"></textarea>
             </div>
             <div class="form-group span-2">
@@ -373,7 +368,7 @@
     </div>
   </div>
 
-  <!-- 弹窗 B1：合同编号规则设置（支持前缀 + 默认中间穿插段 + 日期段 + 流水号 + 后缀） -->
+  <!-- 弹窗 B1：合同编号规则设置 -->
   <div id="no_rule_modal" class="modal hidden">
     <div class="modal-content" style="width: 620px; max-width: 95vw;">
       <div class="modal-header">
@@ -436,7 +431,7 @@
     </div>
   </div>
 
-  <!-- 弹窗 B2：采购立项编号规则设置（贴合 LX20260318024 规律 + 支持灰色预设之间自定义输入） -->
+  <!-- 弹窗 B2：采购立项编号规则设置 -->
   <div id="proc_no_rule_modal" class="modal hidden">
     <div class="modal-content" style="width: 620px; max-width: 95vw;">
       <div class="modal-header" style="background:#f0fdf4;">
@@ -499,7 +494,7 @@
     </div>
   </div>
 
-  <!-- 弹窗 1：新增 / 编辑【合同台账】表单（含夹心式分段编号器 & 双向关联采购立项） -->
+  <!-- 弹窗 1：新增 / 编辑【合同台账】表单 -->
   <div id="form_modal" class="modal hidden">
     <div class="modal-content modal-lg">
       <div class="modal-header">
@@ -525,7 +520,6 @@
                   <a href="javascript:void(0)" class="link-btn" style="font-size:11px;" onclick="fillAutoContractNo(document.getElementById('f_sign_date').value)">🔄 重算流水号</a>
                 </span>
               </label>
-              <!-- 夹心式 4 段合同编号器：[灰底前缀] + [可手填穿插段] + [灰底日期段] + [可手填流水号] + [灰底后缀] -->
               <div id="segmented_no_box" class="segmented-no-wrapper">
                 <span id="seg_prefix" class="seg-locked">XSZY-黔-BJ-</span>
                 <input type="text" id="seg_mid_custom_input" class="seg-custom-mid" placeholder="穿插段(选填)" title="可在固定前缀与日期段之间插入自定义字符" oninput="onContractMidCustomChange()" />
@@ -541,7 +535,6 @@
               <input type="text" name="contract_name" id="f_contract_name" placeholder="如：毕节自营公司产品邮寄配送服务合同" required />
             </div>
 
-            <!-- 双向关联：在合同录入时关联采购立项 -->
             <div class="form-group span-2" style="background:#f3e8ff;padding:6px 10px;border-radius:4px;border:1px solid #d8b4fe;">
               <label style="color:#6b21a8;">🔗 关联采购立项条目 <small style="font-weight:400;">(选填，选中后自动双向绑定并共享立项资料链接；也可之后在采购模块反向绑定)</small></label>
               <select name="procurement_id" id="f_procurement_id" onchange="onSelectLinkedProcurementInContractForm(this)">
@@ -595,6 +588,11 @@
               </div>
             </div>
 
+            <div class="form-group span-4">
+              <label>合同公共备注 <small class="muted">(选填，对整份合同的补充说明；各履约方独立备注可在下方卡片填写)</small></label>
+              <input type="text" name="remark" id="f_remark" placeholder="选填：整份合同的公共备注说明..." />
+            </div>
+
             <div class="form-group span-2">
               <label>① 主合同扫描件 <small class="muted">(PDF/JPG/PNG，支持手机直接拍照上传)</small></label>
               <input type="file" name="attachment" id="f_attachment" accept=".pdf,.jpg,.jpeg,.png" />
@@ -626,7 +624,7 @@
     </div>
   </div>
 
-  <!-- 弹窗 2：新增 / 编辑【采购项目立项台账】表单（含夹心式分段立项编号器 + 费用承担部门 + 双向关联合同） -->
+  <!-- 弹窗 2：新增 / 编辑【采购项目立项台账】表单 -->
   <div id="proc_form_modal" class="modal hidden">
     <div class="modal-content modal-lg">
       <div class="modal-header" style="background:#f0fdf4;">
@@ -673,7 +671,6 @@
           </datalist>
 
           <div class="form-grid-4">
-            <!-- 夹心式 4 段采购立项编号器：[灰底前缀 LX] + [可手填穿插段] + [灰底日期段 20260318] + [可手填流水号 024] + [灰底后缀] -->
             <div class="form-group span-2">
               <label style="display:flex;justify-content:space-between;align-items:center;">
                 <span>采购立项编号 * <small class="muted" id="p_no_mode_hint">(灰底预设段中间可穿插手填)</small></span>
@@ -708,7 +705,6 @@
               </select>
             </div>
 
-            <!-- 立项类型后面的“费用承担部门”字段 -->
             <div class="form-group" style="background:#fffbeb;padding:4px 8px;border-radius:4px;border:1px solid #fde68a;">
               <label style="color:#92400e;">费用承担部门 <small class="muted">(可下拉或手填)</small></label>
               <input type="text" name="cost_department" id="p_cost_department" list="dept_list" placeholder="如：综合部 / 省区费用预算" />
@@ -775,7 +771,6 @@
               </select>
             </div>
 
-            <!-- 双向关联：在采购台账中选择关联已有合同，或先手填合同号 -->
             <div class="form-group span-2" style="background:#eff6ff;padding:8px 10px;border-radius:4px;border:1px solid #93c5fd;">
               <label style="color:#1e3a8a;">🔗 选择关联【合同台账】中的条目 <small style="font-weight:400;">(选中后自动互锁并直连合同扫描件)</small></label>
               <select name="contract_id" id="p_contract_id" onchange="onSelectLinkedContractInProcForm(this)">
@@ -807,7 +802,7 @@
     </div>
   </div>
 
-  <!-- 弹窗 3：全能详情与三大文件在线预览中心（合同详情 & 采购立项详情共用） -->
+  <!-- 弹窗 3：全能详情与三大文件在线预览中心 -->
   <div id="detail_modal" class="modal hidden">
     <div class="modal-content modal-xl">
       <div class="modal-header">
