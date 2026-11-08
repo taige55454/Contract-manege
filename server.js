@@ -16,7 +16,7 @@ app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 // ==================== 1. 存储路径与上传目录初始化 ====================
 const DATA_ROOT = process.env.DATA_ROOT || __dirname;
 const DB_PATH = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
-const UPLOAD_DIR = path.join(UPLOAD_DIR_ENV = path.join(DATA_ROOT, 'uploads'));
+const UPLOAD_DIR = path.join(DATA_ROOT, 'uploads');
 const RELATED_UPLOAD_DIR = path.join(UPLOAD_DIR, 'related');
 const PROC_UPLOAD_DIR = path.join(UPLOAD_DIR, 'procurement');
 
@@ -35,12 +35,25 @@ function decodeFilename(name) {
   }
 }
 
-function sanitizeFileToken(str) {
+function sanitizeFileToken(str, maxLen = 85) {
   return String(str || 'UNNAMED')
     .trim()
     .replace(/[\\/:*?"<>|\r\n]+/g, '_')
     .replace(/\s+/g, '_')
-    .slice(0, 85) || 'UNNAMED';
+    .replace(/_+/g, '_')
+    .replace(/^_|_$/g, '')
+    .slice(0, maxLen) || 'UNNAMED';
+}
+
+/**
+ * 构建规范化的资料文件夹名称：序号_编号_名称
+ * 例如：2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同
+ */
+function buildStandardFolderName(seqNo, codeNo, itemName) {
+  const s = sanitizeFileToken(seqNo || '0000-000', 15);
+  const c = sanitizeFileToken(codeNo || 'NO', 35);
+  const n = sanitizeFileToken(itemName || '未命名', 50);
+  return `${s}_${c}_${n}`;
 }
 
 function escapeExcelFormulaStr(str) {
@@ -301,7 +314,6 @@ db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_securit
 db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('dropdown_presets', ?)`).run(JSON.stringify(DEFAULT_DROPDOWN_PRESETS));
 db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_secret_salt', ?)`).run(crypto.randomBytes(24).toString('hex'));
 
-// 确保默认签约主体非空，默认为脱敏后的 ABC公司
 const entRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
 if (!entRow || !String(entRow.value || '').trim()) {
   db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('default_our_entity', 'ABC公司')`).run();
@@ -436,7 +448,7 @@ function lanAuthGuard(req, res, next) {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', lanAuthGuard);
 
-// ==================== 5. 智能日期解析与统一年份序号重排引擎 (YYYY-001) ====================
+// ==================== 5. 智能日期解析、年份序号重排与规范化文件夹同步引擎 ====================
 function normalizeSmartDateStr(raw) {
   const str = String(raw || '').trim();
   if (!str) return '';
@@ -488,7 +500,102 @@ function autoRefreshExpiredContractsInDB() {
 }
 
 /**
- * 合同台账序号重排：统一重排为 YYYY-001 年份序号格式
+ * 将合同其他资料所在的文件夹自动规范化为：uploads/related/序号_合同编号_合同名称/
+ */
+function syncContractRelatedFolderOnDisk(contractId) {
+  const c = db.prepare(`SELECT id, seq_no, contract_no, contract_name FROM contracts WHERE id = ?`).get(contractId);
+  if (!c) return;
+  const files = db.prepare(`SELECT id, file_path, file_original_name FROM contract_related_files WHERE contract_id = ?`).all(contractId);
+  if (files.length === 0) return;
+
+  const idealFolder = buildStandardFolderName(c.seq_no, c.contract_no, c.contract_name);
+  const targetDir = path.join(RELATED_UPLOAD_DIR, idealFolder);
+  if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+  const updateStmt = db.prepare(`UPDATE contract_related_files SET file_path = ? WHERE id = ?`);
+  for (const f of files) {
+    const absOld = resolveSafeUploadPath(f.file_path);
+    if (!absOld || !fs.existsSync(absOld)) continue;
+
+    const currentBase = path.basename(absOld);
+    const ext = path.extname(currentBase) || path.extname(f.file_original_name) || '';
+    const origStem = sanitizeFileToken(path.basename(f.file_original_name || currentBase, ext), 55);
+    const noToken = sanitizeFileToken(c.contract_no, 35);
+
+    // 若文件名此前以 CONTRACT_ 或 FILE_ 开头，一并规范化为 合同编号_原文件名
+    let newFileName = currentBase;
+    if (/^(CONTRACT_|FILE_|TEMP)/i.test(currentBase)) {
+      newFileName = `${noToken}_${origStem}${ext}`;
+    }
+
+    let absNew = path.join(targetDir, newFileName);
+    if (path.resolve(absOld) === path.resolve(absNew)) continue;
+
+    if (fs.existsSync(absNew)) {
+      newFileName = `${noToken}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}_${origStem}${ext}`;
+      absNew = path.join(targetDir, newFileName);
+    }
+
+    try {
+      fs.renameSync(absOld, absNew);
+      removeEmptyParentDir(absOld);
+      const newRelPath = path.relative(UPLOAD_DIR, absNew).split(path.sep).join('/');
+      updateStmt.run(newRelPath, f.id);
+    } catch (e) {
+      console.warn('迁移合同关联附件目录失败:', e.message);
+    }
+  }
+}
+
+/**
+ * 将采购立项资料所在的文件夹自动规范化为：uploads/procurement/序号_立项编号_项目名称/
+ */
+function syncProcurementFolderOnDisk(procId) {
+  const p = db.prepare(`SELECT id, seq_no, procurement_no, project_name FROM procurement_projects WHERE id = ?`).get(procId);
+  if (!p) return;
+  const files = db.prepare(`SELECT id, file_path, file_original_name FROM procurement_files WHERE procurement_id = ?`).all(procId);
+  if (files.length === 0) return;
+
+  const idealFolder = buildStandardFolderName(p.seq_no, p.procurement_no, p.project_name);
+  const targetDir = path.join(PROC_UPLOAD_DIR, idealFolder);
+  if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+
+  const updateStmt = db.prepare(`UPDATE procurement_files SET file_path = ? WHERE id = ?`);
+  for (const f of files) {
+    const absOld = resolveSafeUploadPath(f.file_path);
+    if (!absOld || !fs.existsSync(absOld)) continue;
+
+    const currentBase = path.basename(absOld);
+    const ext = path.extname(currentBase) || path.extname(f.file_original_name) || '';
+    const origStem = sanitizeFileToken(path.basename(f.file_original_name || currentBase, ext), 55);
+    const noToken = sanitizeFileToken(p.procurement_no, 35);
+
+    let newFileName = currentBase;
+    if (/^(PROC_|FILE_|TEMP)/i.test(currentBase)) {
+      newFileName = `${noToken}_${origStem}${ext}`;
+    }
+
+    let absNew = path.join(targetDir, newFileName);
+    if (path.resolve(absOld) === path.resolve(absNew)) continue;
+
+    if (fs.existsSync(absNew)) {
+      newFileName = `${noToken}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}_${origStem}${ext}`;
+      absNew = path.join(targetDir, newFileName);
+    }
+
+    try {
+      fs.renameSync(absOld, absNew);
+      removeEmptyParentDir(absOld);
+      const newRelPath = path.relative(UPLOAD_DIR, absNew).split(path.sep).join('/');
+      updateStmt.run(newRelPath, f.id);
+    } catch (e) {
+      console.warn('迁移采购立项附件目录失败:', e.message);
+    }
+  }
+}
+
+/**
+ * 合同台账序号重排（统一为 YYYY-001）并同步所有关联资料文件夹名称
  */
 function recalculateAllSeqNos() {
   const all = db.prepare(`SELECT id, sign_date, contract_no FROM contracts ORDER BY sign_date ASC, contract_no ASC, id ASC`).all();
@@ -503,10 +610,13 @@ function recalculateAllSeqNos() {
     }
   });
   tx();
+  for (const row of all) {
+    syncContractRelatedFolderOnDisk(row.id);
+  }
 }
 
 /**
- * 采购立项台账序号重排：统一重排为 YYYY-001 年份序号格式
+ * 采购立项台账序号重排（统一为 YYYY-001）并同步所有立项资料文件夹名称
  */
 function recalculateAllProcurementSeqNos() {
   const all = db.prepare(`SELECT id, approval_date, procurement_no FROM procurement_projects ORDER BY approval_date ASC, procurement_no ASC, id ASC`).all();
@@ -521,6 +631,9 @@ function recalculateAllProcurementSeqNos() {
     }
   });
   tx();
+  for (const row of all) {
+    syncProcurementFolderOnDisk(row.id);
+  }
 }
 
 recalculateAllSeqNos();
@@ -701,12 +814,26 @@ function parseCounterpartiesFromBody(body) {
 const uploadStorage = multer.diskStorage({
   destination: (req, file, cb) => {
     if (file.fieldname === 'related_files') {
-      const folderToken = sanitizeFileToken(req.body.contract_no || `CONTRACT_${req.params.id || 'TEMP'}`);
+      let folderToken = '';
+      if (req.params && req.params.id) {
+        const cRow = db.prepare(`SELECT seq_no, contract_no, contract_name FROM contracts WHERE id = ?`).get(req.params.id);
+        if (cRow) folderToken = buildStandardFolderName(cRow.seq_no, cRow.contract_no, cRow.contract_name);
+      }
+      if (!folderToken) {
+        folderToken = buildStandardFolderName('TEMP', req.body?.contract_no || 'NEW', req.body?.contract_name || 'CONTRACT');
+      }
       const targetDir = path.join(RELATED_UPLOAD_DIR, folderToken);
       if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
       cb(null, targetDir);
     } else if (file.fieldname === 'procurement_files') {
-      const folderToken = sanitizeFileToken(req.body.procurement_no || `PROC_${req.params.id || 'TEMP'}`);
+      let folderToken = '';
+      if (req.params && req.params.id) {
+        const pRow = db.prepare(`SELECT seq_no, procurement_no, project_name FROM procurement_projects WHERE id = ?`).get(req.params.id);
+        if (pRow) folderToken = buildStandardFolderName(pRow.seq_no, pRow.procurement_no, pRow.project_name);
+      }
+      if (!folderToken) {
+        folderToken = buildStandardFolderName('TEMP', req.body?.procurement_no || 'NEW', req.body?.project_name || 'PROC');
+      }
       const targetDir = path.join(PROC_UPLOAD_DIR, folderToken);
       if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
       cb(null, targetDir);
@@ -717,18 +844,36 @@ const uploadStorage = multer.diskStorage({
   filename: (req, file, cb) => {
     const orig = decodeFilename(file.originalname);
     const ext = path.extname(orig) || '.pdf';
-    const baseOrig = sanitizeFileToken(path.basename(orig, ext));
+    const baseOrig = sanitizeFileToken(path.basename(orig, ext), 55);
 
     if (file.fieldname === 'attachment') {
-      const token = sanitizeFileToken(req.body.contract_no || `CONTRACT_${Date.now()}`);
+      let cNo = req.body?.contract_no;
+      if (!cNo && req.params?.id) {
+        const cRow = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
+        if (cRow) cNo = cRow.contract_no;
+      }
+      const token = sanitizeFileToken(cNo || `CONTRACT_${Date.now()}`, 45);
       let finalName = `${token}${ext}`;
       if (fs.existsSync(path.join(UPLOAD_DIR, finalName))) {
         finalName = `${token}_${Date.now()}${ext}`;
       }
       cb(null, finalName);
+    } else if (file.fieldname === 'related_files') {
+      let cNo = req.body?.contract_no;
+      if (!cNo && req.params?.id) {
+        const cRow = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
+        if (cRow) cNo = cRow.contract_no;
+      }
+      const prefixToken = sanitizeFileToken(cNo || 'HT', 35);
+      cb(null, `${prefixToken}_${baseOrig}${ext}`);
     } else {
-      const prefixToken = sanitizeFileToken(req.body.contract_no || req.body.procurement_no || 'FILE');
-      cb(null, `${prefixToken}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}_${baseOrig}${ext}`);
+      let pNo = req.body?.procurement_no;
+      if (!pNo && req.params?.id) {
+        const pRow = db.prepare(`SELECT procurement_no FROM procurement_projects WHERE id = ?`).get(req.params.id);
+        if (pRow) pNo = pRow.procurement_no;
+      }
+      const prefixToken = sanitizeFileToken(pNo || 'LX', 35);
+      cb(null, `${prefixToken}_${baseOrig}${ext}`);
     }
   }
 });
@@ -1013,8 +1158,8 @@ function hydrateProcurementRow(row) {
   };
 }
 
-// ==================== 10. 合同管理 CRUD API ====================
-function queryFilteredContracts(query) {
+// ==================== 10. 查询过滤函数与 Excel 导出构建器（前置以避免 :id 路由拦截） ====================
+function queryFilteredContracts(query = {}) {
   autoRefreshExpiredContractsInDB();
 
   const {
@@ -1072,6 +1217,421 @@ function queryFilteredContracts(query) {
   return rawRows.map(hydrateContractRow);
 }
 
+function queryFilteredProcurements(query = {}) {
+  const { kw, year, type, dept, has_contract, sort_order = 'asc' } = query;
+  const conditions = [];
+  const params = {};
+
+  if (kw && kw.trim()) {
+    conditions.push(`(seq_no LIKE @kw OR procurement_no LIKE @kw OR project_name LIKE @kw OR supplier_name LIKE @kw OR budget_subject LIKE @kw OR contract_no_manual LIKE @kw OR remark LIKE @kw)`);
+    params.kw = `%${kw.trim()}%`;
+  }
+  if (year && year.trim()) {
+    conditions.push(`substr(approval_date, 1, 4) = @year`);
+    params.year = year.trim();
+  }
+  if (type && type.trim()) {
+    conditions.push(`project_type = @type`);
+    params.type = type.trim();
+  }
+  if (dept && dept.trim()) {
+    conditions.push(`cost_department LIKE @dept`);
+    params.dept = `%${dept.trim()}%`;
+  }
+  if (has_contract && has_contract.trim()) {
+    conditions.push(`has_contract = @has_contract`);
+    params.has_contract = has_contract.trim();
+  }
+
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const dir = String(sort_order).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+  const orderClause = `ORDER BY substr(approval_date, 1, 4) ${dir}, CAST(substr(seq_no, 6) AS INTEGER) ${dir}, id ${dir}`;
+
+  const rawRows = db.prepare(`SELECT * FROM procurement_projects ${whereClause} ${orderClause}`).all(params);
+  return rawRows.map(hydrateProcurementRow);
+}
+
+function buildBorderSpec(isGroupBottom = false) {
+  return {
+    top: { style: 'thin', color: { rgb: 'CBD5E1' } },
+    bottom: isGroupBottom
+      ? { style: 'medium', color: { rgb: '64748B' } }
+      : { style: 'thin', color: { rgb: 'CBD5E1' } },
+    left: { style: 'thin', color: { rgb: 'CBD5E1' } },
+    right: { style: 'thin', color: { rgb: 'CBD5E1' } }
+  };
+}
+
+/**
+ * 合同台账 Excel 构建器：
+ * - 共 34 列 (索引 0 ~ 33，对应 A ~ AH 列)
+ * - 去掉“采购立项资料(点击打开)”冗余列，若关联立项上传了资料，直接在“关联采购立项号”列加超链接（显示文字仍为立项号）
+ * - 主合同扫描件直接显示文件名（如 HT-ABC-xxx.pdf），去掉“点击打开”
+ * - 第 1、2 行不填充任何颜色，所有行高统一为 50 磅 (hpt: 50)
+ */
+function buildContractWorksheet(rows) {
+  const headers = [
+    '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
+    '签订日期', '开始履约日', '合同到期日', '状态',
+    '履约摘要', '对方单位名称', '统一社会信用代码',
+    '联系人', '联系电话', '收款账户名称', '收款银行账号', '开户银行', '开户行号',
+    '含税金额(元)', '不含税价(元)', '税率', '发票类型', '币种',
+    '履约保证金(元)', '保证金状态', '保证金应退日',
+    '质保金金额(元)', '质保金状态', '质保金到期日', '备注',
+    '主合同扫描件', '关联采购立项号', '其他相关资料', '本合同含税总额(元)'
+  ];
+
+  const aoa = [
+    ['企业合同管理台账总表'],
+    headers
+  ];
+
+  const merges = [
+    { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
+  ];
+
+  const rowMeta = [];
+  let currentRowIdx = 2;
+
+  rows.forEach((c, groupIdx) => {
+    const parties = c.counterparties && c.counterparties.length > 0 ? c.counterparties : [{}];
+    const span = parties.length;
+    const startRow = currentRowIdx;
+    const endRow = currentRowIdx + span - 1;
+    const isOddGroup = groupIdx % 2 === 1;
+
+    const totalContractAmt = parties.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const procNo = c.linked_procurement ? c.linked_procurement.procurement_no : '';
+    const procFiles = (c.linked_procurement && c.linked_procurement.files) || [];
+    const relFiles = c.related_files || [];
+    const scanFileName = c.attachment_path ? path.basename(c.attachment_path) : '';
+
+    parties.forEach((cp, pIdx) => {
+      const combinedRemark = [cp.remark, c.remark].filter(Boolean).join('\n');
+      const rowData = [
+        c.seq_no || '',
+        c.contract_no || '',
+        c.contract_name || '',
+        c.contract_type || '',
+        c.our_entity || '',
+        c.sign_date || '',
+        c.start_date || '',
+        c.expiry_date || '',
+        c.status || '',
+        cp.summary || '',
+        cp.company_name || '',
+        cp.credit_code || '',
+        cp.contact_person || '',
+        cp.contact_phone || '',
+        cp.bank_account_name || '',
+        cp.bank_account_no || '',
+        cp.bank_name || '',
+        cp.bank_code || '',
+        Number(cp.amount || 0),
+        Number(cp.amount_excl_tax || 0),
+        normalizeSmartTaxRateServer(cp.tax_rate || ''),
+        cp.invoice_type || '',
+        cp.currency || 'CNY',
+        Number(cp.perf_bond_amount || 0),
+        cp.perf_bond_status || '无',
+        cp.perf_bond_return_date || '',
+        Number(cp.warranty_bond_amount || 0),
+        cp.warranty_bond_status || '无',
+        cp.warranty_bond_expiry_date || '',
+        combinedRemark,
+        scanFileName || '未上传',
+        procNo || '未关联',
+        relFiles.length > 0 ? (relFiles.length === 1 ? relFiles[0].file_original_name : `${relFiles[0].file_original_name} 等${relFiles.length}份`) : '无',
+        totalContractAmt
+      ];
+      aoa.push(rowData);
+      rowMeta[currentRowIdx] = {
+        isOddGroup,
+        isGroupBottom: pIdx === span - 1,
+        c,
+        scanFileName,
+        procNo,
+        procFiles,
+        relFiles,
+        isFirstInGroup: pIdx === 0
+      };
+      currentRowIdx++;
+    });
+
+    if (span > 1) {
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 30, 31, 32, 33].forEach(colIdx => {
+        merges.push({ s: { r: startRow, c: colIdx }, e: { r: endRow, c: colIdx } });
+      });
+    }
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = merges;
+
+  ws['!cols'] = [
+    { wch: 11 }, { wch: 18 }, { wch: 18 }, { wch: 8 },  { wch: 14 },
+    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 9 },
+    { wch: 28 }, { wch: 16 }, { wch: 18 },
+    { wch: 9 },  { wch: 13 }, { wch: 18 }, { wch: 19 }, { wch: 18 }, { wch: 14 },
+    { wch: 13 }, { wch: 13 }, { wch: 10 }, { wch: 15 }, { wch: 7 },
+    { wch: 13 }, { wch: 9 },  { wch: 11 },
+    { wch: 13 }, { wch: 9 },  { wch: 11 }, { wch: 26 },
+    { wch: 22 }, { wch: 18 }, { wch: 20 }, { wch: 15 }
+  ];
+
+  // 所有行高统一设为 50 磅
+  ws['!rows'] = [];
+  for (let r = 0; r < currentRowIdx; r++) {
+    ws['!rows'][r] = { hpt: 50 };
+  }
+
+  const centerCols = new Set([0, 1, 3, 4, 5, 6, 7, 8, 11, 12, 13, 15, 17, 20, 21, 22, 24, 25, 27, 28, 30, 31, 32]);
+  const moneyCols = new Set([18, 19, 23, 26, 33]);
+
+  for (let r = 0; r < currentRowIdx; r++) {
+    for (let c = 0; c < headers.length; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r, c });
+      if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
+
+      if (r === 0) {
+        // 第1行标题行：无填充底色，黑字加粗居中
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: '000000' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+          border: buildBorderSpec(false)
+        };
+      } else if (r === 1) {
+        // 第2行表头行：无填充底色，黑字加粗居中
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '000000' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+          border: buildBorderSpec(true)
+        };
+      } else {
+        const meta = rowMeta[r];
+        const bgRgb = meta.isOddGroup ? 'F8FAFC' : 'FFFFFF';
+        const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
+
+        if (meta.isFirstInGroup) {
+          if (c === 30 && meta.c.attachment_path) {
+            // 主合同扫描件：直接显示文件名
+            const relUrl = escapeExcelFormulaStr(`uploads/${meta.c.attachment_path}`);
+            const label = escapeExcelFormulaStr(meta.scanFileName);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.scanFileName };
+          } else if (c === 31 && meta.procNo && meta.procFiles.length > 0) {
+            // 关联采购立项号：如果上传了立项资料，直接在立项号上加超链接（显示文字仍为立项号）
+            const relUrl = escapeExcelFormulaStr(`uploads/${meta.procFiles[0].file_path}`);
+            const label = escapeExcelFormulaStr(meta.procNo);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.procNo };
+          } else if (c === 32 && meta.relFiles.length > 0) {
+            // 其他相关资料：指向文件夹或首份文件，显示文件名
+            const relUrl = escapeExcelFormulaStr(`uploads/${meta.relFiles[0].file_path}`);
+            const dispText = meta.relFiles.length === 1
+              ? meta.relFiles[0].file_original_name
+              : `${meta.relFiles[0].file_original_name} 等${meta.relFiles.length}份`;
+            const label = escapeExcelFormulaStr(dispText);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: dispText };
+          }
+        }
+
+        const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
+        const isMultiTaxCell = c === 20 && String(ws[cellRef].v || '').startsWith('*');
+
+        ws[cellRef].s = {
+          font: {
+            name: '微软雅黑',
+            sz: 10,
+            bold: c === 1 || c === 18 || c === 33 || isMultiTaxCell,
+            underline: isHyperlinkCell,
+            color: { rgb: isHyperlinkCell ? '2563EB' : (isMultiTaxCell ? '92400E' : '0F172A') }
+          },
+          fill: { fgColor: { rgb: bgRgb } },
+          alignment: { horizontal: hAlign, vertical: 'center', wrapText: true },
+          border: buildBorderSpec(meta.isGroupBottom),
+          ...(moneyCols.has(c) ? { numFmt: '#,##0.00' } : {})
+        };
+      }
+    }
+  }
+
+  return ws;
+}
+
+/**
+ * 采购立项台账 Excel 构建器：
+ * - 共 18 列 (索引 0 ~ 17，对应 A ~ R 列)
+ * - 表头去掉“(点击打开)”，第 1、2 行不填充任何颜色，所有行高统一为 50 磅
+ */
+function buildProcurementWorksheet(rows) {
+  const headers = [
+    '序号', '项目立项编号', '项目名称', '立项类型', '费用承担部门',
+    '预算金额(元)', '预算科目名称', '采购类型', '采购方式',
+    '立项时间', '决策时间', '采购完成时间', '成交供应商全称',
+    '成交金额(元)', '是否签合同', '关联合同编号', '备注', '立项相关资料'
+  ];
+
+  const aoa = [
+    ['企业采购项目立项台账总表'],
+    headers
+  ];
+
+  rows.forEach(p => {
+    const cNo = p.linked_contract ? p.linked_contract.contract_no : (p.contract_no_manual || '');
+    const files = p.files || [];
+    const fileLabel = files.length > 0
+      ? (files.length === 1 ? files[0].file_original_name : `${files[0].file_original_name} 等${files.length}份`)
+      : '未上传';
+    aoa.push([
+      p.seq_no || '',
+      p.procurement_no || '',
+      p.project_name || '',
+      p.project_type || '',
+      p.cost_department || '',
+      Number(p.budget_amount || 0),
+      p.budget_subject || '',
+      p.procurement_type || '',
+      p.procurement_method || '',
+      p.approval_date || '',
+      p.decision_date || '',
+      p.completion_date || '',
+      p.supplier_name || '',
+      Number(p.deal_amount || 0),
+      p.has_contract || '否',
+      cNo || '-',
+      p.remark || '',
+      fileLabel
+    ]);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+  ws['!cols'] = [
+    { wch: 11 }, { wch: 16 }, { wch: 20 }, { wch: 12 }, { wch: 14 },
+    { wch: 13 }, { wch: 14 }, { wch: 13 }, { wch: 13 },
+    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 18 },
+    { wch: 13 }, { wch: 9 },  { wch: 18 }, { wch: 24 }, { wch: 22 }
+  ];
+
+  const totalRows = aoa.length;
+  ws['!rows'] = [];
+  for (let r = 0; r < totalRows; r++) {
+    ws['!rows'][r] = { hpt: 50 };
+  }
+
+  const centerCols = new Set([0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 14, 15, 17]);
+  const moneyCols = new Set([5, 13]);
+
+  for (let r = 0; r < totalRows; r++) {
+    for (let c = 0; c < headers.length; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r, c });
+      if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
+
+      if (r === 0) {
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: '000000' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+          border: buildBorderSpec(false)
+        };
+      } else if (r === 1) {
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '000000' } },
+          alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
+          border: buildBorderSpec(true)
+        };
+      } else {
+        const pItem = rows[r - 2];
+        const isOddRow = (r - 2) % 2 === 1;
+        const bgRgb = isOddRow ? 'F8FAFC' : 'FFFFFF';
+        const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
+
+        if (c === 15 && pItem.linked_contract && pItem.linked_contract.attachment_path) {
+          const relUrl = escapeExcelFormulaStr(`uploads/${pItem.linked_contract.attachment_path}`);
+          const label = escapeExcelFormulaStr(pItem.linked_contract.contract_no);
+          ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: pItem.linked_contract.contract_no };
+        } else if (c === 17 && pItem.files && pItem.files.length > 0) {
+          const relUrl = escapeExcelFormulaStr(`uploads/${pItem.files[0].file_path}`);
+          const dispText = pItem.files.length === 1
+            ? pItem.files[0].file_original_name
+            : `${pItem.files[0].file_original_name} 等${pItem.files.length}份`;
+          const label = escapeExcelFormulaStr(dispText);
+          ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: dispText };
+        }
+
+        const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
+        ws[cellRef].s = {
+          font: {
+            name: '微软雅黑',
+            sz: 10,
+            bold: c === 1 || c === 13,
+            underline: isHyperlinkCell,
+            color: { rgb: isHyperlinkCell ? '2563EB' : '0F172A' }
+          },
+          fill: { fgColor: { rgb: bgRgb } },
+          alignment: { horizontal: hAlign, vertical: 'center', wrapText: true },
+          border: buildBorderSpec(false),
+          ...(moneyCols.has(c) ? { numFmt: '#,##0.00' } : {})
+        };
+      }
+    }
+  }
+
+  return ws;
+}
+
+// ==================== 11. Excel 三大导出路由（置于 :id 路由之前，彻底杜绝路由冲突） ====================
+app.get('/api/export/excel', (req, res) => {
+  try {
+    const query = req.query.mode === 'all' ? {} : req.query;
+    const rows = queryFilteredContracts(query);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, buildContractWorksheet(rows), '合同台账');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const fname = encodeURIComponent(`企业合同管理台账_${getLocalTodayStr()}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
+  } catch (err) {
+    res.status(500).send('导出合同Excel失败: ' + err.message);
+  }
+});
+
+app.get('/api/procurements/export', (req, res) => {
+  try {
+    const query = req.query.mode === 'all' ? {} : req.query;
+    const rows = queryFilteredProcurements(query);
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, buildProcurementWorksheet(rows), '采购项目台账');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const fname = encodeURIComponent(`企业采购项目立项台账_${getLocalTodayStr()}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
+  } catch (err) {
+    res.status(500).send('导出采购Excel失败: ' + err.message);
+  }
+});
+
+app.get('/api/export/combined', (req, res) => {
+  try {
+    const contractRows = queryFilteredContracts({});
+    const procRows = queryFilteredProcurements({});
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, buildContractWorksheet(contractRows), '合同台账');
+    XLSX.utils.book_append_sheet(wb, buildProcurementWorksheet(procRows), '采购项目台账');
+    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    const fname = encodeURIComponent(`企业合同与采购项目双台账总表_${getLocalTodayStr()}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.send(buf);
+  } catch (err) {
+    res.status(500).send('导出合并总表失败: ' + err.message);
+  }
+});
+
+// ==================== 12. 合同管理 CRUD API ====================
 app.get('/api/contracts', (req, res) => {
   try {
     const rows = queryFilteredContracts(req.query);
@@ -1336,11 +1896,7 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
   }
 });
 
-app.post('/api/contracts/:id/attachment', (req, res, next) => {
-  const row = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
-  if (row) req.body.contract_no = row.contract_no;
-  next();
-}, upload.single('attachment'), (req, res) => {
+app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res) => {
   try {
     const old = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
     if (!old || !req.file) {
@@ -1365,11 +1921,7 @@ app.post('/api/contracts/:id/attachment', (req, res, next) => {
   }
 });
 
-app.post('/api/contracts/:id/related-files', (req, res, next) => {
-  const row = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
-  if (row) req.body.contract_no = row.contract_no;
-  next();
-}, upload.array('related_files', 30), (req, res) => {
+app.post('/api/contracts/:id/related-files', upload.array('related_files', 30), (req, res) => {
   try {
     const old = db.prepare(`SELECT id FROM contracts WHERE id = ?`).get(req.params.id);
     if (!old) {
@@ -1385,6 +1937,7 @@ app.post('/api/contracts/:id/related-files', (req, res, next) => {
       const relPath = path.relative(UPLOAD_DIR, rf.path).split(path.sep).join('/');
       relStmt.run(old.id, relPath, decodeFilename(rf.originalname), rf.size || 0);
     }
+    syncContractRelatedFolderOnDisk(old.id);
     const allRel = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ? ORDER BY id ASC`).all(old.id);
     res.json({ success: true, related_files: allRel });
   } catch (err) {
@@ -1415,41 +1968,7 @@ app.delete('/api/contracts/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// ==================== 11. 采购项目立项台账 CRUD API ====================
-function queryFilteredProcurements(query) {
-  const { kw, year, type, dept, has_contract, sort_order = 'asc' } = query;
-  const conditions = [];
-  const params = {};
-
-  if (kw && kw.trim()) {
-    conditions.push(`(seq_no LIKE @kw OR procurement_no LIKE @kw OR project_name LIKE @kw OR supplier_name LIKE @kw OR budget_subject LIKE @kw OR contract_no_manual LIKE @kw OR remark LIKE @kw)`);
-    params.kw = `%${kw.trim()}%`;
-  }
-  if (year && year.trim()) {
-    conditions.push(`substr(approval_date, 1, 4) = @year`);
-    params.year = year.trim();
-  }
-  if (type && type.trim()) {
-    conditions.push(`project_type = @type`);
-    params.type = type.trim();
-  }
-  if (dept && dept.trim()) {
-    conditions.push(`cost_department LIKE @dept`);
-    params.dept = `%${dept.trim()}%`;
-  }
-  if (has_contract && has_contract.trim()) {
-    conditions.push(`has_contract = @has_contract`);
-    params.has_contract = has_contract.trim();
-  }
-
-  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
-  const dir = String(sort_order).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
-  const orderClause = `ORDER BY substr(approval_date, 1, 4) ${dir}, CAST(substr(seq_no, 6) AS INTEGER) ${dir}, id ${dir}`;
-
-  const rawRows = db.prepare(`SELECT * FROM procurement_projects ${whereClause} ${orderClause}`).all(params);
-  return rawRows.map(hydrateProcurementRow);
-}
-
+// ==================== 13. 采购项目立项台账 CRUD API ====================
 app.get('/api/procurements', (req, res) => {
   try {
     const rows = queryFilteredProcurements(req.query);
@@ -1651,11 +2170,7 @@ app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, re
   }
 });
 
-app.post('/api/procurements/:id/files', (req, res, next) => {
-  const row = db.prepare(`SELECT procurement_no FROM procurement_projects WHERE id = ?`).get(req.params.id);
-  if (row) req.body.procurement_no = row.procurement_no;
-  next();
-}, upload.array('procurement_files', 30), (req, res) => {
+app.post('/api/procurements/:id/files', upload.array('procurement_files', 30), (req, res) => {
   try {
     const old = db.prepare(`SELECT id FROM procurement_projects WHERE id = ?`).get(req.params.id);
     if (!old) {
@@ -1671,6 +2186,7 @@ app.post('/api/procurements/:id/files', (req, res, next) => {
       const relPath = path.relative(UPLOAD_DIR, pf.path).split(path.sep).join('/');
       fStmt.run(old.id, relPath, decodeFilename(pf.originalname), pf.size || 0);
     }
+    syncProcurementFolderOnDisk(old.id);
     const allFiles = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(old.id);
     res.json({ success: true, files: allFiles });
   } catch (err) {
@@ -1695,359 +2211,6 @@ app.delete('/api/procurements/:id', (req, res) => {
   db.prepare(`DELETE FROM procurement_projects WHERE id = ?`).run(id);
   recalculateAllProcurementSeqNos();
   res.json({ success: true });
-});
-
-// ==================== 12. Excel 样式构建器：全闭合边框 + 隔编号斑马纹浅色背景 + 精准居中对齐 ====================
-function buildBorderSpec(isGroupBottom = false) {
-  return {
-    top: { style: 'thin', color: { rgb: 'CBD5E1' } },
-    bottom: isGroupBottom
-      ? { style: 'medium', color: { rgb: '64748B' } }
-      : { style: 'thin', color: { rgb: 'CBD5E1' } },
-    left: { style: 'thin', color: { rgb: 'CBD5E1' } },
-    right: { style: 'thin', color: { rgb: 'CBD5E1' } }
-  };
-}
-
-function buildContractWorksheet(rows) {
-  // 共 35 列 (索引 0 ~ 34，对应 Excel 的 A 列 ~ AI 列)
-  // 表头规范为“履约摘要”和“备注”
-  const headers = [
-    '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
-    '签订日期', '开始履约日', '合同到期日', '状态',
-    '履约摘要', '对方单位名称', '统一社会信用代码',
-    '联系人', '联系电话', '收款账户名称', '收款银行账号', '开户银行', '开户行号',
-    '含税金额(元)', '不含税价(元)', '税率', '发票类型', '币种',
-    '履约保证金(元)', '保证金状态', '保证金应退日',
-    '质保金金额(元)', '质保金状态', '质保金到期日', '备注',
-    '主合同扫描件(点击打开)', '关联采购立项号', '采购立项资料(点击打开)', '其他相关资料(点击打开)', '本合同含税总额(元)'
-  ];
-
-  const aoa = [
-    ['企业合同管理台账总表（含对方单位独立核算、银行四要素、保证金/质保金及三大资料库直连）'],
-    headers
-  ];
-
-  const merges = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
-  ];
-
-  const rowMeta = [];
-  let currentRowIdx = 2;
-
-  rows.forEach((c, groupIdx) => {
-    const parties = c.counterparties && c.counterparties.length > 0 ? c.counterparties : [{}];
-    const span = parties.length;
-    const startRow = currentRowIdx;
-    const endRow = currentRowIdx + span - 1;
-    const isOddGroup = groupIdx % 2 === 1;
-
-    const totalContractAmt = parties.reduce((sum, p) => sum + Number(p.amount || 0), 0);
-    const procNo = c.linked_procurement ? c.linked_procurement.procurement_no : '';
-    const procFiles = (c.linked_procurement && c.linked_procurement.files) || [];
-    const relFiles = c.related_files || [];
-
-    parties.forEach((cp, pIdx) => {
-      const combinedRemark = [cp.remark, c.remark].filter(Boolean).join('\n');
-      const rowData = [
-        c.seq_no || '',
-        c.contract_no || '',
-        c.contract_name || '',
-        c.contract_type || '',
-        c.our_entity || '',
-        c.sign_date || '',
-        c.start_date || '',
-        c.expiry_date || '',
-        c.status || '',
-        cp.summary || '',
-        cp.company_name || '',
-        cp.credit_code || '',
-        cp.contact_person || '',
-        cp.contact_phone || '',
-        cp.bank_account_name || '',
-        cp.bank_account_no || '',
-        cp.bank_name || '',
-        cp.bank_code || '',
-        Number(cp.amount || 0),
-        Number(cp.amount_excl_tax || 0),
-        normalizeSmartTaxRateServer(cp.tax_rate || ''),
-        cp.invoice_type || '',
-        cp.currency || 'CNY',
-        Number(cp.perf_bond_amount || 0),
-        cp.perf_bond_status || '无',
-        cp.perf_bond_return_date || '',
-        Number(cp.warranty_bond_amount || 0),
-        cp.warranty_bond_status || '无',
-        cp.warranty_bond_expiry_date || '',
-        combinedRemark,
-        c.attachment_path ? `点击打开：${c.contract_no}` : '未上传',
-        procNo || '未关联',
-        procFiles.length > 0 ? `立项资料(${procFiles.length}份)` : '无',
-        relFiles.length > 0 ? `其他资料(${relFiles.length}份)` : '无',
-        totalContractAmt
-      ];
-      aoa.push(rowData);
-      rowMeta[currentRowIdx] = {
-        isOddGroup,
-        isGroupBottom: pIdx === span - 1,
-        c,
-        procFiles,
-        relFiles,
-        isFirstInGroup: pIdx === 0
-      };
-      currentRowIdx++;
-    });
-
-    if (span > 1) {
-      [0, 1, 2, 3, 4, 5, 6, 7, 8, 30, 31, 32, 33, 34].forEach(colIdx => {
-        merges.push({ s: { r: startRow, c: colIdx }, e: { r: endRow, c: colIdx } });
-      });
-    }
-  });
-
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = merges;
-
-  // 列宽紧凑收窄，履约摘要(28)与备注(26)给足换行空间
-  ws['!cols'] = [
-    { wch: 11 }, { wch: 19 }, { wch: 22 }, { wch: 8 },  { wch: 14 },
-    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 9 },
-    { wch: 28 }, { wch: 20 }, { wch: 18 },
-    { wch: 9 },  { wch: 13 }, { wch: 18 }, { wch: 19 }, { wch: 18 }, { wch: 14 },
-    { wch: 13 }, { wch: 13 }, { wch: 10 }, { wch: 15 }, { wch: 7 },
-    { wch: 13 }, { wch: 9 },  { wch: 11 },
-    { wch: 13 }, { wch: 9 },  { wch: 11 }, { wch: 26 },
-    { wch: 20 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 15 }
-  ];
-
-  ws['!rows'] = [{ hpt: 30 }, { hpt: 26 }];
-  for (let r = 2; r < currentRowIdx; r++) {
-    ws['!rows'][r] = { hpt: 24 };
-  }
-
-  const centerCols = new Set([0, 1, 3, 4, 5, 6, 7, 8, 11, 12, 13, 15, 17, 20, 21, 22, 24, 25, 27, 28, 30, 31, 32, 33]);
-  const moneyCols = new Set([18, 19, 23, 26, 34]);
-
-  for (let r = 0; r < currentRowIdx; r++) {
-    for (let c = 0; c < headers.length; c++) {
-      const cellRef = XLSX.utils.encode_cell({ r, c });
-      if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
-
-      if (r === 0) {
-        ws[cellRef].s = {
-          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: 'FFFFFF' } },
-          fill: { fgColor: { rgb: '1E3A8A' } },
-          alignment: { horizontal: 'center', vertical: 'center' },
-          border: buildBorderSpec(false)
-        };
-      } else if (r === 1) {
-        ws[cellRef].s = {
-          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '1E293B' } },
-          fill: { fgColor: { rgb: 'DBEAFE' } },
-          alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
-          border: buildBorderSpec(true)
-        };
-      } else {
-        const meta = rowMeta[r];
-        const bgRgb = meta.isOddGroup ? 'F1F5F9' : 'FFFFFF';
-        const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
-
-        if (meta.isFirstInGroup) {
-          if (c === 30 && meta.c.attachment_path) {
-            const relUrl = escapeExcelFormulaStr(`uploads/${meta.c.attachment_path}`);
-            const label = escapeExcelFormulaStr(`点击打开：${meta.c.contract_no}`);
-            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `点击打开：${meta.c.contract_no}` };
-          } else if (c === 32 && meta.procFiles.length > 0) {
-            const relUrl = escapeExcelFormulaStr(`uploads/${meta.procFiles[0].file_path}`);
-            const label = escapeExcelFormulaStr(`立项资料(${meta.procFiles.length}份)`);
-            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `立项资料(${meta.procFiles.length}份)` };
-          } else if (c === 33 && meta.relFiles.length > 0) {
-            const relUrl = escapeExcelFormulaStr(`uploads/${meta.relFiles[0].file_path}`);
-            const label = escapeExcelFormulaStr(`其他资料(${meta.relFiles.length}份)`);
-            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `其他资料(${meta.relFiles.length}份)` };
-          }
-        }
-
-        const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
-        const isMultiTaxCell = c === 20 && String(ws[cellRef].v || '').startsWith('*');
-
-        ws[cellRef].s = {
-          font: {
-            name: '微软雅黑',
-            sz: 10,
-            bold: c === 1 || c === 18 || c === 34 || isMultiTaxCell,
-            underline: isHyperlinkCell,
-            color: { rgb: isHyperlinkCell ? '2563EB' : (isMultiTaxCell ? '92400E' : '0F172A') }
-          },
-          fill: { fgColor: { rgb: bgRgb } },
-          alignment: { horizontal: hAlign, vertical: 'center', wrapText: true },
-          border: buildBorderSpec(meta.isGroupBottom),
-          ...(moneyCols.has(c) ? { numFmt: '#,##0.00' } : {})
-        };
-      }
-    }
-  }
-
-  return ws;
-}
-
-function buildProcurementWorksheet(rows) {
-  // 共 18 列 (索引 0 ~ 17，对应 Excel 的 A 列 ~ R 列)
-  const headers = [
-    '序号', '项目立项编号', '项目名称', '立项类型', '费用承担部门',
-    '预算金额(元)', '预算科目名称', '采购类型', '采购方式',
-    '立项时间', '决策时间', '采购完成时间', '成交供应商全称',
-    '成交金额(元)', '是否签合同', '关联合同编号', '备注', '立项相关资料(点击打开)'
-  ];
-
-  const aoa = [
-    ['企业采购项目立项台账总表（含寻源决策、成交结果及关联合同双向穿透）'],
-    headers
-  ];
-
-  rows.forEach(p => {
-    const cNo = p.linked_contract ? p.linked_contract.contract_no : (p.contract_no_manual || '');
-    const files = p.files || [];
-    aoa.push([
-      p.seq_no || '',
-      p.procurement_no || '',
-      p.project_name || '',
-      p.project_type || '',
-      p.cost_department || '',
-      Number(p.budget_amount || 0),
-      p.budget_subject || '',
-      p.procurement_type || '',
-      p.procurement_method || '',
-      p.approval_date || '',
-      p.decision_date || '',
-      p.completion_date || '',
-      p.supplier_name || '',
-      Number(p.deal_amount || 0),
-      p.has_contract || '否',
-      cNo || '-',
-      p.remark || '',
-      files.length > 0 ? `点击打开资料(${files.length}份)` : '未上传'
-    ]);
-  });
-
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
-  ws['!cols'] = [
-    { wch: 11 }, { wch: 18 }, { wch: 24 }, { wch: 12 }, { wch: 14 },
-    { wch: 13 }, { wch: 14 }, { wch: 13 }, { wch: 13 },
-    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 22 },
-    { wch: 13 }, { wch: 9 },  { wch: 19 }, { wch: 24 }, { wch: 20 }
-  ];
-
-  ws['!rows'] = [{ hpt: 30 }, { hpt: 26 }];
-  const totalRows = aoa.length;
-  const centerCols = new Set([0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 14, 15, 17]);
-  const moneyCols = new Set([5, 13]);
-
-  for (let r = 0; r < totalRows; r++) {
-    if (r >= 2) ws['!rows'][r] = { hpt: 24 };
-    for (let c = 0; c < headers.length; c++) {
-      const cellRef = XLSX.utils.encode_cell({ r, c });
-      if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
-
-      if (r === 0) {
-        ws[cellRef].s = {
-          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: 'FFFFFF' } },
-          fill: { fgColor: { rgb: '4C1D95' } },
-          alignment: { horizontal: 'center', vertical: 'center' },
-          border: buildBorderSpec(false)
-        };
-      } else if (r === 1) {
-        ws[cellRef].s = {
-          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '1E293B' } },
-          fill: { fgColor: { rgb: 'EDE9FE' } },
-          alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
-          border: buildBorderSpec(true)
-        };
-      } else {
-        const pItem = rows[r - 2];
-        const isOddRow = (r - 2) % 2 === 1;
-        const bgRgb = isOddRow ? 'F1F5F9' : 'FFFFFF';
-        const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
-
-        if (c === 17 && pItem.files && pItem.files.length > 0) {
-          const relUrl = escapeExcelFormulaStr(`uploads/${pItem.files[0].file_path}`);
-          const label = escapeExcelFormulaStr(`点击打开资料(${pItem.files.length}份)`);
-          ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `点击打开资料(${pItem.files.length}份)` };
-        }
-
-        const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
-        ws[cellRef].s = {
-          font: {
-            name: '微软雅黑',
-            sz: 10,
-            bold: c === 1 || c === 13,
-            underline: isHyperlinkCell,
-            color: { rgb: isHyperlinkCell ? '2563EB' : '0F172A' }
-          },
-          fill: { fgColor: { rgb: bgRgb } },
-          alignment: { horizontal: hAlign, vertical: 'center', wrapText: true },
-          border: buildBorderSpec(false),
-          ...(moneyCols.has(c) ? { numFmt: '#,##0.00' } : {})
-        };
-      }
-    }
-  }
-
-  return ws;
-}
-
-// ==================== 13. Excel 三大导出路由 ====================
-app.get('/api/export/excel', (req, res) => {
-  try {
-    const query = req.query.mode === 'all' ? {} : req.query;
-    const rows = queryFilteredContracts(query);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildContractWorksheet(rows), '合同台账');
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-
-    const fname = encodeURIComponent(`企业合同管理台账_${getLocalTodayStr()}.xlsx`);
-    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.send(buf);
-  } catch (err) {
-    res.status(500).send('导出合同Excel失败: ' + err.message);
-  }
-});
-
-app.get('/api/procurements/export', (req, res) => {
-  try {
-    const query = req.query.mode === 'all' ? {} : req.query;
-    const rows = queryFilteredProcurements(query);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildProcurementWorksheet(rows), '采购项目台账');
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-
-    const fname = encodeURIComponent(`企业采购项目立项台账_${getLocalTodayStr()}.xlsx`);
-    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.send(buf);
-  } catch (err) {
-    res.status(500).send('导出采购Excel失败: ' + err.message);
-  }
-});
-
-app.get('/api/export/combined', (req, res) => {
-  try {
-    const contractRows = queryFilteredContracts({});
-    const procRows = queryFilteredProcurements({});
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, buildContractWorksheet(contractRows), '合同台账');
-    XLSX.utils.book_append_sheet(wb, buildProcurementWorksheet(procRows), '采购项目台账');
-    const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-
-    const fname = encodeURIComponent(`企业合同与采购项目双台账总表_${getLocalTodayStr()}.xlsx`);
-    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.send(buf);
-  } catch (err) {
-    res.status(500).send('导出合并总表失败: ' + err.message);
-  }
 });
 
 // ==================== 14. 服务启动与优雅退出封装 ====================
