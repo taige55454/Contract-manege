@@ -1,5 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.4.2 终极无瑕完整版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.0 终极定稿完整版)
  */
 
 let currentTab = 'contract';
@@ -7,14 +7,14 @@ let contractsCache = [];
 let procurementsCache = [];
 
 let defaultOurEntity = 'ABC公司';
-let contractRule = { prefix: 'XSZY-黔-BJ-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
+let contractRule = { prefix: 'HT-ABC-', default_mid: '', date_part: 'YYYYMM', seq_digits: 3, suffix: '', reset_yearly: true };
 let procRule = { prefix: 'LX', default_mid: '', date_part: 'YYYYMMDD', seq_digits: 3, suffix: '', reset_yearly: true };
 
 let dropdownPresets = {
   contract_types: ['采购', '服务', '销售', '框架', '其他'],
   contract_statuses: ['草稿', '生效中', '已到期', '已终止'],
   project_types: ['服务类项目', '货物类项目', '设备采购', '工程类项目', '其他'],
-  cost_departments: ['综合管理部', '省区费用预算', '市场营销部', '运营管理部', '财务部', '毕节自营店'],
+  cost_departments: ['综合管理部', '部门费用预算', '市场营销部', '运营管理部', '财务部', 'ABC分公司'],
   procurement_types: ['小额零星采购', '二级集中采购', '一级集中采购', '分散采购', '其他'],
   procurement_methods: ['合作谈判', '邀请竞争谈判', '公开竞争谈判', '邀请询比', '公开询比', '单一来源采购'],
   budget_subjects: ['办公费', '运输费', '其他固定资产采购', '日常安全费用', '其他外包项目', '租赁费', '中介费', '装修费', '其他福利费'],
@@ -48,7 +48,7 @@ function getStatusBadgeClass(statusStr) {
   return 'badge-draft';
 }
 
-// ==================== 1. 鉴权请求封装与安全转义工具 ====================
+// ==================== 1. 鉴权请求封装、智能税率格式化与动态色彩渐变工具 ====================
 function getLanToken() {
   return localStorage.getItem(LAN_TOKEN_KEY) || '';
 }
@@ -96,6 +96,38 @@ function escapeJsStr(str) {
 function formatMoney(val) {
   const n = Number(val || 0);
   return '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+/**
+ * 智能税率格式化引擎：
+ * - 单税率：输入 "6" 或 "6%" -> 自动格式化为 "6%"
+ * - 多税率：输入 "6，9"、"6, 13"、"3/6/9"、"*6,9" -> 自动把每个数字转为百分数并在最前面加星号 "*6%、9%"
+ */
+function formatSmartTaxRate(raw) {
+  const str = String(raw ?? '').trim();
+  if (!str) return '';
+  if (str === '免税' || str === '0' || str === '0%') return str === '免税' ? '免税' : '0%';
+
+  const hasLeadingStar = str.startsWith('*') || str.startsWith('＊');
+  const tokens = str
+    .replace(/^[＊*]+/, '')
+    .split(/[,，、/／;；\s+]+/)
+    .map(t => t.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) return '';
+
+  const formattedTokens = tokens.map(t => {
+    const clean = t.replace(/^[＊*]+/, '');
+    if (/^\d+(\.\d+)?$/.test(clean)) return `${clean}%`;
+    if (/^\d+(\.\d+)?%$/.test(clean)) return clean;
+    return clean;
+  });
+
+  if (formattedTokens.length > 1 || hasLeadingStar) {
+    return '*' + formattedTokens.join('、');
+  }
+  return formattedTokens[0];
 }
 
 function parseSmartDateString(raw) {
@@ -161,17 +193,45 @@ function pickDateToInput(pickerEl, targetInputId, isSignDate) {
   }
 }
 
-function renderDueChip(dateStr) {
+/**
+ * 所有到期日（合同到期日、履约保证金应退日、质保金到期日）动态色彩渐变渲染器：
+ * 随着剩余时间逼近，由绿色 (Hue=135°) -> 黄色 (60°) -> 橙色 (30°) -> 红色 (0°) 平滑渐变，且时间越近颜色越深！
+ */
+function renderDueChip(dateStr, isReturned = false) {
   if (!dateStr) return '<span style="color:#9ca3af;">-</span>';
+  if (isReturned) {
+    return `<span class="due-chip" style="background:#ecfdf5;color:#047857;border:1px solid #a7f3d0;">${escapeHtml(dateStr)} (已退)</span>`;
+  }
+
   const today = getLocalTodayStr();
   const diffDays = Math.ceil((new Date(dateStr) - new Date(today)) / (86400 * 1000));
+  if (isNaN(diffDays)) return `<span>${escapeHtml(dateStr)}</span>`;
+
+  // 1. 已超期 (< 0天)：深红色高对比强预警，超期越久红得越深沉
   if (diffDays < 0) {
-    return `<span class="due-chip" style="background:#fee2e2;color:#991b1b;">${escapeHtml(dateStr)} (已超期)</span>`;
+    const overDays = Math.abs(diffDays);
+    const bgLight = Math.max(30, 44 - Math.min(overDays, 45) * 0.3);
+    return `<span class="due-chip" style="background:hsl(0, 84%, ${bgLight.toFixed(0)}%);color:#ffffff;font-weight:700;box-shadow:0 1px 3px rgba(185,28,28,0.35);">${escapeHtml(dateStr)} (超期${overDays}天)</span>`;
   }
-  if (diffDays <= 30) {
-    return `<span class="due-chip" style="background:#fef3c7;color:#92400e;">${escapeHtml(dateStr)} (${diffDays}天到期)</span>`;
+
+  // 2. 0 ~ 90天内：由绿(135°) -> 黄(60°) -> 橙(28°) -> 红(0°) 连续渐变，且越逼近 0 天背景色越深、文字越醒目
+  if (diffDays <= 90) {
+    const ratio = diffDays / 90;
+    const hue = Math.round(ratio * 135);
+    const sat = Math.round(92 - ratio * 18);
+    const bgLight = Math.round(76 + ratio * 16);
+    const borderLight = Math.round(bgLight - 14);
+    const textLight = Math.round(18 + ratio * 10);
+    const weight = diffDays <= 30 ? 700 : 600;
+    const tip = diffDays === 0 ? '今日到期!' : `${diffDays}天到期`;
+
+    return `<span class="due-chip" style="background:hsl(${hue}, ${sat}%, ${bgLight}%);color:hsl(${hue}, 90%, ${textLight}%);border:1px solid hsl(${hue}, ${sat}%, ${borderLight}%);font-weight:${weight};">${escapeHtml(dateStr)} (${tip})</span>`;
   }
-  return `<span>${escapeHtml(dateStr)}</span>`;
+
+  // 3. > 90天（宽裕安全期）：清爽翠绿底色，离 90 天越近绿色略微加深
+  const safeRatio = Math.min(1, (diffDays - 90) / 275);
+  const safeBgLight = Math.round(90 + safeRatio * 5);
+  return `<span class="due-chip" style="background:hsl(142, 72%, ${safeBgLight}%);color:hsl(142, 82%, 24%);border:1px solid hsl(142, 65%, 76%);font-weight:500;">${escapeHtml(dateStr)} (${diffDays}天)</span>`;
 }
 
 // ==================== 2. 自定义下拉选项与预设词库引擎 ====================
@@ -700,7 +760,7 @@ function toggleFreeProcNoMode(forceFree) {
   document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
 }
 
-// ==================== 7. 合同管理台账主表渲染（支持一对多跨行合并 rowspan） ====================
+// ==================== 7. 合同管理台账主表渲染（年份序号 + 履约摘要与备注完整换行 + 银行四要素 + 绿转红渐变） ====================
 function buildContractQueryParams() {
   const p = new URLSearchParams();
   const no = document.getElementById('filter_no')?.value.trim();
@@ -750,7 +810,7 @@ function renderContractLedgerTable(list) {
   const tbody = document.getElementById('contract_tbody');
   if (!tbody) return;
   if (!list || list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="26" class="text-center" style="padding:28px;color:#6b7280;">暂无匹配的合同台账，请点击右上角【+ 新增合同】录入</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="30" class="text-center" style="padding:28px;color:#6b7280;">暂无匹配的合同台账，请点击右上角【+ 新增合同】录入</td></tr>`;
     return;
   }
 
@@ -774,6 +834,7 @@ function renderContractLedgerTable(list) {
       : `<a class="link-btn" style="font-size:12px;" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">+ 补传</a>`;
 
     const statusBadgeClass = getStatusBadgeClass(c.status);
+    const isContractTerminated = /终止|解除|作废|取消/.test(c.status || '');
 
     parties.forEach((cp, pIdx) => {
       const isLastInGroup = pIdx === span - 1;
@@ -781,20 +842,20 @@ function renderContractLedgerTable(list) {
 
       const mergedLeftCells = pIdx === 0 ? `
         <td rowspan="${span}" class="text-center"><span class="seq-badge">${escapeHtml(c.seq_no)}</span></td>
-        <td rowspan="${span}"><strong>${escapeHtml(c.contract_no)}</strong></td>
+        <td rowspan="${span}" class="text-center"><strong>${escapeHtml(c.contract_no)}</strong></td>
         <td rowspan="${span}"><a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">${escapeHtml(c.contract_name)}</a></td>
         <td rowspan="${span}" class="text-center">${escapeHtml(c.contract_type)}</td>
-        <td rowspan="${span}">${escapeHtml(c.our_entity)}</td>
+        <td rowspan="${span}" class="text-center">${escapeHtml(c.our_entity)}</td>
         <td rowspan="${span}" class="text-center">${escapeHtml(c.sign_date)}</td>
         <td rowspan="${span}" class="text-center">${escapeHtml(c.start_date)}</td>
-        <td rowspan="${span}" class="text-center">${renderDueChip(c.expiry_date)}</td>
+        <td rowspan="${span}" class="text-center">${renderDueChip(c.expiry_date, isContractTerminated)}</td>
         <td rowspan="${span}" class="text-center"><span class="badge ${statusBadgeClass}">${escapeHtml(c.status)}</span></td>
       ` : '';
 
       const mergedRightCells = pIdx === 0 ? `
-        <td rowspan="${span}">${scanHtml}</td>
-        <td rowspan="${span}">${procHtml}</td>
-        <td rowspan="${span}">${relHtml}</td>
+        <td rowspan="${span}" class="text-center">${scanHtml}</td>
+        <td rowspan="${span}" class="text-center">${procHtml}</td>
+        <td rowspan="${span}" class="text-center">${relHtml}</td>
         <td rowspan="${span}" class="text-center">
           <button class="btn btn-outline btn-sm" onclick="openDetailModal('contract', ${c.id})">详情</button>
           <button class="btn btn-outline btn-sm" onclick="openFormModal(${c.id})">编辑</button>
@@ -802,33 +863,43 @@ function renderContractLedgerTable(list) {
         </td>
       ` : '';
 
+      const isPerfReturned = cp.perf_bond_status === '已退';
       const perfInfo = Number(cp.perf_bond_amount || 0) > 0
-        ? `<div>¥${Number(cp.perf_bond_amount).toLocaleString()} (${escapeHtml(cp.perf_bond_status || '未退')})</div><div>${renderDueChip(cp.perf_bond_return_date)}</div>`
+        ? `<div><strong>¥${Number(cp.perf_bond_amount).toLocaleString()}</strong> (${escapeHtml(cp.perf_bond_status || '未退')})</div><div>${renderDueChip(cp.perf_bond_return_date, isPerfReturned)}</div>`
         : '<span style="color:#9ca3af;">无</span>';
 
+      const isWarrantyReturned = cp.warranty_bond_status === '已退';
       const warrantyInfo = Number(cp.warranty_bond_amount || 0) > 0
-        ? `<div>¥${Number(cp.warranty_bond_amount).toLocaleString()} (${escapeHtml(cp.warranty_bond_status || '未退')})</div><div>${renderDueChip(cp.warranty_bond_expiry_date)}</div>`
+        ? `<div><strong>¥${Number(cp.warranty_bond_amount).toLocaleString()}</strong> (${escapeHtml(cp.warranty_bond_status || '未退')})</div><div>${renderDueChip(cp.warranty_bond_expiry_date, isWarrantyReturned)}</div>`
         : '<span style="color:#9ca3af;">无</span>';
 
-      const bankText = [cp.bank_account_no, cp.bank_name].filter(Boolean).join(' ') || '-';
-      const remarkText = [cp.remark, c.remark].filter(Boolean).join('；') || '-';
+      const formattedTax = formatSmartTaxRate(cp.tax_rate);
+      const taxHtml = formattedTax
+        ? (formattedTax.startsWith('*') ? `<span class="tax-multi-chip" title="多税率合同">${escapeHtml(formattedTax)}</span>` : escapeHtml(formattedTax))
+        : '-';
+
+      const remarkText = [cp.remark, c.remark].filter(Boolean).join('\n') || '-';
 
       htmlRows.push(`
         <tr class="${trClass}">
           ${mergedLeftCells}
-          <td class="summary-cell" title="${escapeHtml(cp.summary || '')}">${escapeHtml(cp.summary || '-')}</td>
+          <td class="wrap-text-cell">${escapeHtml(cp.summary || '-')}</td>
           <td><strong>${escapeHtml(cp.company_name || '-')}</strong></td>
-          <td>${escapeHtml(cp.credit_code || '-')}</td>
-          <td>${escapeHtml(cp.contact_person || '')} ${escapeHtml(cp.contact_phone || '')}</td>
-          <td class="summary-cell" title="${escapeHtml(cp.bank_account_name || '')} ${escapeHtml(bankText)}">${escapeHtml(bankText)}</td>
+          <td class="text-center">${escapeHtml(cp.credit_code || '-')}</td>
+          <td class="text-center">${escapeHtml(cp.contact_person || '-')}</td>
+          <td class="text-center">${escapeHtml(cp.contact_phone || '-')}</td>
+          <td>${escapeHtml(cp.bank_account_name || '-')}</td>
+          <td class="text-center">${escapeHtml(cp.bank_account_no || '-')}</td>
+          <td>${escapeHtml(cp.bank_name || '-')}</td>
+          <td class="text-center">${escapeHtml(cp.bank_code || '-')}</td>
           <td class="text-right"><strong>${formatMoney(cp.amount)}</strong></td>
           <td class="text-right">${formatMoney(cp.amount_excl_tax)}</td>
-          <td class="text-center">${cp.tax_rate ? escapeHtml(cp.tax_rate) + '%' : '-'}</td>
+          <td class="text-center">${taxHtml}</td>
           <td class="text-center">${escapeHtml(cp.invoice_type || '-')}</td>
           <td class="text-center">${escapeHtml(cp.currency || 'CNY')}</td>
-          <td>${perfInfo}</td>
-          <td>${warrantyInfo}</td>
-          <td class="summary-cell" title="${escapeHtml(remarkText)}">${escapeHtml(remarkText)}</td>
+          <td class="text-center">${perfInfo}</td>
+          <td class="text-center">${warrantyInfo}</td>
+          <td class="wrap-text-cell">${escapeHtml(remarkText)}</td>
           ${mergedRightCells}
         </tr>
       `);
@@ -838,7 +909,7 @@ function renderContractLedgerTable(list) {
   tbody.innerHTML = htmlRows.join('');
 }
 
-// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片 ====================
+// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片（履约摘要独占一行 + 分项备注独占一行） ====================
 function removeCounterpartyCard(btnEl) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
@@ -856,6 +927,7 @@ function addCounterpartyCard(data = {}) {
   const defaultInv = (dropdownPresets.invoice_types && dropdownPresets.invoice_types[0]) || '增值税专用发票';
   const pStatus = data.perf_bond_status || '无';
   const wStatus = data.warranty_bond_status || '无';
+  const initTax = formatSmartTaxRate(data.tax_rate ?? '6%');
 
   const card = document.createElement('div');
   card.className = 'party-card';
@@ -867,46 +939,54 @@ function addCounterpartyCard(data = {}) {
     <div class="form-grid-4">
       <div class="form-group span-2">
         <label>对方单位名称 *</label>
-        <input type="text" class="cp-company" value="${escapeHtml(data.company_name || '')}" required placeholder="如：中国邮政速递物流股份有限公司毕节市分公司" />
+        <input type="text" class="cp-company" value="${escapeHtml(data.company_name || '')}" required placeholder="如：BCD公司" />
       </div>
       <div class="form-group">
         <label>统一社会信用代码</label>
-        <input type="text" class="cp-credit" value="${escapeHtml(data.credit_code || '')}" placeholder="18位信用代码" />
+        <input type="text" class="cp-credit" value="${escapeHtml(data.credit_code || '')}" placeholder="18位统一社会信用代码" />
       </div>
       <div class="form-group">
-        <label>履约摘要(各写各的)</label>
-        <input type="text" class="cp-summary" value="${escapeHtml(data.summary || '')}" placeholder="本单位负责标的内容" />
-      </div>
-      <div class="form-group">
-        <label>联系人</label>
-        <input type="text" class="cp-person" value="${escapeHtml(data.contact_person || '')}" />
-      </div>
-      <div class="form-group">
-        <label>联系电话</label>
-        <input type="text" class="cp-phone" value="${escapeHtml(data.contact_phone || '')}" />
-      </div>
-      <div class="form-group">
-        <label>收款账户名称</label>
-        <input type="text" class="cp-bank-user" value="${escapeHtml(data.bank_account_name || '')}" />
-      </div>
-      <div class="form-group">
-        <label>收款银行账号 & 开户行</label>
-        <div style="display:flex;gap:4px;">
-          <input type="text" class="cp-bank-no" style="flex:1.2;min-width:0;" value="${escapeHtml(data.bank_account_no || '')}" placeholder="银行账号" />
-          <input type="text" class="cp-bank-name" style="flex:1;min-width:0;" value="${escapeHtml(data.bank_name || '')}" placeholder="开户银行" />
+        <label>联系人 & 联系电话</label>
+        <div style="display:flex;gap:6px;">
+          <input type="text" class="cp-person" style="width:42%;min-width:0;" value="${escapeHtml(data.contact_person || '')}" placeholder="联系人姓名" />
+          <input type="text" class="cp-phone" style="flex:1;min-width:0;" value="${escapeHtml(data.contact_phone || '')}" placeholder="联系电话" />
         </div>
       </div>
+
+      <!-- 履约摘要：单独占满整行（span-4），采用多行文本框方便输入较长内容 -->
+      <div class="form-group span-4">
+        <label>履约摘要（单独占一行，支持换行输入详细履约内容、核心标的或结算节点）</label>
+        <textarea class="cp-summary" rows="2" placeholder="请输入本单位负责的具体履约摘要内容...">${escapeHtml(data.summary || '')}</textarea>
+      </div>
+
+      <div class="form-group">
+        <label>收款账户名称</label>
+        <input type="text" class="cp-bank-user" value="${escapeHtml(data.bank_account_name || '')}" placeholder="如：BCD公司" />
+      </div>
+      <div class="form-group">
+        <label>收款银行账号</label>
+        <input type="text" class="cp-bank-no" value="${escapeHtml(data.bank_account_no || '')}" placeholder="收款银行卡号/对公账号" />
+      </div>
+      <div class="form-group">
+        <label>开户银行</label>
+        <input type="text" class="cp-bank-name" value="${escapeHtml(data.bank_name || '')}" placeholder="如：DEF银行营业部" />
+      </div>
+      <div class="form-group">
+        <label>开户行号 (12位联行号)</label>
+        <input type="text" class="cp-bank-code" value="${escapeHtml(data.bank_code || '')}" placeholder="如：102100000018" />
+      </div>
+
       <div class="form-group">
         <label>含税金额 (元)</label>
-        <input type="number" step="0.01" class="cp-amount" value="${data.amount ?? ''}" oninput="calcExclTaxForCard(this)" />
+        <input type="number" step="0.01" class="cp-amount" value="${data.amount ?? ''}" placeholder="0.00" oninput="calcExclTaxForCard(this)" />
       </div>
       <div class="form-group">
-        <label>税率 (%)</label>
-        <input type="text" class="cp-tax-rate" value="${escapeHtml(data.tax_rate ?? '6')}" oninput="calcExclTaxForCard(this)" />
+        <label>税率 (多税率如 6,9 自动变 *6%、9%)</label>
+        <input type="text" class="cp-tax-rate" value="${escapeHtml(initTax)}" placeholder="如 6 或 6,9" oninput="calcExclTaxForCard(this)" onblur="onTaxRateInputBlur(this)" />
       </div>
       <div class="form-group">
-        <label>不含税价 (自动折算可微调)</label>
-        <input type="number" step="0.01" class="cp-amount-excl" value="${data.amount_excl_tax ?? ''}" />
+        <label>不含税价 (单税率自动算/多税率可手填)</label>
+        <input type="number" step="0.01" class="cp-amount-excl" value="${data.amount_excl_tax ?? ''}" placeholder="0.00" />
       </div>
       <div class="form-group">
         <label>发票类型 & 币种</label>
@@ -915,50 +995,62 @@ function addCounterpartyCard(data = {}) {
           <input type="text" class="cp-currency" style="width:58px;text-align:center;" value="${escapeHtml(data.currency || 'CNY')}" placeholder="币种" />
         </div>
       </div>
-      <div class="form-group">
-        <label>履约保证金 (元) & 状态</label>
-        <div style="display:flex;gap:4px;">
-          <input type="number" step="0.01" class="cp-perf-amt" style="flex:1;min-width:0;" value="${data.perf_bond_amount || 0}" placeholder="金额" />
-          <select class="cp-perf-status" style="width:72px;padding:4px;">
+
+      <div class="form-group span-2">
+        <label>履约保证金 (元) / 状态 / 应退日期</label>
+        <div style="display:flex;gap:6px;">
+          <input type="number" step="0.01" class="cp-perf-amt" style="width:120px;" value="${data.perf_bond_amount || 0}" placeholder="保证金金额" />
+          <select class="cp-perf-status" style="width:80px;padding:4px;">
             <option value="无" ${pStatus === '无' ? 'selected' : ''}>无</option>
             <option value="未退" ${pStatus === '未退' ? 'selected' : ''}>未退</option>
             <option value="已退" ${pStatus === '已退' ? 'selected' : ''}>已退</option>
           </select>
+          <input type="text" class="cp-perf-date" style="flex:1;min-width:0;" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="应退日期 如 2027-03-31" onblur="normalizeDateInputElem(this)" />
         </div>
       </div>
-      <div class="form-group">
-        <label>保证金应退日</label>
-        <input type="text" class="cp-perf-date" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="YYYY-MM-DD" onblur="normalizeDateInputElem(this)" />
-      </div>
-      <div class="form-group">
-        <label>质保金 (元) / 状态 / 到期日</label>
-        <div style="display:flex;gap:4px;">
-          <input type="number" step="0.01" class="cp-warranty-amt" style="width:76px;" value="${data.warranty_bond_amount || 0}" placeholder="质保金" />
-          <select class="cp-warranty-status" style="width:66px;padding:4px;">
+      <div class="form-group span-2">
+        <label>质保金 (元) / 状态 / 到期日期</label>
+        <div style="display:flex;gap:6px;">
+          <input type="number" step="0.01" class="cp-warranty-amt" style="width:120px;" value="${data.warranty_bond_amount || 0}" placeholder="质保金金额" />
+          <select class="cp-warranty-status" style="width:80px;padding:4px;">
             <option value="无" ${wStatus === '无' ? 'selected' : ''}>无</option>
             <option value="未退" ${wStatus === '未退' ? 'selected' : ''}>未退</option>
             <option value="已退" ${wStatus === '已退' ? 'selected' : ''}>已退</option>
           </select>
-          <input type="text" class="cp-warranty-date" style="flex:1;min-width:0;" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="到期日" onblur="normalizeDateInputElem(this)" />
+          <input type="text" class="cp-warranty-date" style="flex:1;min-width:0;" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="到期日期 如 2028-03-31" onblur="normalizeDateInputElem(this)" />
         </div>
       </div>
-      <div class="form-group">
-        <label>分项备注</label>
-        <input type="text" class="cp-remark" value="${escapeHtml(data.remark || '')}" />
+
+      <!-- 分项备注：单独占满整行（span-4） -->
+      <div class="form-group span-4">
+        <label>备注（本单位分项备注，独占一行）</label>
+        <input type="text" class="cp-remark" value="${escapeHtml(data.remark || '')}" placeholder="针对该对方单位的分项补充备注（选填）" />
       </div>
     </div>
   `;
   container.appendChild(card);
 }
 
+function onTaxRateInputBlur(inputEl) {
+  if (!inputEl) return;
+  inputEl.value = formatSmartTaxRate(inputEl.value);
+  calcExclTaxForCard(inputEl);
+}
+
 function calcExclTaxForCard(inputEl) {
   const card = inputEl.closest('.party-card');
   if (!card) return;
   const amt = parseFloat(card.querySelector('.cp-amount')?.value || '0');
-  const rate = parseFloat(card.querySelector('.cp-tax-rate')?.value || '0');
+  const rawTax = String(card.querySelector('.cp-tax-rate')?.value || '').trim();
+  const formattedTax = formatSmartTaxRate(rawTax);
   const exclEl = card.querySelector('.cp-amount-excl');
-  if (exclEl && amt > 0 && !isNaN(rate) && rate >= 0) {
-    exclEl.value = (amt / (1 + rate / 100)).toFixed(2);
+  if (!exclEl || amt <= 0) return;
+
+  if (!formattedTax.startsWith('*')) {
+    const rateNum = parseFloat(formattedTax.replace('%', ''));
+    if (!isNaN(rateNum) && rateNum >= 0) {
+      exclEl.value = (amt / (1 + rateNum / 100)).toFixed(2);
+    }
   }
 }
 
@@ -983,8 +1075,9 @@ function collectCounterpartiesFromDOM() {
       bank_account_name: card.querySelector('.cp-bank-user')?.value.trim() || '',
       bank_account_no: card.querySelector('.cp-bank-no')?.value.trim() || '',
       bank_name: card.querySelector('.cp-bank-name')?.value.trim() || '',
+      bank_code: card.querySelector('.cp-bank-code')?.value.trim() || '',
       amount: Number(card.querySelector('.cp-amount')?.value || 0),
-      tax_rate: card.querySelector('.cp-tax-rate')?.value.trim() || '',
+      tax_rate: formatSmartTaxRate(card.querySelector('.cp-tax-rate')?.value || ''),
       amount_excl_tax: Number(card.querySelector('.cp-amount-excl')?.value || 0),
       invoice_type: card.querySelector('.cp-invoice')?.value.trim() || '增值税专用发票',
       currency: card.querySelector('.cp-currency')?.value.trim() || 'CNY',
@@ -1146,7 +1239,7 @@ async function submitContractForm(e) {
 }
 
 async function deleteContractRecord(id, no) {
-  if (!confirm(`确定删除合同【${no}】吗？关联扫描件及附件将一并从磁盘清除，且后续序号自动重排对齐！`)) return;
+  if (!confirm(`确定删除合同【${no}】吗？关联扫描件及附件将一并从磁盘清除，且后续年份序号自动重排对齐！`)) return;
   const res = await apiFetch(`/api/contracts/${id}`, { method: 'DELETE' });
   const json = await res.json();
   if (json.success) {
@@ -1155,7 +1248,7 @@ async function deleteContractRecord(id, no) {
   }
 }
 
-// ==================== 9. 采购项目立项台账主表与表单逻辑 ====================
+// ==================== 9. 采购项目立项台账主表与表单逻辑（第一列同样采用 YYYY-001 年份序号格式） ====================
 function buildProcQueryParams() {
   const p = new URLSearchParams();
   const kw = document.getElementById('proc_filter_kw')?.value.trim();
@@ -1215,7 +1308,7 @@ function renderProcurementTable(list) {
     return `
       <tr class="${oddClass}">
         <td class="text-center"><span class="seq-badge">${escapeHtml(p.seq_no)}</span></td>
-        <td><strong>${escapeHtml(p.procurement_no)}</strong></td>
+        <td class="text-center"><strong>${escapeHtml(p.procurement_no)}</strong></td>
         <td><a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('procurement', ${p.id})">${escapeHtml(p.project_name)}</a></td>
         <td class="text-center">${escapeHtml(p.project_type)}</td>
         <td class="text-center"><strong>${escapeHtml(p.cost_department || '-')}</strong></td>
@@ -1229,9 +1322,9 @@ function renderProcurementTable(list) {
         <td>${escapeHtml(p.supplier_name || '-')}</td>
         <td class="text-right"><strong>${formatMoney(p.deal_amount)}</strong></td>
         <td class="text-center"><span class="badge badge-${escapeHtml(p.has_contract)}">${escapeHtml(p.has_contract)}</span></td>
-        <td>${contractHtml}</td>
-        <td class="summary-cell">${escapeHtml(p.remark || '-')}</td>
-        <td>${filesHtml}</td>
+        <td class="text-center">${contractHtml}</td>
+        <td class="wrap-text-cell">${escapeHtml(p.remark || '-')}</td>
+        <td class="text-center">${filesHtml}</td>
         <td class="text-center">
           <button class="btn btn-outline btn-sm" onclick="openDetailModal('procurement', ${p.id})">详情</button>
           <button class="btn btn-outline btn-sm" onclick="openProcurementFormModal(${p.id})">编辑</button>
@@ -1467,15 +1560,29 @@ async function openDetailModal(mode, id) {
     const procFiles = c.linked_procurement?.files || [];
     const relFiles = c.related_files || [];
 
+    const partiesDetailHtml = (c.counterparties || []).map((cp, i) => `
+      <div style="border-top:1px dashed #cbd5e1;padding-top:6px;margin-top:6px;">
+        <div style="font-weight:600;color:#1e293b;margin-bottom:3px;">乙方 #${i + 1}：${escapeHtml(cp.company_name || '-')}</div>
+        <div class="detail-row"><span class="label">履约摘要</span><span class="val">${escapeHtml(cp.summary || '-')}</span></div>
+        <div class="detail-row"><span class="label">信用代码 / 联系人</span><span class="val">${escapeHtml(cp.credit_code || '-')} / ${escapeHtml(cp.contact_person || '-')} (${escapeHtml(cp.contact_phone || '-')})</span></div>
+        <div class="detail-row"><span class="label">收款账户名称</span><span class="val">${escapeHtml(cp.bank_account_name || '-')}</span></div>
+        <div class="detail-row"><span class="label">收款银行账号</span><span class="val">${escapeHtml(cp.bank_account_no || '-')}</span></div>
+        <div class="detail-row"><span class="label">开户银行 / 开户行号</span><span class="val">${escapeHtml(cp.bank_name || '-')} / ${escapeHtml(cp.bank_code || '-')}</span></div>
+        <div class="detail-row"><span class="label">含税 / 不含税 / 税率</span><span class="val">${formatMoney(cp.amount)} / ${formatMoney(cp.amount_excl_tax)} / ${escapeHtml(formatSmartTaxRate(cp.tax_rate) || '-')}</span></div>
+        ${cp.remark ? `<div class="detail-row"><span class="label">备注</span><span class="val">${escapeHtml(cp.remark)}</span></div>` : ''}
+      </div>
+    `).join('');
+
     fieldsBox.innerHTML = `
       <div class="detail-card">
-        <h4>📌 合同基础信息</h4>
-        <div class="detail-row"><span class="label">年度序号 / 合同编号</span><span class="val">${escapeHtml(c.seq_no)} / ${escapeHtml(c.contract_no)}</span></div>
+        <h4>📌 合同基础与对方单位信息</h4>
+        <div class="detail-row"><span class="label">年份序号 / 合同编号</span><span class="val">${escapeHtml(c.seq_no)} / ${escapeHtml(c.contract_no)}</span></div>
         <div class="detail-row"><span class="label">合同名称</span><span class="val">${escapeHtml(c.contract_name)}</span></div>
         <div class="detail-row"><span class="label">合同类型 / 状态</span><span class="val">${escapeHtml(c.contract_type)} / ${escapeHtml(c.status)}</span></div>
         <div class="detail-row"><span class="label">我方签约主体</span><span class="val">${escapeHtml(c.our_entity)}</span></div>
         <div class="detail-row"><span class="label">签订 / 履约 / 到期日</span><span class="val">${escapeHtml(c.sign_date)} / ${escapeHtml(c.start_date)} / ${escapeHtml(c.expiry_date)}</span></div>
         ${c.remark ? `<div class="detail-row"><span class="label">合同公共备注</span><span class="val">${escapeHtml(c.remark)}</span></div>` : ''}
+        ${partiesDetailHtml}
       </div>
 
       <div class="detail-card">
@@ -1564,7 +1671,7 @@ async function openDetailModal(mode, id) {
     fieldsBox.innerHTML = `
       <div class="detail-card">
         <h4>📌 采购立项核心信息</h4>
-        <div class="detail-row"><span class="label">立项编号</span><span class="val">${escapeHtml(p.procurement_no)}</span></div>
+        <div class="detail-row"><span class="label">年份序号 / 立项编号</span><span class="val">${escapeHtml(p.seq_no)} / ${escapeHtml(p.procurement_no)}</span></div>
         <div class="detail-row"><span class="label">项目名称</span><span class="val">${escapeHtml(p.project_name)}</span></div>
         <div class="detail-row"><span class="label">立项类型 / 费用承担部门</span><span class="val">${escapeHtml(p.project_type)} / ${escapeHtml(p.cost_department || '-')}</span></div>
         <div class="detail-row"><span class="label">采购类型 / 采购方式</span><span class="val">${escapeHtml(p.procurement_type || '-')} / ${escapeHtml(p.procurement_method || '-')}</span></div>
