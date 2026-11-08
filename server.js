@@ -1,234 +1,267 @@
-/**
- * 企业合同与采购项目台账管理系统 - 核心后端服务 (v2.4.2 终极无瑕生产版)
- */
-
 const express = require('express');
 const path = require('path');
 const fs = require('fs');
-const crypto = require('crypto');
 const os = require('os');
-const Database = require('better-sqlite3');
+const crypto = require('crypto');
 const multer = require('multer');
+const Database = require('better-sqlite3');
 const XLSX = require('xlsx-js-style');
 
 const app = express();
-const DEFAULT_PORT = Number(process.env.PORT) || 3000;
-const DEFAULT_HOST = process.env.HOST || '0.0.0.0';
+const PORT = Number(process.env.PORT) || 3000;
 
-// ==================== 1. 目录与环境变量初始化 ====================
-const ROOT_DIR = __dirname;
-const DATA_ROOT = process.env.DATA_ROOT
-  ? path.resolve(process.env.DATA_ROOT)
-  : (process.env.CONTRACT_DATA_DIR ? path.resolve(process.env.CONTRACT_DATA_DIR) : ROOT_DIR);
+app.use(express.json({ limit: '25mb' }));
+app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
-const DB_PATH = process.env.DB_PATH
-  ? path.resolve(process.env.DB_PATH)
-  : path.join(DATA_ROOT, 'database.sqlite');
-
-const UPLOAD_DIR = process.env.CONTRACT_UPLOAD_DIR
-  ? path.resolve(process.env.CONTRACT_UPLOAD_DIR)
-  : path.join(DATA_ROOT, 'uploads');
-
-const TMP_UPLOAD_DIR = path.join(UPLOAD_DIR, '.tmp');
+// ==================== 1. 存储路径与上传目录初始化 ====================
+const DATA_ROOT = process.env.DATA_ROOT || __dirname;
+const DB_PATH = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
+const UPLOAD_DIR = path.join(DATA_ROOT, 'uploads');
 const RELATED_UPLOAD_DIR = path.join(UPLOAD_DIR, 'related');
-const PROCUREMENT_UPLOAD_DIR = path.join(UPLOAD_DIR, 'procurement');
-const PUBLIC_DIR = path.join(ROOT_DIR, 'public');
+const PROC_UPLOAD_DIR = path.join(UPLOAD_DIR, 'procurement');
 
-for (const dir of [path.dirname(DB_PATH), UPLOAD_DIR, TMP_UPLOAD_DIR, RELATED_UPLOAD_DIR, PROCUREMENT_UPLOAD_DIR, PUBLIC_DIR]) {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
+[UPLOAD_DIR, RELATED_UPLOAD_DIR, PROC_UPLOAD_DIR].forEach(dir => {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+});
+
+function decodeFilename(name) {
+  if (!name) return 'file';
+  try {
+    const decoded = Buffer.from(name, 'latin1').toString('utf8');
+    if (decoded.includes('\ufffd')) return name;
+    return decoded;
+  } catch (e) {
+    return name;
   }
 }
 
-function isSafePathWithin(targetPath, baseDir) {
-  if (!targetPath || !baseDir) return false;
-  const resolvedBase = path.resolve(baseDir) + path.sep;
-  const resolvedTarget = path.resolve(targetPath);
-  return resolvedTarget.startsWith(resolvedBase) && resolvedTarget !== path.resolve(baseDir);
+function sanitizeFileToken(str) {
+  return String(str || 'UNNAMED')
+    .trim()
+    .replace(/[\\/:*?"<>|\r\n]+/g, '_')
+    .replace(/\s+/g, '_')
+    .slice(0, 85) || 'UNNAMED';
 }
 
-function triggerSafeGC() {
-  if (typeof global.gc === 'function') {
-    try { global.gc(); } catch (e) {}
-  }
+function escapeExcelFormulaStr(str) {
+  return String(str ?? '').replace(/"/g, '""');
 }
 
 function getLocalTodayStr() {
   const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, '0');
-  const dd = String(d.getDate()).padStart(2, '0');
-  return `${yyyy}-${mm}-${dd}`;
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 }
 
-// ==================== 2. 智能日期解析引擎 ====================
-function normalizeSmartDate(rawInput, fallbackToday = false) {
-  if (rawInput === null || rawInput === undefined) {
-    return fallbackToday ? getLocalTodayStr() : '';
-  }
-  const str = String(rawInput).trim();
-  if (!str) {
-    return fallbackToday ? getLocalTodayStr() : '';
-  }
+/**
+ * 服务端智能税率规范化：
+ * 单税率 "6" -> "6%"；多税率 "6，9" -> "*6%、9%"
+ */
+function normalizeSmartTaxRateServer(raw) {
+  const str = String(raw ?? '').trim();
+  if (!str) return '';
+  if (str === '免税' || str === '0' || str === '0%') return str === '免税' ? '免税' : '0%';
 
-  if (/^\d{5}$/.test(str)) {
-    const serial = parseInt(str, 10);
-    if (serial >= 20000 && serial <= 80000) {
-      const utcDays = serial - 25569;
-      const d = new Date(utcDays * 86400 * 1000);
-      if (!isNaN(d.getTime())) {
-        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+  const hasLeadingStar = str.startsWith('*') || str.startsWith('＊');
+  const tokens = str
+    .replace(/^[＊*]+/, '')
+    .split(/[,，、/／;；\s+]+/)
+    .map(t => t.trim())
+    .filter(Boolean);
+
+  if (tokens.length === 0) return '';
+
+  const formatted = tokens.map(t => {
+    const clean = t.replace(/^[＊*]+/, '');
+    if (/^\d+(\.\d+)?$/.test(clean)) return `${clean}%`;
+    if (/^\d+(\.\d+)?%$/.test(clean)) return clean;
+    return clean;
+  });
+
+  if (formatted.length > 1 || hasLeadingStar) {
+    return '*' + formatted.join('、');
+  }
+  return formatted[0];
+}
+
+function resolveSafeUploadPath(relPath) {
+  if (!relPath || typeof relPath !== 'string') return null;
+  const cleanRel = relPath.replace(/^[/\\]+/, '');
+  const absRoot = path.resolve(UPLOAD_DIR);
+  const absTarget = path.resolve(UPLOAD_DIR, cleanRel);
+  const relCheck = path.relative(absRoot, absTarget);
+  if (relCheck.startsWith('..') || path.isAbsolute(relCheck)) return null;
+  return absTarget;
+}
+
+function removeEmptyParentDir(absFilePath) {
+  try {
+    const parentDir = path.dirname(absFilePath);
+    const absRoot = path.resolve(UPLOAD_DIR);
+    const absRelRoot = path.resolve(RELATED_UPLOAD_DIR);
+    const absProcRoot = path.resolve(PROC_UPLOAD_DIR);
+    if (parentDir !== absRoot && parentDir !== absRelRoot && parentDir !== absProcRoot) {
+      if (fs.existsSync(parentDir) && fs.readdirSync(parentDir).length === 0) {
+        fs.rmdirSync(parentDir);
       }
     }
-  }
-
-  if (/^\d{8}$/.test(str)) {
-    return `${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}`;
-  }
-
-  const fullMatch = str.match(/^(\d{4})[-./年](\d{1,2})[-./月](\d{1,2})日?$/);
-  if (fullMatch) {
-    return `${fullMatch[1]}-${String(parseInt(fullMatch[2], 10)).padStart(2, '0')}-${String(parseInt(fullMatch[3], 10)).padStart(2, '0')}`;
-  }
-
-  const shortMatch = str.match(/^(\d{1,2})[-./月](\d{1,2})日?$/);
-  if (shortMatch) {
-    const yyyy = new Date().getFullYear();
-    return `${yyyy}-${String(parseInt(shortMatch[1], 10)).padStart(2, '0')}-${String(parseInt(shortMatch[2], 10)).padStart(2, '0')}`;
-  }
-
-  return str;
+  } catch (e) {}
 }
 
-// ==================== 3. 数据库初始化与表结构创建 ====================
-const db = new Database(DB_PATH);
+function safeUnlinkUploadFile(relPath) {
+  try {
+    const absTarget = resolveSafeUploadPath(relPath);
+    if (absTarget && fs.existsSync(absTarget) && fs.statSync(absTarget).isFile()) {
+      fs.unlinkSync(absTarget);
+      removeEmptyParentDir(absTarget);
+    }
+  } catch (e) {
+    console.warn('清理旧附件失败:', e.message);
+  }
+}
 
+function cleanupUploadedReqFiles(req) {
+  if (!req) return;
+  const files = [];
+  if (req.file) files.push(req.file);
+  if (Array.isArray(req.files)) files.push(...req.files);
+  else if (req.files && typeof req.files === 'object') {
+    for (const arr of Object.values(req.files)) {
+      if (Array.isArray(arr)) files.push(...arr);
+    }
+  }
+  for (const f of files) {
+    try {
+      if (f.path && fs.existsSync(f.path)) {
+        fs.unlinkSync(f.path);
+        removeEmptyParentDir(f.path);
+      }
+    } catch (e) {}
+  }
+}
+
+// ==================== 2. 数据库初始化与平滑演进 ====================
+const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
 db.pragma('synchronous = NORMAL');
 db.pragma('foreign_keys = ON');
-db.pragma('busy_timeout = 5000');
-db.pragma('temp_store = MEMORY');
 
 db.exec(`
-  CREATE TABLE IF NOT EXISTS system_settings (
-    setting_key TEXT PRIMARY KEY,
-    setting_value TEXT NOT NULL DEFAULT '',
-    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+  CREATE TABLE IF NOT EXISTS app_settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
   );
 
   CREATE TABLE IF NOT EXISTS contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    seq_no TEXT NOT NULL DEFAULT '',
+    seq_no TEXT DEFAULT '2026-001',
     contract_no TEXT NOT NULL UNIQUE,
     contract_name TEXT NOT NULL,
-    contract_type TEXT NOT NULL DEFAULT '采购',
-    status TEXT NOT NULL DEFAULT '生效中',
-    our_entity TEXT NOT NULL DEFAULT '',
-    sign_date TEXT NOT NULL DEFAULT '',
-    start_date TEXT NOT NULL DEFAULT '',
-    expiry_date TEXT NOT NULL DEFAULT '',
-    counterparties_json TEXT NOT NULL DEFAULT '[]',
-    total_amount REAL NOT NULL DEFAULT 0,
-    attachment_path TEXT NOT NULL DEFAULT '',
-    attachment_original_name TEXT NOT NULL DEFAULT '',
-    attachment_size INTEGER NOT NULL DEFAULT 0,
+    contract_type TEXT DEFAULT '采购',
+    our_entity TEXT NOT NULL,
+    counterparty TEXT DEFAULT '',
+    credit_code TEXT DEFAULT '',
+    contact_person TEXT DEFAULT '',
+    contact_phone TEXT DEFAULT '',
+    bank_account_name TEXT DEFAULT '',
+    bank_account_no TEXT DEFAULT '',
+    bank_name TEXT DEFAULT '',
+    amount REAL DEFAULT 0,
+    tax_rate TEXT DEFAULT '',
+    amount_excl_tax REAL DEFAULT 0,
+    invoice_type TEXT DEFAULT '增值税专用发票',
+    currency TEXT DEFAULT 'CNY',
+    sign_date TEXT NOT NULL,
+    start_date TEXT NOT NULL,
+    expiry_date TEXT NOT NULL,
+    status TEXT DEFAULT '生效中',
+    summary TEXT DEFAULT '',
+    perf_bond_amount REAL DEFAULT 0,
+    perf_bond_status TEXT DEFAULT '无',
+    perf_bond_return_date TEXT DEFAULT '',
+    warranty_bond_amount REAL DEFAULT 0,
+    warranty_bond_status TEXT DEFAULT '无',
+    warranty_bond_expiry_date TEXT DEFAULT '',
+    counterparties_json TEXT DEFAULT '[]',
+    attachment_path TEXT DEFAULT '',
+    attachment_original_name TEXT DEFAULT '',
     procurement_id INTEGER DEFAULT NULL,
-    remark TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    remark TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
   );
 
-  CREATE TABLE IF NOT EXISTS contract_files (
+  CREATE TABLE IF NOT EXISTS contract_related_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     contract_id INTEGER NOT NULL,
     file_path TEXT NOT NULL,
     file_original_name TEXT NOT NULL,
-    file_size INTEGER NOT NULL DEFAULT 0,
-    uploaded_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
+    file_size INTEGER DEFAULT 0,
+    uploaded_at TEXT DEFAULT (datetime('now', 'localtime')),
     FOREIGN KEY (contract_id) REFERENCES contracts(id) ON DELETE CASCADE
   );
 
-  CREATE TABLE IF NOT EXISTS procurements (
+  CREATE TABLE IF NOT EXISTS procurement_projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    seq_no TEXT NOT NULL DEFAULT '',
+    seq_no TEXT DEFAULT '2026-001',
     procurement_no TEXT NOT NULL UNIQUE,
     project_name TEXT NOT NULL,
-    project_type TEXT NOT NULL DEFAULT '服务类项目',
-    cost_department TEXT NOT NULL DEFAULT '',
-    budget_amount REAL NOT NULL DEFAULT 0,
-    budget_subject TEXT NOT NULL DEFAULT '',
-    procurement_type TEXT NOT NULL DEFAULT '小额零星采购',
-    procurement_method TEXT NOT NULL DEFAULT '合作谈判',
-    approval_date TEXT NOT NULL DEFAULT '',
-    decision_date TEXT NOT NULL DEFAULT '',
-    completion_date TEXT NOT NULL DEFAULT '',
-    supplier_name TEXT NOT NULL DEFAULT '',
-    deal_amount REAL NOT NULL DEFAULT 0,
-    has_contract TEXT NOT NULL DEFAULT '否',
+    project_type TEXT DEFAULT '服务类项目',
+    cost_department TEXT DEFAULT '',
+    budget_amount REAL DEFAULT 0,
+    budget_subject TEXT DEFAULT '',
+    procurement_type TEXT DEFAULT '小额零星采购',
+    procurement_method TEXT DEFAULT '合作谈判',
+    approval_date TEXT DEFAULT '',
+    decision_date TEXT DEFAULT '',
+    completion_date TEXT DEFAULT '',
+    supplier_name TEXT DEFAULT '',
+    deal_amount REAL DEFAULT 0,
+    has_contract TEXT DEFAULT '否',
     contract_id INTEGER DEFAULT NULL,
-    contract_no_manual TEXT NOT NULL DEFAULT '',
-    remark TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime'))
+    contract_no_manual TEXT DEFAULT '',
+    remark TEXT DEFAULT '',
+    created_at TEXT DEFAULT (datetime('now', 'localtime')),
+    updated_at TEXT DEFAULT (datetime('now', 'localtime'))
   );
 
   CREATE TABLE IF NOT EXISTS procurement_files (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     procurement_id INTEGER NOT NULL,
-    file_category TEXT NOT NULL DEFAULT '立项资料',
     file_path TEXT NOT NULL,
     file_original_name TEXT NOT NULL,
-    file_size INTEGER NOT NULL DEFAULT 0,
-    uploaded_at TEXT NOT NULL DEFAULT (datetime('now', 'localtime')),
-    FOREIGN KEY (procurement_id) REFERENCES procurements(id) ON DELETE CASCADE
+    file_size INTEGER DEFAULT 0,
+    uploaded_at TEXT DEFAULT (datetime('now', 'localtime')),
+    FOREIGN KEY (procurement_id) REFERENCES procurement_projects(id) ON DELETE CASCADE
   );
-
-  CREATE INDEX IF NOT EXISTS idx_contracts_sign_date ON contracts(sign_date ASC, id ASC);
-  CREATE INDEX IF NOT EXISTS idx_contracts_no ON contracts(contract_no);
-  CREATE INDEX IF NOT EXISTS idx_contracts_proc_id ON contracts(procurement_id);
-  CREATE INDEX IF NOT EXISTS idx_procurements_date ON procurements(approval_date ASC, id ASC);
-  CREATE INDEX IF NOT EXISTS idx_procurements_no ON procurements(procurement_no);
-  CREATE INDEX IF NOT EXISTS idx_procurements_cid ON procurements(contract_id);
-  CREATE INDEX IF NOT EXISTS idx_procurements_cno_manual ON procurements(contract_no_manual);
 `);
 
-const STMTS = {
-  getSetting: db.prepare(`SELECT setting_value FROM system_settings WHERE setting_key = ?`),
-  setSetting: db.prepare(`
-    INSERT INTO system_settings (setting_key, setting_value, updated_at)
-    VALUES (?, ?, datetime('now', 'localtime'))
-    ON CONFLICT(setting_key) DO UPDATE SET
-      setting_value = excluded.setting_value,
-      updated_at = datetime('now', 'localtime')
-  `),
-  getContractById: db.prepare(`SELECT * FROM contracts WHERE id = ?`),
-  getContractByNo: db.prepare(`SELECT * FROM contracts WHERE contract_no = ?`),
-  checkDupContractNoCreate: db.prepare(`SELECT id FROM contracts WHERE contract_no = ?`),
-  checkDupContractNoUpdate: db.prepare(`SELECT id FROM contracts WHERE contract_no = ? AND id != ?`),
-  getRelatedFilesByCid: db.prepare(`SELECT * FROM contract_files WHERE contract_id = ? ORDER BY id ASC`),
-  getRelatedFileById: db.prepare(`SELECT * FROM contract_files WHERE id = ? AND contract_id = ?`),
-  insertRelatedFile: db.prepare(`
-    INSERT INTO contract_files (contract_id, file_path, file_original_name, file_size, uploaded_at)
-    VALUES (?, ?, ?, ?, ?)
-  `),
-  deleteRelatedFileById: db.prepare(`DELETE FROM contract_files WHERE id = ?`),
+const existingCols = db.prepare(`PRAGMA table_info(contracts)`).all().map(c => c.name);
+const alterCols = [
+  ['seq_no', "TEXT DEFAULT '2026-001'"],
+  ['counterparties_json', "TEXT DEFAULT '[]'"],
+  ['procurement_id', 'INTEGER DEFAULT NULL'],
+  ['remark', "TEXT DEFAULT ''"]
+];
+for (const [col, def] of alterCols) {
+  if (!existingCols.includes(col)) {
+    db.exec(`ALTER TABLE contracts ADD COLUMN ${col} ${def}`);
+  }
+}
 
-  getProcurementById: db.prepare(`SELECT * FROM procurements WHERE id = ?`),
-  getProcurementByNo: db.prepare(`SELECT * FROM procurements WHERE procurement_no = ?`),
-  checkDupProcNoCreate: db.prepare(`SELECT id FROM procurements WHERE procurement_no = ?`),
-  checkDupProcNoUpdate: db.prepare(`SELECT id FROM procurements WHERE procurement_no = ? AND id != ?`),
-  getProcFilesByPid: db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`),
-  getProcFileById: db.prepare(`SELECT * FROM procurement_files WHERE id = ? AND procurement_id = ?`),
-  insertProcFile: db.prepare(`
-    INSERT INTO procurement_files (procurement_id, file_category, file_path, file_original_name, file_size, uploaded_at)
-    VALUES (?, ?, ?, ?, ?, ?)
-  `),
-  deleteProcFileById: db.prepare(`DELETE FROM procurement_files WHERE id = ?`)
-};
+db.exec(`
+  CREATE INDEX IF NOT EXISTS idx_contracts_sign_date ON contracts(sign_date);
+  CREATE INDEX IF NOT EXISTS idx_contracts_expiry_date ON contracts(expiry_date);
+  CREATE INDEX IF NOT EXISTS idx_contracts_status ON contracts(status);
+  CREATE INDEX IF NOT EXISTS idx_contracts_proc_id ON contracts(procurement_id);
+  CREATE INDEX IF NOT EXISTS idx_related_contract_id ON contract_related_files(contract_id);
+  CREATE INDEX IF NOT EXISTS idx_proc_approval_date ON procurement_projects(approval_date);
+  CREATE INDEX IF NOT EXISTS idx_proc_contract_id ON procurement_projects(contract_id);
+  CREATE INDEX IF NOT EXISTS idx_proc_files_pid ON procurement_files(procurement_id);
+`);
 
-// ==================== 4. 夹心式编号、自定义下拉预设与动态到期流转引擎 ====================
+// ==================== 3. 全局脱敏预设配置与编号规则 ====================
 const DEFAULT_CONTRACT_RULE = {
-  prefix: 'XSZY-黔-BJ-',
+  prefix: 'HT-ABC-',
   default_mid: '',
   date_part: 'YYYYMM',
   seq_digits: 3,
@@ -245,724 +278,86 @@ const DEFAULT_PROC_RULE = {
   reset_yearly: true
 };
 
+const DEFAULT_LAN_SECURITY = {
+  enabled: true,
+  passcode: '888888'
+};
+
 const DEFAULT_DROPDOWN_PRESETS = {
   contract_types: ['采购', '服务', '销售', '框架', '其他'],
   contract_statuses: ['草稿', '生效中', '已到期', '已终止'],
   project_types: ['服务类项目', '货物类项目', '设备采购', '工程类项目', '其他'],
-  cost_departments: ['综合管理部', '省区费用预算', '市场营销部', '运营管理部', '财务部', '毕节自营店'],
+  cost_departments: ['综合管理部', '部门费用预算', '市场营销部', '运营管理部', '财务部', 'ABC分公司'],
   procurement_types: ['小额零星采购', '二级集中采购', '一级集中采购', '分散采购', '其他'],
   procurement_methods: ['合作谈判', '邀请竞争谈判', '公开竞争谈判', '邀请询比', '公开询比', '单一来源采购'],
   budget_subjects: ['办公费', '运输费', '其他固定资产采购', '日常安全费用', '其他外包项目', '租赁费', '中介费', '装修费', '其他福利费'],
   invoice_types: ['增值税专用发票', '增值税普通发票', '数电专票', '数电普票']
 };
 
-function normalizePresetArray(input, fallbackArr) {
-  let rawList = [];
-  if (Array.isArray(input)) {
-    rawList = input;
-  } else if (typeof input === 'string') {
-    rawList = input.split(/[\r\n,，、;；]+/);
-  }
-  const cleaned = [];
-  const seen = new Set();
-  for (const item of rawList) {
-    const s = String(item || '').trim();
-    if (s && !seen.has(s)) {
-      seen.add(s);
-      cleaned.push(s);
-    }
-  }
-  return cleaned.length > 0 ? cleaned : [...fallbackArr];
-}
+db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('default_our_entity', 'ABC公司')`).run();
+db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('contract_no_rule', ?)`).run(JSON.stringify(DEFAULT_CONTRACT_RULE));
+db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('procurement_no_rule', ?)`).run(JSON.stringify(DEFAULT_PROC_RULE));
+db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_security', ?)`).run(JSON.stringify(DEFAULT_LAN_SECURITY));
+db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('dropdown_presets', ?)`).run(JSON.stringify(DEFAULT_DROPDOWN_PRESETS));
+db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_secret_salt', ?)`).run(crypto.randomBytes(24).toString('hex'));
 
-function ensureContractStatusPresetsIntegrity(statusArr) {
-  const arr = Array.isArray(statusArr) ? [...statusArr] : [...DEFAULT_DROPDOWN_PRESETS.contract_statuses];
-  if (!arr.some(s => /生效|履行|执行|正常|进行/.test(s))) {
-    arr.push('生效中');
-  }
-  if (!arr.some(s => /到期|过期|期满|超期|逾期/.test(s))) {
-    arr.push('已到期');
-  }
-  return arr;
+// 若数据库中残留旧的实体名称，平滑更新为脱敏后的 ABC公司
+const entRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
+if (entRow && (!entRow.value || entRow.value.includes('毕节'))) {
+  db.prepare(`UPDATE app_settings SET value = 'ABC公司' WHERE key = 'default_our_entity'`).run();
 }
 
 function getDropdownPresets() {
   try {
-    const row = STMTS.getSetting.get('dropdown_presets');
-    if (row && row.setting_value) {
-      const parsed = JSON.parse(row.setting_value);
+    const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'dropdown_presets'`).get();
+    if (row && row.value) {
+      const parsed = JSON.parse(row.value);
       const result = {};
-      for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
-        result[key] = normalizePresetArray(parsed[key], DEFAULT_DROPDOWN_PRESETS[key]);
+      for (const k of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
+        result[k] = Array.isArray(parsed[k]) && parsed[k].length > 0 ? parsed[k] : DEFAULT_DROPDOWN_PRESETS[k];
       }
-      result.contract_statuses = ensureContractStatusPresetsIntegrity(result.contract_statuses);
       return result;
     }
   } catch (e) {}
-  const copy = {};
-  for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
-    copy[key] = [...DEFAULT_DROPDOWN_PRESETS[key]];
-  }
-  return copy;
+  return { ...DEFAULT_DROPDOWN_PRESETS };
 }
 
-function resolveDynamicStatusLabels() {
+function getDynamicContractStatusPairServer() {
   const presets = getDropdownPresets();
-  const list = presets.contract_statuses || DEFAULT_DROPDOWN_PRESETS.contract_statuses;
+  const list = presets.contract_statuses || ['草稿', '生效中', '已到期', '已终止'];
   const activeLabel = list.find(s => /生效|履行|执行|正常|进行/.test(s)) || '生效中';
   const expiredLabel = list.find(s => /到期|过期|期满|超期|逾期/.test(s)) || '已到期';
-  return { activeLabel, expiredLabel, list };
+  return { activeLabel, expiredLabel };
 }
 
-function autoRefreshExpiredContractStatus() {
-  try {
-    const today = getLocalTodayStr();
-    const { activeLabel, expiredLabel } = resolveDynamicStatusLabels();
-    db.prepare(`
-      UPDATE contracts
-      SET status = ?, updated_at = datetime('now', 'localtime')
-      WHERE (status = ? OR status = '生效中')
-        AND expiry_date != ''
-        AND expiry_date < ?
-    `).run(expiredLabel, activeLabel, today);
-  } catch (e) {}
-}
-
-function computeSmartContractStatus(rawStatus, expiryDateStr) {
-  const { activeLabel, expiredLabel } = resolveDynamicStatusLabels();
-  const status = String(rawStatus || activeLabel).trim();
-  const exp = String(expiryDateStr || '').trim();
-  if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return status;
-
-  const today = getLocalTodayStr();
-  if (exp < today && (status === activeLabel || status === '生效中')) {
-    return expiredLabel;
-  }
-  if (exp >= today && (status === expiredLabel || status === '已到期')) {
-    return activeLabel;
-  }
-  return status;
-}
-
-function getContractNoRule() {
-  try {
-    const row = STMTS.getSetting.get('contract_no_rule');
-    if (row && row.setting_value) {
-      const p = JSON.parse(row.setting_value);
-      return {
-        prefix: typeof p.prefix === 'string' ? p.prefix : DEFAULT_CONTRACT_RULE.prefix,
-        default_mid: typeof p.default_mid === 'string' ? p.default_mid : '',
-        date_part: p.date_part || p.date_format || DEFAULT_CONTRACT_RULE.date_part,
-        seq_digits: Number.isInteger(Number(p.seq_digits)) ? Number(p.seq_digits) : 3,
-        suffix: typeof p.suffix === 'string' ? p.suffix : '',
-        reset_yearly: p.reset_yearly !== undefined ? Boolean(p.reset_yearly) : true
-      };
-    }
-  } catch (e) {}
-  return { ...DEFAULT_CONTRACT_RULE };
-}
-
-function getProcNoRule() {
-  try {
-    const row = STMTS.getSetting.get('procurement_no_rule');
-    if (row && row.setting_value) {
-      const p = JSON.parse(row.setting_value);
-      return {
-        prefix: typeof p.prefix === 'string' ? p.prefix : DEFAULT_PROC_RULE.prefix,
-        default_mid: typeof p.default_mid === 'string' ? p.default_mid : '',
-        date_part: p.date_part || p.date_format || DEFAULT_PROC_RULE.date_part,
-        seq_digits: Number.isInteger(Number(p.seq_digits)) ? Number(p.seq_digits) : 3,
-        suffix: typeof p.suffix === 'string' ? p.suffix : '',
-        reset_yearly: p.reset_yearly !== undefined ? Boolean(p.reset_yearly) : true
-      };
-    }
-  } catch (e) {}
-  return { ...DEFAULT_PROC_RULE };
-}
-
-function getDefaultOurEntity() {
-  const row = STMTS.getSetting.get('default_our_entity');
-  return row && row.setting_value ? row.setting_value : '毕节自营公司';
-}
-
-function formatDateSegment(fmt, rawDateStr) {
-  const norm = normalizeSmartDate(rawDateStr, true);
-  const match = norm.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  const yyyy = match ? match[1] : String(new Date().getFullYear());
-  const mm = match ? match[2] : String(new Date().getMonth() + 1).padStart(2, '0');
-  const dd = match ? match[3] : String(new Date().getDate()).padStart(2, '0');
-
-  switch (fmt) {
-    case 'YYYY': return `${yyyy}`;
-    case 'YYYY-': return `${yyyy}-`;
-    case 'YYYYMM': return `${yyyy}${mm}`;
-    case 'YYYYMM-': return `${yyyy}${mm}-`;
-    case 'YYYYMMDD': return `${yyyy}${mm}${dd}`;
-    case 'YYYYMMDD-': return `${yyyy}${mm}${dd}-`;
-    case 'NONE': return '';
-    default: return `${yyyy}${mm}`;
-  }
-}
-
-function findSmallestMissingSeq(rows, colName, matchStart, suffix) {
-  const used = new Set();
-  const sfx = suffix || '';
-  for (const r of rows) {
-    const val = String(r[colName] || '').trim();
-    if (val.startsWith(matchStart) && (!sfx || val.endsWith(sfx))) {
-      const midCore = val.slice(matchStart.length, sfx ? val.length - sfx.length : undefined);
-      if (/^\d+$/.test(midCore)) {
-        const n = parseInt(midCore, 10);
-        if (n > 0) used.add(n);
-      }
-    }
-  }
-  let seq = 1;
-  while (used.has(seq)) {
-    seq++;
-  }
-  return seq;
-}
-
-function buildNextContractNo(rule, signDateStr, customMidParam) {
-  const prefix = rule.prefix || '';
-  const mid = customMidParam !== undefined ? String(customMidParam).trim() : (rule.default_mid || '');
-  const dateStr = formatDateSegment(rule.date_part, signDateStr);
-  const suffix = rule.suffix || '';
-  const digits = Number(rule.seq_digits ?? 3);
-
-  if (digits <= 0) {
-    const full = `${prefix}${mid}${dateStr}${suffix}`;
-    return { prefix, mid_custom: mid, date_part: dateStr, seq_part: '', suffix, next_no: full, full_no: full };
-  }
-
-  const matchStart = `${prefix}${mid}${dateStr}`;
-  const rows = db.prepare(`SELECT contract_no FROM contracts WHERE contract_no LIKE ?`).all(`${matchStart}%`);
-  const nextNum = findSmallestMissingSeq(rows, 'contract_no', matchStart, suffix);
-  const seqStr = String(nextNum).padStart(digits, '0');
-  const full = `${matchStart}${seqStr}${suffix}`;
-
-  return { prefix, mid_custom: mid, date_part: dateStr, seq_part: seqStr, suffix, next_no: full, full_no: full };
-}
-
-function buildNextProcNo(rule, approvalDateStr, customMidParam) {
-  const prefix = rule.prefix || '';
-  const mid = customMidParam !== undefined ? String(customMidParam).trim() : (rule.default_mid || '');
-  const dateStr = formatDateSegment(rule.date_part, approvalDateStr);
-  const suffix = rule.suffix || '';
-  const digits = Number(rule.seq_digits ?? 3);
-
-  if (digits <= 0) {
-    const full = `${prefix}${mid}${dateStr}${suffix}`;
-    return { prefix, mid_custom: mid, date_part: dateStr, seq_part: '', suffix, next_no: full, full_no: full };
-  }
-
-  const matchStart = `${prefix}${mid}${dateStr}`;
-  const rows = db.prepare(`SELECT procurement_no FROM procurements WHERE procurement_no LIKE ?`).all(`${matchStart}%`);
-  const nextNum = findSmallestMissingSeq(rows, 'procurement_no', matchStart, suffix);
-  const seqStr = String(nextNum).padStart(digits, '0');
-  const full = `${matchStart}${seqStr}${suffix}`;
-
-  return { prefix, mid_custom: mid, date_part: dateStr, seq_part: seqStr, suffix, next_no: full, full_no: full };
-}
-
-function resolveConflictNo(conflictNo, tableType) {
-  const isContract = tableType === 'contract';
-  const rule = isContract ? getContractNoRule() : getProcNoRule();
-  const sfx = rule.suffix || '';
-  const body = sfx && conflictNo.endsWith(sfx) ? conflictNo.slice(0, conflictNo.length - sfx.length) : conflictNo;
-  const match = body.match(/^(.*?)(\d+)$/);
-  if (!match) return null;
-
-  const matchStart = match[1];
-  const digitsLen = Math.max(Number(rule.seq_digits || 3), match[2].length);
-  const col = isContract ? 'contract_no' : 'procurement_no';
-  const table = isContract ? 'contracts' : 'procurements';
-  const rows = db.prepare(`SELECT ${col} FROM ${table} WHERE ${col} LIKE ?`).all(`${matchStart}%`);
-  const nextNum = findSmallestMissingSeq(rows, col, matchStart, sfx);
-  return `${matchStart}${String(nextNum).padStart(digitsLen, '0')}${sfx}`;
-}
-
-const recalculateContractSeqNos = db.transaction(() => {
-  const rule = getContractNoRule();
-  const rows = db.prepare(`
-    SELECT id, seq_no, sign_date
-    FROM contracts
-    ORDER BY
-      CASE WHEN sign_date IS NULL OR sign_date = '' THEN 1 ELSE 0 END ASC,
-      sign_date ASC,
-      id ASC
-  `).all();
-
-  const updateStmt = db.prepare(`UPDATE contracts SET seq_no = ? WHERE id = ?`);
-  const counters = {};
-  let globalCounter = 0;
-
-  for (const r of rows) {
-    let expected;
-    if (rule.reset_yearly) {
-      const ym = String(r.sign_date || '').match(/^(\d{4})/);
-      const y = ym ? ym[1] : String(new Date().getFullYear());
-      counters[y] = (counters[y] || 0) + 1;
-      expected = `${y}-${String(counters[y]).padStart(3, '0')}`;
-    } else {
-      globalCounter++;
-      expected = String(globalCounter).padStart(3, '0');
-    }
-    if (r.seq_no !== expected) {
-      updateStmt.run(expected, r.id);
-    }
-  }
-});
-
-const recalculateProcSeqNos = db.transaction(() => {
-  const rule = getProcNoRule();
-  const rows = db.prepare(`
-    SELECT id, seq_no, approval_date
-    FROM procurements
-    ORDER BY
-      CASE WHEN approval_date IS NULL OR approval_date = '' THEN 1 ELSE 0 END ASC,
-      approval_date ASC,
-      id ASC
-  `).all();
-
-  const updateStmt = db.prepare(`UPDATE procurements SET seq_no = ? WHERE id = ?`);
-  const counters = {};
-  let globalCounter = 0;
-
-  for (const r of rows) {
-    let expected;
-    if (rule.reset_yearly) {
-      const ym = String(r.approval_date || '').match(/^(\d{4})/);
-      const y = ym ? ym[1] : String(new Date().getFullYear());
-      counters[y] = (counters[y] || 0) + 1;
-      expected = String(counters[y]);
-    } else {
-      globalCounter++;
-      expected = String(globalCounter);
-    }
-    if (r.seq_no !== expected) {
-      updateStmt.run(expected, r.id);
-    }
-  }
-});
-
-recalculateContractSeqNos();
-recalculateProcSeqNos();
-autoRefreshExpiredContractStatus();
-
-// ==================== 5. 顺序可逆的双向互锁引擎 ====================
-function syncBidirectionalLinkFromContract(contractId, contractNo, explicitProcId) {
-  const cid = Number(contractId);
-  let targetProcId = explicitProcId ? Number(explicitProcId) : null;
-
-  if (!targetProcId && contractNo) {
-    const matchedProc = db.prepare(`
-      SELECT id FROM procurements
-      WHERE TRIM(contract_no_manual) = ? AND (contract_id IS NULL OR contract_id = ?)
-      ORDER BY id DESC LIMIT 1
-    `).get(contractNo, cid);
-    if (matchedProc) {
-      targetProcId = matchedProc.id;
-    }
-  }
-
-  db.prepare(`
-    UPDATE procurements
-    SET contract_id = NULL, updated_at = datetime('now', 'localtime')
-    WHERE contract_id = ? AND id != COALESCE(?, -1)
-  `).run(cid, targetProcId);
-
-  if (targetProcId) {
-    const proc = STMTS.getProcurementById.get(targetProcId);
-    if (proc) {
-      if (proc.contract_id && proc.contract_id !== cid) {
-        db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE id = ?`).run(proc.contract_id);
-      }
-      db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(targetProcId, cid);
-      db.prepare(`
-        UPDATE procurements
-        SET contract_id = ?, has_contract = '是', contract_no_manual = ?, updated_at = datetime('now', 'localtime')
-        WHERE id = ?
-      `).run(cid, contractNo, targetProcId);
-      return;
-    }
-  }
-  db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE id = ?`).run(cid);
-}
-
-function syncBidirectionalLinkFromProcurement(procId, explicitContractId, manualContractNo) {
-  const pid = Number(procId);
-  let targetContractId = explicitContractId ? Number(explicitContractId) : null;
-  const cleanManualNo = String(manualContractNo || '').trim();
-
-  if (!targetContractId && cleanManualNo) {
-    const matchedContract = STMTS.getContractByNo.get(cleanManualNo);
-    if (matchedContract) {
-      targetContractId = matchedContract.id;
-    }
-  }
-
-  db.prepare(`
-    UPDATE contracts
-    SET procurement_id = NULL, updated_at = datetime('now', 'localtime')
-    WHERE procurement_id = ? AND id != COALESCE(?, -1)
-  `).run(pid, targetContractId);
-
-  if (targetContractId) {
-    const c = STMTS.getContractById.get(targetContractId);
-    if (c) {
-      if (c.procurement_id && c.procurement_id !== pid) {
-        db.prepare(`UPDATE procurements SET contract_id = NULL WHERE id = ?`).run(c.procurement_id);
-      }
-      db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(pid, targetContractId);
-      db.prepare(`
-        UPDATE procurements
-        SET contract_id = ?, has_contract = '是', contract_no_manual = ?
-        WHERE id = ?
-      `).run(targetContractId, c.contract_no, pid);
-      return;
-    }
-  }
-  db.prepare(`UPDATE procurements SET contract_id = NULL WHERE id = ?`).run(pid);
-}
-
-// ==================== 6. 三大文件物理归档、改名同步与零残留清道夫引擎 ====================
-function sanitizeSegment(str, maxLen = 60) {
-  return String(str || '')
-    .replace(/[\\/:*?"<>|\r\n\t]+/g, '_')
-    .replace(/\s+/g, ' ')
-    .trim()
-    .slice(0, maxLen) || '未命名';
-}
-
-function decodeOriginalFilename(rawName) {
-  if (!rawName) return '未命名文件';
-  try {
-    if (/[\u4e00-\u9fa5]/.test(rawName)) return rawName;
-    const decoded = Buffer.from(rawName, 'latin1').toString('utf8');
-    if (/[\u4e00-\u9fa5]/.test(decoded) || !decoded.includes('\ufffd')) {
-      return decoded;
-    }
-  } catch (e) {}
-  return rawName;
-}
-
-function buildFolderKey(noStr, nameStr) {
-  return `${sanitizeSegment(noStr, 50)}_${sanitizeSegment(nameStr, 60)}`;
-}
-
-function deletePhysicalFile(relFromUploads) {
-  if (!relFromUploads) return;
-  try {
-    const abs = path.join(UPLOAD_DIR, relFromUploads);
-    if (isSafePathWithin(abs, UPLOAD_DIR) && fs.existsSync(abs) && fs.statSync(abs).isFile()) {
-      fs.unlinkSync(abs);
-    }
-  } catch (e) {}
-}
-
-function removeEmptySubdirIfClean(absSubDir, baseParentDir) {
-  if (!absSubDir || !isSafePathWithin(absSubDir, baseParentDir)) return;
-  try {
-    if (fs.existsSync(absSubDir) && fs.statSync(absSubDir).isDirectory()) {
-      if (fs.readdirSync(absSubDir).length === 0) {
-        fs.rmdirSync(absSubDir);
-      }
-    }
-  } catch (e) {}
-}
-
-function archiveMainContractAttachment(tempFile, contractNo, contractName) {
-  if (!tempFile || !tempFile.path || !fs.existsSync(tempFile.path)) return null;
-  const origName = decodeOriginalFilename(tempFile.originalname);
-  const ext = (path.extname(origName) || '.pdf').toLowerCase();
-  const base = `${sanitizeSegment(contractNo, 50)}_${sanitizeSegment(contractName, 60)}`;
-
-  let finalName = `${base}${ext}`;
-  let idx = 1;
-  while (fs.existsSync(path.join(UPLOAD_DIR, finalName))) {
-    finalName = `${base}(${idx})${ext}`;
-    idx++;
-  }
-  const destAbs = path.join(UPLOAD_DIR, finalName);
-  fs.renameSync(tempFile.path, destAbs);
-  return {
-    attachment_path: finalName,
-    attachment_original_name: origName,
-    attachment_size: tempFile.size || fs.statSync(destAbs).size
-  };
-}
-
-function archiveContractRelatedFiles(contractId, contractNo, contractName, files) {
-  if (!Array.isArray(files) || files.length === 0) return [];
-  const folder = buildFolderKey(contractNo, contractName);
-  const targetDir = path.join(RELATED_UPLOAD_DIR, folder);
-  if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
-
-  const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const saved = [];
-  for (const f of files) {
-    if (!f || !f.path || !fs.existsSync(f.path)) continue;
-    const origName = decodeOriginalFilename(f.originalname);
-    const ext = path.extname(origName);
-    const base = sanitizeSegment(path.basename(origName, ext), 80);
-
-    let fname = `${base}${ext}`;
-    let idx = 1;
-    while (fs.existsSync(path.join(targetDir, fname))) {
-      fname = `${base}(${idx})${ext}`;
-      idx++;
-    }
-    const destAbs = path.join(targetDir, fname);
-    fs.renameSync(f.path, destAbs);
-    const relPath = path.posix.join('related', folder, fname);
-    saved.push(relPath);
-    STMTS.insertRelatedFile.run(contractId, relPath, origName, f.size || fs.statSync(destAbs).size, nowStr);
-  }
-  return saved;
-}
-
-function archiveProcurementFiles(procId, procNo, projectName, files, category = '立项资料') {
-  if (!Array.isArray(files) || files.length === 0) return [];
-  const folder = buildFolderKey(procNo, projectName);
-  const targetDir = path.join(PROCUREMENT_UPLOAD_DIR, folder);
-  if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
-
-  const nowStr = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  const saved = [];
-  for (const f of files) {
-    if (!f || !f.path || !fs.existsSync(f.path)) continue;
-    const origName = decodeOriginalFilename(f.originalname);
-    const ext = path.extname(origName);
-    const base = sanitizeSegment(path.basename(origName, ext), 80);
-
-    let fname = `${base}${ext}`;
-    let idx = 1;
-    while (fs.existsSync(path.join(targetDir, fname))) {
-      fname = `${base}(${idx})${ext}`;
-      idx++;
-    }
-    const destAbs = path.join(targetDir, fname);
-    fs.renameSync(f.path, destAbs);
-    const relPath = path.posix.join('procurement', folder, fname);
-    saved.push(relPath);
-    STMTS.insertProcFile.run(procId, category, relPath, origName, f.size || fs.statSync(destAbs).size, nowStr);
-  }
-  return saved;
-}
-
-function syncContractFilesOnRename(contractId, oldNo, oldName, newNo, newName, currentAttachmentPath) {
-  let finalAttachmentPath = currentAttachmentPath || '';
-  if (oldNo === newNo && oldName === newName) return finalAttachmentPath;
-
-  if (finalAttachmentPath) {
-    const oldMainAbs = path.join(UPLOAD_DIR, finalAttachmentPath);
-    if (isSafePathWithin(oldMainAbs, UPLOAD_DIR) && fs.existsSync(oldMainAbs)) {
-      const ext = path.extname(finalAttachmentPath) || '.pdf';
-      const base = `${sanitizeSegment(newNo, 50)}_${sanitizeSegment(newName, 60)}`;
-      let targetName = `${base}${ext}`;
-      let idx = 1;
-      while (fs.existsSync(path.join(UPLOAD_DIR, targetName)) && targetName !== finalAttachmentPath) {
-        targetName = `${base}(${idx})${ext}`;
-        idx++;
-      }
-      try {
-        fs.renameSync(oldMainAbs, path.join(UPLOAD_DIR, targetName));
-        finalAttachmentPath = targetName;
-      } catch (e) {}
-    }
-  }
-
-  const oldFolder = buildFolderKey(oldNo, oldName);
-  const newFolder = buildFolderKey(newNo, newName);
-  if (oldFolder !== newFolder) {
-    const oldDirAbs = path.join(RELATED_UPLOAD_DIR, oldFolder);
-    const newDirAbs = path.join(RELATED_UPLOAD_DIR, newFolder);
-    if (isSafePathWithin(oldDirAbs, RELATED_UPLOAD_DIR) && fs.existsSync(oldDirAbs)) {
-      try {
-        if (!fs.existsSync(newDirAbs)) {
-          fs.renameSync(oldDirAbs, newDirAbs);
-        } else {
-          for (const f of fs.readdirSync(oldDirAbs)) {
-            fs.renameSync(path.join(oldDirAbs, f), path.join(newDirAbs, f));
-          }
-          removeEmptySubdirIfClean(oldDirAbs, RELATED_UPLOAD_DIR);
-        }
-        const relFiles = STMTS.getRelatedFilesByCid.all(contractId);
-        const updStmt = db.prepare(`UPDATE contract_files SET file_path = ? WHERE id = ?`);
-        for (const rf of relFiles) {
-          const fname = path.posix.basename(rf.file_path.replace(/\\/g, '/'));
-          updStmt.run(path.posix.join('related', newFolder, fname), rf.id);
-        }
-      } catch (e) {}
-    }
-  }
-  return finalAttachmentPath;
-}
-
-function syncProcurementFilesOnRename(procId, oldNo, oldName, newNo, newName) {
-  const oldFolder = buildFolderKey(oldNo, oldName);
-  const newFolder = buildFolderKey(newNo, newName);
-  if (oldFolder === newFolder) return;
-
-  const oldDirAbs = path.join(PROCUREMENT_UPLOAD_DIR, oldFolder);
-  const newDirAbs = path.join(PROCUREMENT_UPLOAD_DIR, newFolder);
-  if (isSafePathWithin(oldDirAbs, PROCUREMENT_UPLOAD_DIR) && fs.existsSync(oldDirAbs)) {
-    try {
-      if (!fs.existsSync(newDirAbs)) {
-        fs.renameSync(oldDirAbs, newDirAbs);
-      } else {
-        for (const f of fs.readdirSync(oldDirAbs)) {
-          fs.renameSync(path.join(oldDirAbs, f), path.join(newDirAbs, f));
-        }
-        removeEmptySubdirIfClean(oldDirAbs, PROCUREMENT_UPLOAD_DIR);
-      }
-      const pFiles = STMTS.getProcFilesByPid.all(procId);
-      const updStmt = db.prepare(`UPDATE procurement_files SET file_path = ? WHERE id = ?`);
-      for (const pf of pFiles) {
-        const fname = path.posix.basename(pf.file_path.replace(/\\/g, '/'));
-        updStmt.run(path.posix.join('procurement', newFolder, fname), pf.id);
-      }
-    } catch (e) {}
-  }
-}
-
-function cleanupReqTempFiles(req) {
-  if (!req) return;
-  const list = [];
-  if (req.file && req.file.path) list.push(req.file.path);
-  if (Array.isArray(req.files)) {
-    for (const f of req.files) if (f && f.path) list.push(f.path);
-  } else if (req.files && typeof req.files === 'object') {
-    for (const k of Object.keys(req.files)) {
-      for (const f of (req.files[k] || [])) {
-        if (f && f.path) list.push(f.path);
-      }
-    }
-  }
-  for (const p of list) {
-    try {
-      if (isSafePathWithin(p, TMP_UPLOAD_DIR) && fs.existsSync(p)) fs.unlinkSync(p);
-    } catch (e) {}
-  }
-}
-
-function cleanTmpDir() {
-  try {
-    if (!fs.existsSync(TMP_UPLOAD_DIR)) return;
-    for (const item of fs.readdirSync(TMP_UPLOAD_DIR)) {
-      const fp = path.join(TMP_UPLOAD_DIR, item);
-      if (isSafePathWithin(fp, TMP_UPLOAD_DIR)) {
-        try { fs.unlinkSync(fp); } catch (e) {}
-      }
-    }
-  } catch (e) {}
-}
-
-function sweepOrphanUploads() {
-  try {
-    if (!db || !db.open) return;
-    const validMain = new Set(
-      db.prepare(`SELECT attachment_path FROM contracts WHERE attachment_path != ''`).all().map(r => r.attachment_path)
-    );
-    for (const item of fs.readdirSync(UPLOAD_DIR)) {
-      if (item === '.tmp' || item === 'related' || item === 'procurement' || item.startsWith('.')) continue;
-      const abs = path.join(UPLOAD_DIR, item);
-      try {
-        if (fs.statSync(abs).isFile() && !validMain.has(item)) fs.unlinkSync(abs);
-      } catch (e) {}
-    }
-
-    const validRel = new Set(
-      db.prepare(`SELECT file_path FROM contract_files`).all().map(r => r.file_path.replace(/\\/g, '/'))
-    );
-    if (fs.existsSync(RELATED_UPLOAD_DIR)) {
-      for (const sub of fs.readdirSync(RELATED_UPLOAD_DIR)) {
-        const subAbs = path.join(RELATED_UPLOAD_DIR, sub);
-        try {
-          if (!fs.statSync(subAbs).isDirectory()) continue;
-          for (const f of fs.readdirSync(subAbs)) {
-            const relKey = path.posix.join('related', sub, f);
-            const fAbs = path.join(subAbs, f);
-            if (!validRel.has(relKey) && isSafePathWithin(fAbs, RELATED_UPLOAD_DIR)) {
-              try { fs.unlinkSync(fAbs); } catch (e) {}
-            }
-          }
-          removeEmptySubdirIfClean(subAbs, RELATED_UPLOAD_DIR);
-        } catch (e) {}
-      }
-    }
-
-    const validProc = new Set(
-      db.prepare(`SELECT file_path FROM procurement_files`).all().map(r => r.file_path.replace(/\\/g, '/'))
-    );
-    if (fs.existsSync(PROCUREMENT_UPLOAD_DIR)) {
-      for (const sub of fs.readdirSync(PROCUREMENT_UPLOAD_DIR)) {
-        const subAbs = path.join(PROCUREMENT_UPLOAD_DIR, sub);
-        try {
-          if (!fs.statSync(subAbs).isDirectory()) continue;
-          for (const f of fs.readdirSync(subAbs)) {
-            const relKey = path.posix.join('procurement', sub, f);
-            const fAbs = path.join(subAbs, f);
-            if (!validProc.has(relKey) && isSafePathWithin(fAbs, PROCUREMENT_UPLOAD_DIR)) {
-              try { fs.unlinkSync(fAbs); } catch (e) {}
-            }
-          }
-          removeEmptySubdirIfClean(subAbs, PROCUREMENT_UPLOAD_DIR);
-        } catch (e) {}
-      }
-    }
-  } catch (e) {}
-}
-
-cleanTmpDir();
-sweepOrphanUploads();
-
-// ==================== 7. Multer 上传配置 ====================
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => cb(null, TMP_UPLOAD_DIR),
-  filename: (req, file, cb) => {
-    const orig = decodeOriginalFilename(file.originalname);
-    const ext = (path.extname(orig) || '.bin').toLowerCase();
-    cb(null, `tmp_${Date.now()}_${Math.round(Math.random() * 1e9)}${ext}`);
-  }
-});
-
-const upload = multer({
-  storage,
-  limits: { fileSize: 50 * 1024 * 1024, files: 30 }
-});
-
-// ==================== 8. 中间件与内网 12小时持久化签名口令控制 ====================
-app.disable('x-powered-by');
-app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true, limit: '10mb' }));
-
-const TOKEN_TTL_MS = 12 * 60 * 60 * 1000; // 严格实现 12 小时免重复输入
-
-function getOrCreateSecretSeed() {
-  try {
-    const row = STMTS.getSetting.get('lan_secret_seed');
-    if (row && row.setting_value && row.setting_value.length >= 32) {
-      return row.setting_value;
-    }
-  } catch (e) {}
-  const newSeed = crypto.randomBytes(32).toString('hex');
-  try { STMTS.setSetting.run('lan_secret_seed', newSeed); } catch (e) {}
-  return newSeed;
-}
-
-const SECRET_SEED = getOrCreateSecretSeed();
-
+// ==================== 4. 局域网安全口令鉴权中间件 ====================
 function getLanSecurityConfig() {
   try {
-    const row = STMTS.getSetting.get('lan_security_config');
-    if (row && row.setting_value) {
-      return JSON.parse(row.setting_value);
-    }
+    const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'lan_security'`).get();
+    if (row && row.value) return { ...DEFAULT_LAN_SECURITY, ...JSON.parse(row.value) };
   } catch (e) {}
-  return { enabled: true, passcode: '' };
+  return { ...DEFAULT_LAN_SECURITY };
+}
+
+function getLanSecretSalt() {
+  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'lan_secret_salt'`).get();
+  return (row && row.value) || 'default_salt_cm';
+}
+
+function makeLanToken(passcode, timestamp = Date.now()) {
+  const ts = String(timestamp);
+  const sig = crypto.createHmac('sha256', getLanSecretSalt()).update(`${passcode}|${ts}`).digest('hex');
+  return `${ts}.${sig}`;
+}
+
+function verifyLanToken(token, passcode) {
+  if (!token || typeof token !== 'string' || !token.includes('.')) return false;
+  const [tsStr, sig] = token.split('.');
+  const ts = Number(tsStr);
+  if (!ts || isNaN(ts)) return false;
+  if (Date.now() - ts > 12 * 3600 * 1000) return false;
+  const expectedSig = crypto.createHmac('sha256', getLanSecretSalt()).update(`${passcode}|${tsStr}`).digest('hex');
+  return sig === expectedSig;
 }
 
 function isLocalhostRequest(req) {
@@ -970,1078 +365,1366 @@ function isLocalhostRequest(req) {
   return ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
 }
 
-function makeLanToken(passcode) {
-  const ts = String(Date.now());
-  const sig = crypto.createHmac('sha256', SECRET_SEED).update(`${passcode}|${ts}`).digest('hex');
-  return `${ts}.${sig}`;
-}
-
-function verifyLanToken(tokenStr, passcode) {
-  if (!tokenStr) return false;
-  const parts = String(tokenStr).split('.');
-  if (parts.length === 2) {
-    const [tsStr, sig] = parts;
-    const issuedAt = Number(tsStr);
-    if (!issuedAt || isNaN(issuedAt)) return false;
-    if (Date.now() - issuedAt > TOKEN_TTL_MS) return false;
-    const expectedSig = crypto.createHmac('sha256', SECRET_SEED).update(`${passcode}|${tsStr}`).digest('hex');
-    return sig === expectedSig;
-  }
-  return false;
-}
-
-function isRequestAuthorized(req) {
-  if (isLocalhostRequest(req)) return true;
-  const cfg = getLanSecurityConfig();
-  if (!cfg.enabled) return false;
-  if (!cfg.passcode) return true;
-  const clientToken = String(req.headers['x-lan-token'] || req.headers['x-access-token'] || req.query.token || '').trim();
-  return verifyLanToken(clientToken, cfg.passcode);
-}
-
-app.use(express.static(PUBLIC_DIR));
-
-app.get(['/api/lan-auth/status', '/api/auth/status'], (req, res) => {
-  const cfg = getLanSecurityConfig();
-  const isLocal = isLocalhostRequest(req);
-  const authed = isRequestAuthorized(req);
-  const interfaces = os.networkInterfaces();
-  const lanUrls = [];
-  const currentPort = serverInstance && serverInstance.port ? serverInstance.port : DEFAULT_PORT;
-
-  for (const name of Object.keys(interfaces)) {
-    if (/vmware|virtualbox|vbox|hyper-v|wsl|docker|vethernet|loopback/i.test(name)) continue;
-    for (const net of interfaces[name] || []) {
-      if (net.family === 'IPv4' && !net.internal) {
-        lanUrls.push(`http://${net.address}:${currentPort}`);
-      }
+function getLanIPv4Addresses() {
+  const nets = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(nets)) {
+    for (const net of nets[name] || []) {
+      if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
     }
   }
+  return ips;
+}
+
+app.get('/api/lan-auth/status', (req, res) => {
+  const cfg = getLanSecurityConfig();
+  const isLocal = isLocalhostRequest(req);
+  const clientToken = req.headers['x-lan-token'] || req.query.token || '';
+  const needPasscode = Boolean(cfg.passcode && String(cfg.passcode).trim());
+  const isAuthed = isLocal || !needPasscode || verifyLanToken(clientToken, String(cfg.passcode).trim());
 
   res.json({
     success: true,
     is_localhost: isLocal,
-    enabled: cfg.enabled,
-    locked: Boolean(cfg.passcode) && !isLocal,
-    authorized: authed,
-    passcode: isLocal ? cfg.passcode : undefined,
-    port: currentPort,
-    lan_urls: lanUrls
+    enabled: cfg.enabled !== false,
+    locked: !isLocal && needPasscode,
+    authorized: isAuthed,
+    lan_urls: getLanIPv4Addresses().map(ip => `http://${ip}:${PORT}`),
+    port: PORT,
+    ...(isLocal ? { passcode: cfg.passcode || '' } : {})
   });
 });
 
-app.post(['/api/lan-auth/login', '/api/auth/verify'], (req, res) => {
+app.post('/api/lan-auth/login', (req, res) => {
   const cfg = getLanSecurityConfig();
-  if (!cfg.enabled && !isLocalhostRequest(req)) {
-    return res.status(403).json({ success: false, message: '主机管理员已关闭内网访问权限' });
+  if (cfg.enabled === false && !isLocalhostRequest(req)) {
+    return res.status(403).json({ success: false, message: '主机已关闭局域网外部访问权限' });
   }
-  const code = String(req.body.passcode || req.body.access_code || req.body.code || '').trim();
-  if (cfg.passcode && code !== cfg.passcode) {
-    return res.status(401).json({ success: false, message: '内网访问口令错误，请核对后重试' });
+  const inputCode = String(req.body.passcode || '').trim();
+  const targetCode = String(cfg.passcode || '').trim();
+  if (targetCode && inputCode !== targetCode) {
+    return res.status(401).json({ success: false, message: '内网访问口令不正确，请联系主机管理员' });
   }
-  res.json({
-    success: true,
-    token: cfg.passcode ? makeLanToken(cfg.passcode) : '',
-    message: '口令验证成功'
-  });
+  res.json({ success: true, token: makeLanToken(targetCode) });
 });
 
-app.post(['/api/lan-auth/config', '/api/auth/set-code'], (req, res) => {
-  const enabled = req.body.enabled !== undefined ? Boolean(req.body.enabled) : true;
-  const passcode = String(req.body.passcode ?? req.body.new_code ?? '').trim();
-  const newCfg = { enabled, passcode };
-  STMTS.setSetting.run('lan_security_config', JSON.stringify(newCfg));
-  res.json({
-    success: true,
-    enabled,
-    passcode,
-    token: passcode ? makeLanToken(passcode) : '',
-    message: '内网安全设置已保存'
-  });
+app.post('/api/lan-auth/config', (req, res) => {
+  if (!isLocalhostRequest(req)) {
+    return res.status(403).json({ success: false, message: '仅允许主机本机修改局域网安全配置' });
+  }
+  const nextCfg = {
+    enabled: req.body.enabled !== false && req.body.enabled !== 'false',
+    passcode: String(req.body.passcode ?? '').trim()
+  };
+  db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('lan_security', ?)`).run(JSON.stringify(nextCfg));
+  res.json({ success: true, config: nextCfg, token: makeLanToken(nextCfg.passcode) });
 });
 
-app.use((req, res, next) => {
-  if (req.path.startsWith('/api/') || req.path.startsWith('/uploads/')) {
-    if (!isRequestAuthorized(req)) {
-      return res.status(401).json({ success: false, locked: true, message: '需要验证内网访问口令' });
+function lanAuthGuard(req, res, next) {
+  if (isLocalhostRequest(req)) return next();
+  const cfg = getLanSecurityConfig();
+  if (cfg.enabled === false) {
+    return res.status(403).json({ success: false, locked: true, message: '主机已关闭局域网访问' });
+  }
+  const targetCode = String(cfg.passcode || '').trim();
+  if (!targetCode) return next();
+  const clientToken = req.headers['x-lan-token'] || req.query.token || '';
+  if (verifyLanToken(clientToken, targetCode)) return next();
+  return res.status(401).json({ success: false, locked: true, message: '需要输入内网访问口令' });
+}
+
+app.use(express.static(path.join(__dirname, 'public')));
+app.use('/api', lanAuthGuard);
+
+// ==================== 5. 智能日期解析与统一年份序号重排引擎 (YYYY-001) ====================
+function normalizeSmartDateStr(raw) {
+  const str = String(raw || '').trim();
+  if (!str) return '';
+  if (/^\d{5}$/.test(str)) {
+    const serial = parseInt(str, 10);
+    if (serial >= 20000 && serial <= 80000) {
+      const utcMs = (serial - 25569) * 86400 * 1000;
+      const d = new Date(utcMs);
+      if (!isNaN(d.getTime())) {
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
+      }
     }
   }
-  next();
-});
-
-app.use('/uploads', (req, res) => {
-  const decodedRel = decodeURIComponent(req.path || '').replace(/^\/+/, '');
-  if (!decodedRel || decodedRel.startsWith('.tmp')) {
-    return res.status(403).send('Forbidden');
+  if (/^\d{8}$/.test(str)) {
+    return `${str.slice(0, 4)}-${str.slice(4, 6)}-${str.slice(6, 8)}`;
   }
-  const absFile = path.join(UPLOAD_DIR, decodedRel);
-  if (!isSafePathWithin(absFile, UPLOAD_DIR) || !fs.existsSync(absFile) || !fs.statSync(absFile).isFile()) {
-    return res.status(404).send('文件不存在或已被移除');
+  const fullMatch = str.match(/^(\d{4})[-./年](\d{1,2})[-./月](\d{1,2})日?$/);
+  if (fullMatch) {
+    return `${fullMatch[1]}-${String(parseInt(fullMatch[2], 10)).padStart(2, '0')}-${String(parseInt(fullMatch[3], 10)).padStart(2, '0')}`;
   }
-  if (req.query.download === '1') {
-    const dlName = req.query.filename ? path.basename(String(req.query.filename)) : path.basename(absFile);
-    return res.download(absFile, dlName);
+  const shortMatch = str.match(/^(\d{1,2})[-./月](\d{1,2})日?$/);
+  if (shortMatch) {
+    const curYear = new Date().getFullYear();
+    return `${curYear}-${String(parseInt(shortMatch[1], 10)).padStart(2, '0')}-${String(parseInt(shortMatch[2], 10)).padStart(2, '0')}`;
   }
-  res.sendFile(absFile);
-});
+  return str;
+}
 
-// ==================== 9. 编号规则、默认主体、下拉预设与夹心取号 API ====================
-app.get(['/api/settings/our-entity', '/api/settings/default-entity'], (req, res) => {
-  res.json({ success: true, our_entity: getDefaultOurEntity() });
-});
+function computeAutoContractStatus(inputStatus, expiryDateStr) {
+  const { activeLabel, expiredLabel } = getDynamicContractStatusPairServer();
+  const status = String(inputStatus || activeLabel).trim();
+  const exp = normalizeSmartDateStr(expiryDateStr);
+  if (!exp || !/^\d{4}-\d{2}-\d{2}$/.test(exp)) return status;
 
-app.post(['/api/settings/our-entity', '/api/settings/default-entity'], (req, res) => {
-  const entity = String(req.body.our_entity || '').trim() || '毕节自营公司';
-  STMTS.setSetting.run('default_our_entity', entity);
-  res.json({ success: true, our_entity: entity, message: '默认我方签约主体已更新' });
-});
+  const today = getLocalTodayStr();
+  if ((status === activeLabel || status === '生效中') && exp < today) return expiredLabel;
+  if ((status === expiredLabel || status === '已到期') && exp >= today) return activeLabel;
+  return status;
+}
 
-app.get('/api/settings/presets', (req, res) => {
-  res.json({
-    success: true,
-    presets: getDropdownPresets(),
-    defaults: DEFAULT_DROPDOWN_PRESETS
+function autoRefreshExpiredContractsInDB() {
+  const today = getLocalTodayStr();
+  const { activeLabel, expiredLabel } = getDynamicContractStatusPairServer();
+  db.prepare(`
+    UPDATE contracts
+    SET status = ?, updated_at = datetime('now', 'localtime')
+    WHERE (status = ? OR status = '生效中') AND expiry_date != '' AND expiry_date < ?
+  `).run(expiredLabel, activeLabel, today);
+}
+
+/**
+ * 合同台账序号重排：统一重排为 YYYY-001 年份序号格式
+ */
+function recalculateAllSeqNos() {
+  const all = db.prepare(`SELECT id, sign_date, contract_no FROM contracts ORDER BY sign_date ASC, contract_no ASC, id ASC`).all();
+  const yearCounter = {};
+  const updateStmt = db.prepare(`UPDATE contracts SET seq_no = ? WHERE id = ?`);
+  const tx = db.transaction(() => {
+    for (const row of all) {
+      const year = (row.sign_date && row.sign_date.slice(0, 4)) || String(new Date().getFullYear());
+      yearCounter[year] = (yearCounter[year] || 0) + 1;
+      const formattedSeq = `${year}-${String(yearCounter[year]).padStart(3, '0')}`;
+      updateStmt.run(formattedSeq, row.id);
+    }
   });
-});
+  tx();
+}
 
-app.post('/api/settings/presets', (req, res) => {
+/**
+ * 采购立项台账序号重排：统一重排为 YYYY-001 年份序号格式
+ */
+function recalculateAllProcurementSeqNos() {
+  const all = db.prepare(`SELECT id, approval_date, procurement_no FROM procurement_projects ORDER BY approval_date ASC, procurement_no ASC, id ASC`).all();
+  const yearCounter = {};
+  const updateStmt = db.prepare(`UPDATE procurement_projects SET seq_no = ? WHERE id = ?`);
+  const tx = db.transaction(() => {
+    for (const row of all) {
+      const year = (row.approval_date && row.approval_date.slice(0, 4)) || String(new Date().getFullYear());
+      yearCounter[year] = (yearCounter[year] || 0) + 1;
+      const formattedSeq = `${year}-${String(yearCounter[year]).padStart(3, '0')}`;
+      updateStmt.run(formattedSeq, row.id);
+    }
+  });
+  tx();
+}
+
+recalculateAllSeqNos();
+recalculateAllProcurementSeqNos();
+autoRefreshExpiredContractsInDB();
+
+// ==================== 6. 合同与采购编号自动生成引擎（支持夹心自定义段） ====================
+function getRuleFromSetting(key, fallback) {
   try {
-    if (req.body && req.body.reset_defaults) {
-      STMTS.setSetting.run('dropdown_presets', JSON.stringify(DEFAULT_DROPDOWN_PRESETS));
-      return res.json({
-        success: true,
-        presets: getDropdownPresets(),
-        message: '已恢复默认下拉选项预设'
-      });
-    }
-    const current = getDropdownPresets();
-    const incoming = req.body.presets || req.body || {};
-    const updated = {};
-    for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
-      updated[key] = incoming[key] !== undefined
-        ? normalizePresetArray(incoming[key], DEFAULT_DROPDOWN_PRESETS[key])
-        : current[key];
-    }
-    updated.contract_statuses = ensureContractStatusPresetsIntegrity(updated.contract_statuses);
-    STMTS.setSetting.run('dropdown_presets', JSON.stringify(updated));
-    res.json({
-      success: true,
-      presets: updated,
-      message: '下拉选项与预设词库已保存'
-    });
-  } catch (err) {
-    res.status(400).json({ success: false, message: err.message || '保存预设失败' });
+    const row = db.prepare(`SELECT value FROM app_settings WHERE key = ?`).get(key);
+    if (row && row.value) return { ...fallback, ...JSON.parse(row.value) };
+  } catch (e) {}
+  return { ...fallback };
+}
+
+function formatRuleDateSegment(dateFmt, dateStr) {
+  const clean = normalizeSmartDateStr(dateStr);
+  const now = new Date();
+  let yyyy = String(now.getFullYear());
+  let mm = String(now.getMonth() + 1).padStart(2, '0');
+  let dd = String(now.getDate()).padStart(2, '0');
+
+  if (clean && /^\d{4}-\d{2}-\d{2}$/.test(clean)) {
+    yyyy = clean.slice(0, 4);
+    mm = clean.slice(5, 7);
+    dd = clean.slice(8, 10);
   }
-});
+  switch (dateFmt) {
+    case 'YYYY': return yyyy;
+    case 'YYYY-': return `${yyyy}-`;
+    case 'YYYYMM': return `${yyyy}${mm}`;
+    case 'YYYYMM-': return `${yyyy}${mm}-`;
+    case 'YYYYMMDD': return `${yyyy}${mm}${dd}`;
+    case 'YYYYMMDD-': return `${yyyy}${mm}${dd}-`;
+    default: return '';
+  }
+}
 
-app.get(['/api/settings/no-rule', '/api/settings/contract-no-rule'], (req, res) => {
-  const rule = getContractNoRule();
-  const preview = buildNextContractNo(rule, req.query.sign_date, req.query.mid_custom);
-  res.json({
-    success: true,
+function generateNextNoByTable({ tableName, colName, dateColName, ruleKey, fallbackRule, dateVal, midCustom }) {
+  const rule = getRuleFromSetting(ruleKey, fallbackRule);
+  const prefix = String(rule.prefix || '');
+  const midPart = midCustom !== undefined ? String(midCustom) : String(rule.default_mid || '');
+  const suffix = String(rule.suffix || '');
+  const digits = Number(rule.seq_digits ?? 3);
+  const datePart = formatRuleDateSegment(rule.date_part, dateVal);
+  const fullPrefix = `${prefix}${midPart}${datePart}`;
+
+  const cleanDate = normalizeSmartDateStr(dateVal);
+  const targetYear = (cleanDate && cleanDate.slice(0, 4)) || String(new Date().getFullYear());
+
+  let rows = [];
+  if (rule.reset_yearly !== false) {
+    rows = db.prepare(`SELECT ${colName} AS no FROM ${tableName} WHERE substr(${dateColName}, 1, 4) = ?`).all(targetYear);
+  } else {
+    rows = db.prepare(`SELECT ${colName} AS no FROM ${tableName}`).all();
+  }
+
+  let maxSeq = 0;
+  for (const r of rows) {
+    const no = String(r.no || '');
+    if (fullPrefix && !no.startsWith(fullPrefix)) continue;
+    if (suffix && !no.endsWith(suffix)) continue;
+    const middle = no.slice(fullPrefix.length, suffix ? no.length - suffix.length : undefined);
+    if (/^\d+$/.test(middle)) {
+      const n = parseInt(middle, 10);
+      if (n > maxSeq) maxSeq = n;
+    } else {
+      const tailMatch = middle.match(/(\d+)$/);
+      if (tailMatch) {
+        const n = parseInt(tailMatch[1], 10);
+        if (n > maxSeq) maxSeq = n;
+      }
+    }
+  }
+
+  let nextNum = maxSeq + 1;
+  let seqPart = digits > 0 ? String(nextNum).padStart(digits, '0') : '';
+  let candidate = `${fullPrefix}${seqPart}${suffix}`;
+
+  const checkExistStmt = db.prepare(`SELECT 1 FROM ${tableName} WHERE ${colName} = ?`);
+  while (digits > 0 && checkExistStmt.get(candidate)) {
+    nextNum++;
+    seqPart = String(nextNum).padStart(digits, '0');
+    candidate = `${fullPrefix}${seqPart}${suffix}`;
+  }
+
+  return {
     rule,
-    next_no: preview.next_no,
-    next_contract_no: preview.next_no,
-    preview_parts: preview
-  });
-});
-
-app.post(['/api/settings/no-rule', '/api/settings/contract-no-rule'], (req, res) => {
-  const current = getContractNoRule();
-  const newRule = {
-    prefix: String(req.body.prefix ?? current.prefix).trim(),
-    default_mid: String(req.body.default_mid ?? current.default_mid).trim(),
-    date_part: String(req.body.date_part || req.body.date_format || current.date_part),
-    seq_digits: Number.isInteger(Number(req.body.seq_digits)) ? Number(req.body.seq_digits) : 3,
-    suffix: String(req.body.suffix ?? current.suffix).trim(),
-    reset_yearly: req.body.reset_yearly !== undefined ? Boolean(req.body.reset_yearly) : true
+    prefix,
+    mid_part: midPart,
+    date_part: datePart,
+    seq_part: seqPart,
+    suffix,
+    next_no: candidate
   };
-  STMTS.setSetting.run('contract_no_rule', JSON.stringify(newRule));
-  recalculateContractSeqNos();
-  const preview = buildNextContractNo(newRule);
-  res.json({
-    success: true,
-    rule: newRule,
-    next_no: preview.next_no,
-    next_contract_no: preview.next_no,
-    preview_parts: preview,
-    message: '合同编号规则已保存'
-  });
-});
+}
 
-app.get('/api/contracts/next-no', (req, res) => {
-  const rule = getContractNoRule();
-  const signDate = req.query.sign_date || getLocalTodayStr();
-  const midCustom = req.query.mid_custom !== undefined ? req.query.mid_custom : rule.default_mid;
-  const parts = buildNextContractNo(rule, signDate, midCustom);
-  res.json({
-    success: true,
-    rule,
-    ...parts
-  });
-});
+function resolveAvailableNoOnInsert(inputNo, options) {
+  const cleanNo = String(inputNo || '').trim();
+  const checkStmt = db.prepare(`SELECT 1 FROM ${options.tableName} WHERE ${options.colName} = ?`);
+  if (cleanNo && !checkStmt.get(cleanNo)) return cleanNo;
+  return generateNextNoByTable(options).next_no;
+}
 
-app.get(['/api/settings/proc-no-rule', '/api/settings/procurement-no-rule'], (req, res) => {
-  const rule = getProcNoRule();
-  const preview = buildNextProcNo(rule, req.query.approval_date, req.query.mid_custom);
-  res.json({
-    success: true,
-    rule,
-    next_no: preview.next_no,
-    next_procurement_no: preview.next_no,
-    preview_parts: preview
-  });
-});
-
-app.post(['/api/settings/proc-no-rule', '/api/settings/procurement-no-rule'], (req, res) => {
-  const current = getProcNoRule();
-  const newRule = {
-    prefix: String(req.body.prefix ?? current.prefix).trim(),
-    default_mid: String(req.body.default_mid ?? current.default_mid).trim(),
-    date_part: String(req.body.date_part || req.body.date_format || current.date_part),
-    seq_digits: Number.isInteger(Number(req.body.seq_digits)) ? Number(req.body.seq_digits) : 3,
-    suffix: String(req.body.suffix ?? current.suffix).trim(),
-    reset_yearly: req.body.reset_yearly !== undefined ? Boolean(req.body.reset_yearly) : true
-  };
-  STMTS.setSetting.run('procurement_no_rule', JSON.stringify(newRule));
-  recalculateProcSeqNos();
-  const preview = buildNextProcNo(newRule);
-  res.json({
-    success: true,
-    rule: newRule,
-    next_no: preview.next_no,
-    next_procurement_no: preview.next_no,
-    preview_parts: preview,
-    message: '采购立项编号规则已保存'
-  });
-});
-
-app.get('/api/procurements/next-no', (req, res) => {
-  const rule = getProcNoRule();
-  const approvalDate = req.query.approval_date || getLocalTodayStr();
-  const midCustom = req.query.mid_custom !== undefined ? req.query.mid_custom : rule.default_mid;
-  const parts = buildNextProcNo(rule, approvalDate, midCustom);
-  res.json({
-    success: true,
-    rule,
-    ...parts
-  });
-});
-
-// ==================== 10. 合同与采购详情组装器 ====================
-function parseCounterparties(jsonStr, fallbackRow = {}) {
+// ==================== 7. 对方单位明细解析与文件上传规则 ====================
+function parseCounterpartiesFromBody(body) {
   let list = [];
-  try {
-    list = JSON.parse(jsonStr || '[]');
-  } catch (e) {
-    list = [];
+  if (body.counterparties_json) {
+    try {
+      const parsed = JSON.parse(body.counterparties_json);
+      if (Array.isArray(parsed)) list = parsed;
+    } catch (e) {}
   }
-  if (!Array.isArray(list) || list.length === 0) {
+  if (list.length === 0) {
     list = [{
-      company_name: fallbackRow.party_b || '',
-      credit_code: '',
-      contact_person: '',
-      contact_phone: '',
-      bank_account_name: '',
-      bank_account_no: '',
-      bank_name: '',
-      summary: fallbackRow.remark || '',
-      amount: Number(fallbackRow.total_amount || 0),
-      amount_excl_tax: Number(fallbackRow.total_amount || 0),
-      tax_rate: '',
-      invoice_type: '',
-      currency: 'CNY',
-      perf_bond_amount: 0,
-      perf_bond_status: '无',
-      perf_bond_return_date: '',
-      warranty_bond_amount: 0,
-      warranty_bond_status: '无',
-      warranty_bond_expiry_date: '',
-      remark: ''
+      company_name: body.counterparty || '',
+      credit_code: body.credit_code || '',
+      summary: body.summary || '',
+      contact_person: body.contact_person || '',
+      contact_phone: body.contact_phone || '',
+      bank_account_name: body.bank_account_name || '',
+      bank_account_no: body.bank_account_no || '',
+      bank_name: body.bank_name || '',
+      bank_code: body.bank_code || '',
+      amount: Number(body.amount || 0),
+      tax_rate: body.tax_rate || '',
+      amount_excl_tax: Number(body.amount_excl_tax || 0),
+      invoice_type: body.invoice_type || '增值税专用发票',
+      currency: body.currency || 'CNY',
+      perf_bond_amount: Number(body.perf_bond_amount || 0),
+      perf_bond_status: body.perf_bond_status || '无',
+      perf_bond_return_date: normalizeSmartDateStr(body.perf_bond_return_date || ''),
+      warranty_bond_amount: Number(body.warranty_bond_amount || 0),
+      warranty_bond_status: body.warranty_bond_status || '无',
+      warranty_bond_expiry_date: normalizeSmartDateStr(body.warranty_bond_expiry_date || ''),
+      remark: body.remark || ''
     }];
   }
+
   return list.map(item => {
-    const amount = Number(item.amount ?? 0);
-    const taxRateNum = parseFloat(String(item.tax_rate ?? '').replace('%', ''));
-    let excl = Number(item.amount_excl_tax ?? 0);
-    if (!excl && amount > 0 && !isNaN(taxRateNum) && taxRateNum >= 0) {
-      excl = Number((amount / (1 + taxRateNum / 100)).toFixed(2));
-    } else if (!excl && amount > 0) {
-      excl = amount;
+    const amt = Number(item.amount || 0);
+    const normTax = normalizeSmartTaxRateServer(item.tax_rate);
+    let excl = Number(item.amount_excl_tax || 0);
+    if (!excl && amt > 0 && !normTax.startsWith('*')) {
+      const rNum = parseFloat(normTax.replace('%', ''));
+      if (!isNaN(rNum) && rNum >= 0) {
+        excl = Number((amt / (1 + rNum / 100)).toFixed(2));
+      }
     }
+    const perfAmt = Number(item.perf_bond_amount || 0);
+    const warrantyAmt = Number(item.warranty_bond_amount || 0);
     return {
       company_name: String(item.company_name || '').trim(),
       credit_code: String(item.credit_code || '').trim(),
+      summary: String(item.summary || '').trim(),
       contact_person: String(item.contact_person || '').trim(),
       contact_phone: String(item.contact_phone || '').trim(),
       bank_account_name: String(item.bank_account_name || '').trim(),
       bank_account_no: String(item.bank_account_no || '').trim(),
       bank_name: String(item.bank_name || '').trim(),
-      summary: String(item.summary || '').trim(),
-      amount,
+      bank_code: String(item.bank_code || '').trim(),
+      amount: amt,
+      tax_rate: normTax,
       amount_excl_tax: excl,
-      tax_rate: String(item.tax_rate ?? '').trim(),
       invoice_type: String(item.invoice_type || '增值税专用发票').trim(),
       currency: String(item.currency || 'CNY').trim(),
-      perf_bond_amount: Number(item.perf_bond_amount || 0),
-      perf_bond_status: String(item.perf_bond_status || '无').trim(),
-      perf_bond_return_date: normalizeSmartDate(item.perf_bond_return_date || ''),
-      warranty_bond_amount: Number(item.warranty_bond_amount || 0),
-      warranty_bond_status: String(item.warranty_bond_status || '无').trim(),
-      warranty_bond_expiry_date: normalizeSmartDate(item.warranty_bond_expiry_date || ''),
+      perf_bond_amount: perfAmt,
+      perf_bond_status: perfAmt > 0 ? (item.perf_bond_status === '已退' ? '已退' : '未退') : '无',
+      perf_bond_return_date: normalizeSmartDateStr(item.perf_bond_return_date || ''),
+      warranty_bond_amount: warrantyAmt,
+      warranty_bond_status: warrantyAmt > 0 ? (item.warranty_bond_status === '已退' ? '已退' : '未退') : '无',
+      warranty_bond_expiry_date: normalizeSmartDateStr(item.warranty_bond_expiry_date || ''),
       remark: String(item.remark || '').trim()
     };
   });
 }
 
-function enrichContractRecord(row) {
-  if (!row) return null;
-  const counterparties = parseCounterparties(row.counterparties_json, row);
-  const relatedFiles = STMTS.getRelatedFilesByCid.all(row.id);
-
-  let linkedProcurement = null;
-  if (row.procurement_id) {
-    const pRow = STMTS.getProcurementById.get(row.procurement_id);
-    if (pRow) {
-      const pFiles = STMTS.getProcFilesByPid.all(pRow.id);
-      linkedProcurement = {
-        ...pRow,
-        files: pFiles,
-        folder_rel_path: `uploads/procurement/${buildFolderKey(pRow.procurement_no, pRow.project_name)}`
-      };
+const uploadStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    if (file.fieldname === 'related_files') {
+      const folderToken = sanitizeFileToken(req.body.contract_no || `CONTRACT_${req.params.id || 'TEMP'}`);
+      const targetDir = path.join(RELATED_UPLOAD_DIR, folderToken);
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+      cb(null, targetDir);
+    } else if (file.fieldname === 'procurement_files') {
+      const folderToken = sanitizeFileToken(req.body.procurement_no || `PROC_${req.params.id || 'TEMP'}`);
+      const targetDir = path.join(PROC_UPLOAD_DIR, folderToken);
+      if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
+      cb(null, targetDir);
+    } else {
+      cb(null, UPLOAD_DIR);
     }
+  },
+  filename: (req, file, cb) => {
+    const orig = decodeFilename(file.originalname);
+    const ext = path.extname(orig) || '.pdf';
+    const baseOrig = sanitizeFileToken(path.basename(orig, ext));
+
+    if (file.fieldname === 'attachment') {
+      const token = sanitizeFileToken(req.body.contract_no || `CONTRACT_${Date.now()}`);
+      let finalName = `${token}${ext}`;
+      if (fs.existsSync(path.join(UPLOAD_DIR, finalName))) {
+        finalName = `${token}_${Date.now()}${ext}`;
+      }
+      cb(null, finalName);
+    } else {
+      const prefixToken = sanitizeFileToken(req.body.contract_no || req.body.procurement_no || 'FILE');
+      cb(null, `${prefixToken}_${Date.now()}_${Math.random().toString(36).slice(2, 5)}_${baseOrig}${ext}`);
+    }
+  }
+});
+
+const upload = multer({
+  storage: uploadStorage,
+  limits: { fileSize: 50 * 1024 * 1024 }
+});
+
+function renameMainScanToMatchContractNo(currentRelPath, contractNo) {
+  if (!currentRelPath) return '';
+  const absOld = resolveSafeUploadPath(currentRelPath);
+  if (!absOld || !fs.existsSync(absOld)) return currentRelPath;
+
+  const ext = path.extname(absOld) || '.pdf';
+  const safeToken = sanitizeFileToken(contractNo);
+  const idealRelName = `${safeToken}${ext}`;
+  if (currentRelPath === idealRelName) return currentRelPath;
+
+  let absNew = path.join(UPLOAD_DIR, idealRelName);
+  let finalRelName = idealRelName;
+  if (fs.existsSync(absNew) && path.resolve(absNew) !== path.resolve(absOld)) {
+    finalRelName = `${safeToken}_${Date.now()}${ext}`;
+    absNew = path.join(UPLOAD_DIR, finalRelName);
+  }
+  try {
+    fs.renameSync(absOld, absNew);
+    return finalRelName;
+  } catch (e) {
+    return currentRelPath;
+  }
+}
+
+app.get('/uploads/*', lanAuthGuard, (req, res) => {
+  const relPath = req.params[0] || '';
+  const absTarget = resolveSafeUploadPath(relPath);
+  if (!absTarget || !fs.existsSync(absTarget) || !fs.statSync(absTarget).isFile()) {
+    return res.status(404).send('文件不存在或已被移除');
+  }
+  if (req.query.download === '1') {
+    const customName = req.query.filename ? path.basename(String(req.query.filename)) : path.basename(absTarget);
+    return res.download(absTarget, customName);
+  }
+  return res.sendFile(absTarget);
+});
+
+// ==================== 8. 系统设置与自定义预设 API ====================
+app.get('/api/settings/presets', (req, res) => {
+  res.json({ success: true, presets: getDropdownPresets(), defaults: DEFAULT_DROPDOWN_PRESETS });
+});
+
+app.post('/api/settings/presets', (req, res) => {
+  if (req.body && req.body.reset_defaults) {
+    db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('dropdown_presets', ?)`).run(JSON.stringify(DEFAULT_DROPDOWN_PRESETS));
+    return res.json({ success: true, presets: DEFAULT_DROPDOWN_PRESETS });
+  }
+  const current = getDropdownPresets();
+  const incoming = req.body.presets || {};
+  const nextPresets = {};
+  for (const key of Object.keys(DEFAULT_DROPDOWN_PRESETS)) {
+    if (Array.isArray(incoming[key])) {
+      const cleaned = incoming[key].map(s => String(s || '').trim()).filter(Boolean);
+      nextPresets[key] = cleaned.length > 0 ? Array.from(new Set(cleaned)) : current[key];
+    } else if (typeof incoming[key] === 'string') {
+      const cleaned = incoming[key].split(/[\r\n,，、;；]+/).map(s => s.trim()).filter(Boolean);
+      nextPresets[key] = cleaned.length > 0 ? Array.from(new Set(cleaned)) : current[key];
+    } else {
+      nextPresets[key] = current[key];
+    }
+  }
+  if (!nextPresets.contract_statuses.some(s => /生效|履行|执行|正常|进行/.test(s))) {
+    nextPresets.contract_statuses.push('生效中');
+  }
+  if (!nextPresets.contract_statuses.some(s => /到期|过期|期满|超期|逾期/.test(s))) {
+    nextPresets.contract_statuses.push('已到期');
+  }
+
+  db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('dropdown_presets', ?)`).run(JSON.stringify(nextPresets));
+  res.json({ success: true, presets: nextPresets });
+});
+
+app.get('/api/settings/our-entity', (req, res) => {
+  const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
+  res.json({ success: true, our_entity: row ? row.value : 'ABC公司' });
+});
+
+app.post('/api/settings/our-entity', (req, res) => {
+  const val = String(req.body.our_entity || '').trim();
+  if (!val) return res.status(400).json({ success: false, message: '名称不能为空' });
+  db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('default_our_entity', ?)`).run(val);
+  res.json({ success: true, our_entity: val });
+});
+
+app.get('/api/settings/no-rule', (req, res) => {
+  const preview = generateNextNoByTable({
+    tableName: 'contracts',
+    colName: 'contract_no',
+    dateColName: 'sign_date',
+    ruleKey: 'contract_no_rule',
+    fallbackRule: DEFAULT_CONTRACT_RULE
+  });
+  res.json({ success: true, ...preview });
+});
+
+app.post('/api/settings/no-rule', (req, res) => {
+  const b = req.body || {};
+  const nextRule = {
+    prefix: String(b.prefix ?? 'HT-ABC-').trim(),
+    default_mid: String(b.default_mid ?? '').trim(),
+    date_part: ['NONE', 'YYYY', 'YYYY-', 'YYYYMM', 'YYYYMM-', 'YYYYMMDD', 'YYYYMMDD-'].includes(b.date_part) ? b.date_part : 'YYYYMM',
+    seq_digits: Math.min(6, Math.max(0, parseInt(b.seq_digits ?? 3, 10))),
+    suffix: String(b.suffix ?? '').trim(),
+    reset_yearly: b.reset_yearly !== false && b.reset_yearly !== 'false'
+  };
+  db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('contract_no_rule', ?)`).run(JSON.stringify(nextRule));
+  const preview = generateNextNoByTable({
+    tableName: 'contracts',
+    colName: 'contract_no',
+    dateColName: 'sign_date',
+    ruleKey: 'contract_no_rule',
+    fallbackRule: DEFAULT_CONTRACT_RULE
+  });
+  res.json({ success: true, ...preview });
+});
+
+app.get('/api/contracts/next-no', (req, res) => {
+  const preview = generateNextNoByTable({
+    tableName: 'contracts',
+    colName: 'contract_no',
+    dateColName: 'sign_date',
+    ruleKey: 'contract_no_rule',
+    fallbackRule: DEFAULT_CONTRACT_RULE,
+    dateVal: req.query.sign_date,
+    midCustom: req.query.mid_custom
+  });
+  res.json({ success: true, ...preview });
+});
+
+app.get('/api/settings/proc-no-rule', (req, res) => {
+  const preview = generateNextNoByTable({
+    tableName: 'procurement_projects',
+    colName: 'procurement_no',
+    dateColName: 'approval_date',
+    ruleKey: 'procurement_no_rule',
+    fallbackRule: DEFAULT_PROC_RULE
+  });
+  res.json({ success: true, ...preview });
+});
+
+app.post('/api/settings/proc-no-rule', (req, res) => {
+  const b = req.body || {};
+  const nextRule = {
+    prefix: String(b.prefix ?? 'LX').trim(),
+    default_mid: String(b.default_mid ?? '').trim(),
+    date_part: ['NONE', 'YYYY', 'YYYY-', 'YYYYMM', 'YYYYMM-', 'YYYYMMDD', 'YYYYMMDD-'].includes(b.date_part) ? b.date_part : 'YYYYMMDD',
+    seq_digits: Math.min(6, Math.max(0, parseInt(b.seq_digits ?? 3, 10))),
+    suffix: String(b.suffix ?? '').trim(),
+    reset_yearly: b.reset_yearly !== false && b.reset_yearly !== 'false'
+  };
+  db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('procurement_no_rule', ?)`).run(JSON.stringify(nextRule));
+  const preview = generateNextNoByTable({
+    tableName: 'procurement_projects',
+    colName: 'procurement_no',
+    dateColName: 'approval_date',
+    ruleKey: 'procurement_no_rule',
+    fallbackRule: DEFAULT_PROC_RULE
+  });
+  res.json({ success: true, ...preview });
+});
+
+app.get('/api/procurements/next-no', (req, res) => {
+  const preview = generateNextNoByTable({
+    tableName: 'procurement_projects',
+    colName: 'procurement_no',
+    dateColName: 'approval_date',
+    ruleKey: 'procurement_no_rule',
+    fallbackRule: DEFAULT_PROC_RULE,
+    dateVal: req.query.approval_date,
+    midCustom: req.query.mid_custom
+  });
+  res.json({ success: true, ...preview });
+});
+
+// ==================== 9. 合同与采购双向绑定水合引擎 ====================
+function syncContractProcurementLink(contractId, contractNo, procurementId) {
+  db.prepare(`UPDATE procurement_projects SET contract_id = NULL WHERE contract_id = ?`).run(contractId);
+
+  let targetProcId = procurementId ? Number(procurementId) : null;
+  if (!targetProcId && contractNo) {
+    const matchedProc = db.prepare(`SELECT id FROM procurement_projects WHERE contract_no_manual = ?`).get(contractNo);
+    if (matchedProc) targetProcId = matchedProc.id;
+  }
+
+  if (targetProcId) {
+    db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(targetProcId, contractId);
+    db.prepare(`
+      UPDATE procurement_projects
+      SET contract_id = ?, has_contract = '是', contract_no_manual = ?
+      WHERE id = ?
+    `).run(contractId, contractNo, targetProcId);
+  } else {
+    db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE id = ?`).run(contractId);
+  }
+}
+
+function hydrateContractRow(row) {
+  if (!row) return null;
+  let parties = [];
+  try {
+    parties = JSON.parse(row.counterparties_json || '[]');
+  } catch (e) {}
+  if (!Array.isArray(parties) || parties.length === 0) {
+    parties = [{
+      company_name: row.counterparty || '',
+      credit_code: row.credit_code || '',
+      summary: row.summary || '',
+      contact_person: row.contact_person || '',
+      contact_phone: row.contact_phone || '',
+      bank_account_name: row.bank_account_name || '',
+      bank_account_no: row.bank_account_no || '',
+      bank_name: row.bank_name || '',
+      bank_code: '',
+      amount: Number(row.amount || 0),
+      tax_rate: normalizeSmartTaxRateServer(row.tax_rate || ''),
+      amount_excl_tax: Number(row.amount_excl_tax || 0),
+      invoice_type: row.invoice_type || '增值税专用发票',
+      currency: row.currency || 'CNY',
+      perf_bond_amount: Number(row.perf_bond_amount || 0),
+      perf_bond_status: row.perf_bond_status || '无',
+      perf_bond_return_date: row.perf_bond_return_date || '',
+      warranty_bond_amount: Number(row.warranty_bond_amount || 0),
+      warranty_bond_status: row.warranty_bond_status || '无',
+      warranty_bond_expiry_date: row.warranty_bond_expiry_date || '',
+      remark: ''
+    }];
+  } else {
+    parties = parties.map(cp => ({
+      ...cp,
+      bank_code: cp.bank_code || '',
+      tax_rate: normalizeSmartTaxRateServer(cp.tax_rate || '')
+    }));
+  }
+
+  const related_files = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ? ORDER BY id ASC`).all(row.id);
+
+  let linked_procurement = null;
+  const procRow = row.procurement_id
+    ? db.prepare(`SELECT * FROM procurement_projects WHERE id = ?`).get(row.procurement_id)
+    : db.prepare(`SELECT * FROM procurement_projects WHERE contract_id = ? OR (contract_no_manual != '' AND contract_no_manual = ?)`).get(row.id, row.contract_no);
+
+  if (procRow) {
+    const procFiles = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(procRow.id);
+    linked_procurement = { ...procRow, files: procFiles };
   }
 
   return {
     ...row,
-    counterparties,
-    related_files: relatedFiles,
-    related_folder_rel_path: `uploads/related/${buildFolderKey(row.contract_no, row.contract_name)}`,
-    linked_procurement: linkedProcurement
+    counterparties: parties,
+    related_files,
+    linked_procurement
   };
 }
 
-function enrichProcurementRecord(row) {
+function hydrateProcurementRow(row) {
   if (!row) return null;
-  const files = STMTS.getProcFilesByPid.all(row.id);
-  let linkedContract = null;
-  if (row.contract_id) {
-    const cRow = STMTS.getContractById.get(row.contract_id);
-    if (cRow) {
-      linkedContract = {
-        ...cRow,
-        related_files: STMTS.getRelatedFilesByCid.all(cRow.id)
-      };
-    }
+  const files = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(row.id);
+  let linked_contract = null;
+  const cRow = row.contract_id
+    ? db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name FROM contracts WHERE id = ?`).get(row.contract_id)
+    : (row.contract_no_manual
+        ? db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name FROM contracts WHERE contract_no = ?`).get(row.contract_no_manual)
+        : null);
+
+  if (cRow) {
+    const cRelFiles = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ? ORDER BY id ASC`).all(cRow.id);
+    linked_contract = { ...cRow, related_files: cRelFiles };
   }
   return {
     ...row,
     files,
-    folder_rel_path: `uploads/procurement/${buildFolderKey(row.procurement_no, row.project_name)}`,
-    linked_contract: linkedContract
+    linked_contract
   };
 }
 
-// ==================== 11. 合同台账 CRUD 路由 ====================
-function queryFilteredContracts(query = {}) {
-  autoRefreshExpiredContractStatus();
+// ==================== 10. 合同管理 CRUD API ====================
+function queryFilteredContracts(query) {
+  autoRefreshExpiredContractsInDB();
 
-  const rows = db.prepare(`SELECT * FROM contracts`).all();
-  let list = rows.map(r => enrichContractRecord(r));
+  const {
+    no, counterparty, year, type, status,
+    date_field, date_from, date_to,
+    sort_by = 'seq_no', sort_order = 'asc'
+  } = query;
 
-  const kwNo = String(query.keyword || query.no || '').trim().toLowerCase();
-  const kwCp = String(query.counterparty || '').trim().toLowerCase();
-  const year = String(query.year || '').trim();
-  const cType = String(query.contract_type || query.type || '').trim();
-  const status = String(query.status || '').trim();
-  const dateField = String(query.date_field || 'sign_date').trim();
-  const dateFrom = normalizeSmartDate(query.date_from || query.start_date || '');
-  const dateTo = normalizeSmartDate(query.date_to || query.end_date || '');
+  const conditions = [];
+  const params = {};
 
-  list = list.filter(c => {
-    if (kwNo) {
-      const hitBase = [c.seq_no, c.contract_no, c.contract_name, c.remark, c.linked_procurement?.procurement_no]
-        .some(v => String(v || '').toLowerCase().includes(kwNo));
-      const hitSummary = c.counterparties.some(cp =>
-        String(cp.summary || '').toLowerCase().includes(kwNo) ||
-        String(cp.remark || '').toLowerCase().includes(kwNo)
-      );
-      if (!hitBase && !hitSummary) return false;
-    }
-    if (kwCp) {
-      const hitOur = String(c.our_entity || '').toLowerCase().includes(kwCp);
-      const hitParty = c.counterparties.some(cp =>
-        String(cp.company_name || '').toLowerCase().includes(kwCp) ||
-        String(cp.credit_code || '').toLowerCase().includes(kwCp)
-      );
-      if (!hitOur && !hitParty) return false;
-    }
-    if (year && !String(c.sign_date || '').startsWith(year)) return false;
-    if (cType && c.contract_type !== cType) return false;
-    if (status && c.status !== status) return false;
+  if (no && no.trim()) {
+    conditions.push(`(contract_no LIKE @no OR contract_name LIKE @no OR seq_no LIKE @no OR summary LIKE @no OR counterparties_json LIKE @no)`);
+    params.no = `%${no.trim()}%`;
+  }
+  if (counterparty && counterparty.trim()) {
+    conditions.push(`(counterparty LIKE @cp OR counterparties_json LIKE @cp OR our_entity LIKE @cp)`);
+    params.cp = `%${counterparty.trim()}%`;
+  }
+  if (year && year.trim()) {
+    conditions.push(`substr(sign_date, 1, 4) = @year`);
+    params.year = year.trim();
+  }
+  if (type && type.trim()) {
+    conditions.push(`contract_type = @type`);
+    params.type = type.trim();
+  }
+  if (status && status.trim()) {
+    conditions.push(`status = @status`);
+    params.status = status.trim();
+  }
 
-    if (dateFrom || dateTo) {
-      let targetDates = [];
-      if (['sign_date', 'start_date', 'expiry_date'].includes(dateField)) {
-        targetDates = [c[dateField] || ''];
-      } else {
-        targetDates = c.counterparties.map(cp => cp[dateField] || '').filter(Boolean);
-      }
-      if (targetDates.length === 0) return false;
-      const matchDate = targetDates.some(d => {
-        if (!d) return false;
-        if (dateFrom && d < dateFrom) return false;
-        if (dateTo && d > dateTo) return false;
-        return true;
-      });
-      if (!matchDate) return false;
-    }
-    return true;
-  });
+  const allowedDateFields = ['sign_date', 'start_date', 'expiry_date'];
+  const targetDateCol = allowedDateFields.includes(date_field) ? date_field : 'sign_date';
+  const normFrom = normalizeSmartDateStr(date_from);
+  const normTo = normalizeSmartDateStr(date_to);
+  if (normFrom) {
+    conditions.push(`${targetDateCol} >= @date_from`);
+    params.date_from = normFrom;
+  }
+  if (normTo) {
+    conditions.push(`${targetDateCol} <= @date_to`);
+    params.date_to = normTo;
+  }
 
-  const sortBy = String(query.sort_by || 'seq_no');
-  const sortOrder = String(query.sort_order || 'ASC').toUpperCase() === 'DESC' ? -1 : 1;
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const dir = String(sort_order).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
 
-  list.sort((a, b) => {
-    let va = a[sortBy] ?? a.sign_date ?? '';
-    let vb = b[sortBy] ?? b.sign_date ?? '';
-    if (sortBy === 'perf_bond_return_date' || sortBy === 'warranty_bond_expiry_date') {
-      va = a.counterparties.map(cp => cp[sortBy] || '9999-99-99').sort()[0] || '9999-99-99';
-      vb = b.counterparties.map(cp => cp[sortBy] || '9999-99-99').sort()[0] || '9999-99-99';
-    }
-    if (va < vb) return -1 * sortOrder;
-    if (va > vb) return 1 * sortOrder;
-    return (a.id - b.id) * sortOrder;
-  });
+  let orderClause = `ORDER BY substr(sign_date, 1, 4) ${dir}, CAST(substr(seq_no, 6) AS INTEGER) ${dir}, id ${dir}`;
+  if (sort_by === 'contract_no') orderClause = `ORDER BY contract_no ${dir}, id ${dir}`;
+  else if (sort_by === 'sign_date') orderClause = `ORDER BY sign_date ${dir}, id ${dir}`;
+  else if (sort_by === 'expiry_date') orderClause = `ORDER BY expiry_date ${dir}, id ${dir}`;
 
-  return list;
+  const rawRows = db.prepare(`SELECT * FROM contracts ${whereClause} ${orderClause}`).all(params);
+  return rawRows.map(hydrateContractRow);
 }
 
 app.get('/api/contracts', (req, res) => {
-  const list = queryFilteredContracts(req.query);
-  res.json({ success: true, data: list });
-});
-
-app.get('/api/contracts/:id', (req, res) => {
-  autoRefreshExpiredContractStatus();
-  const row = STMTS.getContractById.get(Number(req.params.id));
-  if (!row) return res.status(404).json({ success: false, message: '合同不存在' });
-  res.json({ success: true, data: enrichContractRecord(row) });
-});
-
-const contractUploadMiddleware = upload.fields([
-  { name: 'attachment', maxCount: 1 },
-  { name: 'scan_file', maxCount: 1 },
-  { name: 'related_files', maxCount: 25 }
-]);
-
-app.post('/api/contracts', contractUploadMiddleware, (req, res) => {
-  let savedMainFile = '';
-  let savedRelatedFiles = [];
-
   try {
-    let finalNo = String(req.body.contract_no || '').trim();
-    const contractName = String(req.body.contract_name || '').trim();
-    const contractType = String(req.body.contract_type || '采购').trim();
-    const rawStatus = String(req.body.status || '生效中').trim();
-    const ourEntity = String(req.body.our_entity || req.body.party_a || getDefaultOurEntity()).trim();
-    const signDate = normalizeSmartDate(req.body.sign_date, true);
-    const startDate = normalizeSmartDate(req.body.start_date || signDate);
-    const expiryDate = normalizeSmartDate(req.body.expiry_date || req.body.end_date || '');
-    const status = computeSmartContractStatus(rawStatus, expiryDate);
-    const explicitProcId = req.body.procurement_id ? Number(req.body.procurement_id) : null;
-    const remark = String(req.body.remark || '').trim();
-
-    if (!finalNo || !contractName) {
-      cleanupReqTempFiles(req);
-      return res.status(400).json({ success: false, message: '合同编号与合同名称为必填项' });
-    }
-
-    const counterparties = parseCounterparties(req.body.counterparties_json, {
-      party_b: req.body.party_b,
-      total_amount: req.body.amount,
-      remark
-    });
-    const totalAmount = counterparties.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-
-    const mainFileObj = (req.files?.attachment && req.files.attachment[0]) || (req.files?.scan_file && req.files.scan_file[0]) || null;
-    const relatedFileObjs = req.files?.related_files || [];
-
-    let autoAdjustedMsg = '';
-
-    const createTx = db.transaction(() => {
-      if (STMTS.checkDupContractNoCreate.get(finalNo)) {
-        const resolved = resolveConflictNo(finalNo, 'contract');
-        if (resolved && !STMTS.checkDupContractNoCreate.get(resolved)) {
-          finalNo = resolved;
-          autoAdjustedMsg = `（原编号已被占用，已自动顺延为 ${finalNo}）`;
-        } else {
-          throw new Error(`合同编号 ${finalNo} 已存在`);
-        }
-      }
-
-      let attMeta = { attachment_path: '', attachment_original_name: '', attachment_size: 0 };
-      if (mainFileObj) {
-        attMeta = archiveMainContractAttachment(mainFileObj, finalNo, contractName) || attMeta;
-        if (attMeta.attachment_path) savedMainFile = attMeta.attachment_path;
-      }
-
-      const info = db.prepare(`
-        INSERT INTO contracts (
-          seq_no, contract_no, contract_name, contract_type, status,
-          our_entity, sign_date, start_date, expiry_date,
-          counterparties_json, total_amount,
-          attachment_path, attachment_original_name, attachment_size,
-          procurement_id, remark
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        '', finalNo, contractName, contractType, status,
-        ourEntity, signDate, startDate, expiryDate,
-        JSON.stringify(counterparties), totalAmount,
-        attMeta.attachment_path, attMeta.attachment_original_name, attMeta.attachment_size,
-        explicitProcId, remark
-      );
-
-      const newId = Number(info.lastInsertRowid);
-      syncBidirectionalLinkFromContract(newId, finalNo, explicitProcId);
-
-      if (relatedFileObjs.length > 0) {
-        savedRelatedFiles = archiveContractRelatedFiles(newId, finalNo, contractName, relatedFileObjs);
-      }
-
-      recalculateContractSeqNos();
-      return newId;
-    });
-
-    const newContractId = createTx();
-    cleanupReqTempFiles(req);
-    const detail = enrichContractRecord(STMTS.getContractById.get(newContractId));
-    res.json({
-      success: true,
-      id: newContractId,
-      message: '合同保存成功' + autoAdjustedMsg,
-      data: detail
-    });
+    const rows = queryFilteredContracts(req.query);
+    res.json({ success: true, data: rows });
   } catch (err) {
-    cleanupReqTempFiles(req);
-    if (savedMainFile) deletePhysicalFile(savedMainFile);
-    for (const rp of savedRelatedFiles) deletePhysicalFile(rp);
-    res.status(400).json({ success: false, message: err.message || '新增合同失败' });
-  }
-});
-
-app.put('/api/contracts/:id', contractUploadMiddleware, (req, res) => {
-  let savedMainFile = '';
-  let savedRelatedFiles = [];
-
-  try {
-    const id = Number(req.params.id);
-    const existing = STMTS.getContractById.get(id);
-    if (!existing) {
-      cleanupReqTempFiles(req);
-      return res.status(404).json({ success: false, message: '合同不存在' });
-    }
-
-    const finalNo = String(req.body.contract_no || existing.contract_no).trim();
-    const contractName = String(req.body.contract_name || existing.contract_name).trim();
-    const contractType = String(req.body.contract_type || existing.contract_type).trim();
-    const rawStatus = String(req.body.status || existing.status).trim();
-    const ourEntity = String(req.body.our_entity || existing.our_entity).trim();
-    const signDate = normalizeSmartDate(req.body.sign_date || existing.sign_date, true);
-    const startDate = normalizeSmartDate(req.body.start_date || existing.start_date);
-    const expiryDate = normalizeSmartDate(req.body.expiry_date !== undefined ? req.body.expiry_date : existing.expiry_date);
-    const status = computeSmartContractStatus(rawStatus, expiryDate);
-    const explicitProcId = req.body.procurement_id !== undefined
-      ? (req.body.procurement_id ? Number(req.body.procurement_id) : null)
-      : existing.procurement_id;
-    const remark = String(req.body.remark ?? existing.remark).trim();
-
-    const counterparties = req.body.counterparties_json
-      ? parseCounterparties(req.body.counterparties_json)
-      : parseCounterparties(existing.counterparties_json);
-    const totalAmount = counterparties.reduce((sum, item) => sum + Number(item.amount || 0), 0);
-
-    const mainFileObj = (req.files?.attachment && req.files.attachment[0]) || (req.files?.scan_file && req.files.scan_file[0]) || null;
-    const relatedFileObjs = req.files?.related_files || [];
-    let oldMainToDelete = '';
-
-    const updateTx = db.transaction(() => {
-      if (STMTS.checkDupContractNoUpdate.get(finalNo, id)) {
-        throw new Error(`合同编号 ${finalNo} 已被其他记录占用`);
-      }
-
-      const syncedOldAttachmentPath = syncContractFilesOnRename(
-        id,
-        existing.contract_no,
-        existing.contract_name,
-        finalNo,
-        contractName,
-        existing.attachment_path
-      );
-
-      let attMeta = {
-        attachment_path: syncedOldAttachmentPath,
-        attachment_original_name: existing.attachment_original_name,
-        attachment_size: existing.attachment_size
-      };
-
-      if (mainFileObj) {
-        if (syncedOldAttachmentPath) oldMainToDelete = syncedOldAttachmentPath;
-        attMeta = archiveMainContractAttachment(mainFileObj, finalNo, contractName) || attMeta;
-        if (attMeta.attachment_path) savedMainFile = attMeta.attachment_path;
-      }
-
-      db.prepare(`
-        UPDATE contracts SET
-          contract_no = ?, contract_name = ?, contract_type = ?, status = ?,
-          our_entity = ?, sign_date = ?, start_date = ?, expiry_date = ?,
-          counterparties_json = ?, total_amount = ?,
-          attachment_path = ?, attachment_original_name = ?, attachment_size = ?,
-          procurement_id = ?, remark = ?, updated_at = datetime('now', 'localtime')
-        WHERE id = ?
-      `).run(
-        finalNo, contractName, contractType, status,
-        ourEntity, signDate, startDate, expiryDate,
-        JSON.stringify(counterparties), totalAmount,
-        attMeta.attachment_path, attMeta.attachment_original_name, attMeta.attachment_size,
-        explicitProcId, remark, id
-      );
-
-      syncBidirectionalLinkFromContract(id, finalNo, explicitProcId);
-
-      if (relatedFileObjs.length > 0) {
-        savedRelatedFiles = archiveContractRelatedFiles(id, finalNo, contractName, relatedFileObjs);
-      }
-
-      recalculateContractSeqNos();
-    });
-
-    updateTx();
-    if (oldMainToDelete) deletePhysicalFile(oldMainToDelete);
-    cleanupReqTempFiles(req);
-    res.json({
-      success: true,
-      id,
-      message: '合同更新成功',
-      data: enrichContractRecord(STMTS.getContractById.get(id))
-    });
-  } catch (err) {
-    cleanupReqTempFiles(req);
-    if (savedMainFile) deletePhysicalFile(savedMainFile);
-    for (const rp of savedRelatedFiles) deletePhysicalFile(rp);
-    res.status(400).json({ success: false, message: err.message || '更新合同失败' });
-  }
-});
-
-app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const existing = STMTS.getContractById.get(id);
-    if (!existing) {
-      cleanupReqTempFiles(req);
-      return res.status(404).json({ success: false, message: '合同不存在' });
-    }
-    if (!req.file) {
-      return res.status(400).json({ success: false, message: '未选择文件' });
-    }
-    if (existing.attachment_path) {
-      deletePhysicalFile(existing.attachment_path);
-    }
-    const meta = archiveMainContractAttachment(req.file, existing.contract_no, existing.contract_name);
-    db.prepare(`
-      UPDATE contracts
-      SET attachment_path = ?, attachment_original_name = ?, attachment_size = ?, updated_at = datetime('now', 'localtime')
-      WHERE id = ?
-    `).run(meta.attachment_path, meta.attachment_original_name, meta.attachment_size, id);
-
-    cleanupReqTempFiles(req);
-    res.json({
-      success: true,
-      message: '主合同扫描件上传成功',
-      data: enrichContractRecord(STMTS.getContractById.get(id))
-    });
-  } catch (err) {
-    cleanupReqTempFiles(req);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
-app.post('/api/contracts/:id/related-files', upload.array('related_files', 25), (req, res) => {
+app.get('/api/contracts/:id', (req, res) => {
+  const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ success: false, message: '未找到该合同' });
+  res.json({ success: true, data: hydrateContractRow(row) });
+});
+
+const contractUploadFields = upload.fields([
+  { name: 'attachment', maxCount: 1 },
+  { name: 'related_files', maxCount: 30 }
+]);
+
+app.post('/api/contracts', contractUploadFields, (req, res) => {
+  try {
+    const b = req.body;
+    const parties = parseCounterpartiesFromBody(b);
+    const first = parties[0] || {};
+    const totalAmount = parties.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const totalExcl = parties.reduce((s, p) => s + Number(p.amount_excl_tax || 0), 0);
+
+    const mainFile = req.files && req.files['attachment'] ? req.files['attachment'][0] : null;
+    const relatedFiles = (req.files && req.files['related_files']) || [];
+
+    const signDate = normalizeSmartDateStr(b.sign_date);
+    const startDate = normalizeSmartDateStr(b.start_date);
+    const expiryDate = normalizeSmartDateStr(b.expiry_date);
+    const autoStatus = computeAutoContractStatus(b.status, expiryDate);
+
+    let newId = null;
+    let finalContractNo = '';
+
+    const createTx = db.transaction(() => {
+      finalContractNo = resolveAvailableNoOnInsert(b.contract_no, {
+        tableName: 'contracts',
+        colName: 'contract_no',
+        dateColName: 'sign_date',
+        ruleKey: 'contract_no_rule',
+        fallbackRule: DEFAULT_CONTRACT_RULE,
+        dateVal: signDate
+      });
+
+      const finalMainPath = mainFile ? renameMainScanToMatchContractNo(mainFile.filename, finalContractNo) : '';
+
+      const stmt = db.prepare(`
+        INSERT INTO contracts (
+          contract_no, contract_name, contract_type, our_entity,
+          counterparty, credit_code, contact_person, contact_phone,
+          bank_account_name, bank_account_no, bank_name,
+          amount, tax_rate, amount_excl_tax, invoice_type, currency,
+          sign_date, start_date, expiry_date, status, summary,
+          perf_bond_amount, perf_bond_status, perf_bond_return_date,
+          warranty_bond_amount, warranty_bond_status, warranty_bond_expiry_date,
+          counterparties_json, attachment_path, attachment_original_name, procurement_id, remark
+        ) VALUES (
+          @contract_no, @contract_name, @contract_type, @our_entity,
+          @counterparty, @credit_code, @contact_person, @contact_phone,
+          @bank_account_name, @bank_account_no, @bank_name,
+          @amount, @tax_rate, @amount_excl_tax, @invoice_type, @currency,
+          @sign_date, @start_date, @expiry_date, @status, @summary,
+          @perf_bond_amount, @perf_bond_status, @perf_bond_return_date,
+          @warranty_bond_amount, @warranty_bond_status, @warranty_bond_expiry_date,
+          @counterparties_json, @attachment_path, @attachment_original_name, @procurement_id, @remark
+        )
+      `);
+
+      const info = stmt.run({
+        contract_no: finalContractNo,
+        contract_name: (b.contract_name || '').trim(),
+        contract_type: b.contract_type || '采购',
+        our_entity: (b.our_entity || '').trim(),
+        counterparty: parties.map(p => p.company_name).filter(Boolean).join(' / '),
+        credit_code: first.credit_code || '',
+        contact_person: first.contact_person || '',
+        contact_phone: first.contact_phone || '',
+        bank_account_name: first.bank_account_name || '',
+        bank_account_no: first.bank_account_no || '',
+        bank_name: first.bank_name || '',
+        amount: totalAmount,
+        tax_rate: first.tax_rate || '',
+        amount_excl_tax: totalExcl,
+        invoice_type: first.invoice_type || '增值税专用发票',
+        currency: first.currency || 'CNY',
+        sign_date: signDate,
+        start_date: startDate,
+        expiry_date: expiryDate,
+        status: autoStatus,
+        summary: parties.map(p => p.summary).filter(Boolean).join('\n'),
+        perf_bond_amount: first.perf_bond_amount || 0,
+        perf_bond_status: first.perf_bond_status || '无',
+        perf_bond_return_date: first.perf_bond_return_date || '',
+        warranty_bond_amount: first.warranty_bond_amount || 0,
+        warranty_bond_status: first.warranty_bond_status || '无',
+        warranty_bond_expiry_date: first.warranty_bond_expiry_date || '',
+        counterparties_json: JSON.stringify(parties),
+        attachment_path: finalMainPath,
+        attachment_original_name: mainFile ? decodeFilename(mainFile.originalname) : '',
+        procurement_id: b.procurement_id ? Number(b.procurement_id) : null,
+        remark: (b.remark || '').trim()
+      });
+
+      newId = info.lastInsertRowid;
+
+      const relStmt = db.prepare(`
+        INSERT INTO contract_related_files (contract_id, file_path, file_original_name, file_size)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const rf of relatedFiles) {
+        const relPath = path.relative(UPLOAD_DIR, rf.path).split(path.sep).join('/');
+        relStmt.run(newId, relPath, decodeFilename(rf.originalname), rf.size || 0);
+      }
+
+      syncContractProcurementLink(newId, finalContractNo, b.procurement_id);
+      recalculateAllSeqNos();
+    });
+
+    createTx();
+    res.json({ success: true, id: newId, contract_no: finalContractNo });
+  } catch (err) {
+    cleanupUploadedReqFiles(req);
+    res.status(400).json({ success: false, message: err.message });
+  }
+});
+
+app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
   try {
     const id = Number(req.params.id);
-    const existing = STMTS.getContractById.get(id);
-    if (!existing) {
-      cleanupReqTempFiles(req);
+    const old = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(id);
+    if (!old) {
+      cleanupUploadedReqFiles(req);
+      return res.status(404).json({ success: false, message: '记录不存在' });
+    }
+
+    const b = req.body;
+    const parties = parseCounterpartiesFromBody(b);
+    const first = parties[0] || {};
+    const totalAmount = parties.reduce((s, p) => s + Number(p.amount || 0), 0);
+    const totalExcl = parties.reduce((s, p) => s + Number(p.amount_excl_tax || 0), 0);
+
+    const newContractNo = (b.contract_no || '').trim();
+    const mainFile = req.files && req.files['attachment'] ? req.files['attachment'][0] : null;
+    const relatedFiles = (req.files && req.files['related_files']) || [];
+
+    const signDate = normalizeSmartDateStr(b.sign_date);
+    const startDate = normalizeSmartDateStr(b.start_date);
+    const expiryDate = normalizeSmartDateStr(b.expiry_date);
+    const autoStatus = computeAutoContractStatus(b.status, expiryDate);
+
+    const updateTx = db.transaction(() => {
+      let attachment_path = old.attachment_path;
+      let attachment_original_name = old.attachment_original_name;
+
+      if (mainFile) {
+        attachment_path = renameMainScanToMatchContractNo(mainFile.filename, newContractNo);
+        attachment_original_name = decodeFilename(mainFile.originalname);
+      } else if (attachment_path && old.contract_no !== newContractNo) {
+        attachment_path = renameMainScanToMatchContractNo(attachment_path, newContractNo);
+      }
+
+      db.prepare(`
+        UPDATE contracts SET
+          contract_no = @contract_no,
+          contract_name = @contract_name,
+          contract_type = @contract_type,
+          our_entity = @our_entity,
+          counterparty = @counterparty,
+          credit_code = @credit_code,
+          contact_person = @contact_person,
+          contact_phone = @contact_phone,
+          bank_account_name = @bank_account_name,
+          bank_account_no = @bank_account_no,
+          bank_name = @bank_name,
+          amount = @amount,
+          tax_rate = @tax_rate,
+          amount_excl_tax = @amount_excl_tax,
+          invoice_type = @invoice_type,
+          currency = @currency,
+          sign_date = @sign_date,
+          start_date = @start_date,
+          expiry_date = @expiry_date,
+          status = @status,
+          summary = @summary,
+          perf_bond_amount = @perf_bond_amount,
+          perf_bond_status = @perf_bond_status,
+          perf_bond_return_date = @perf_bond_return_date,
+          warranty_bond_amount = @warranty_bond_amount,
+          warranty_bond_status = @warranty_bond_status,
+          warranty_bond_expiry_date = @warranty_bond_expiry_date,
+          counterparties_json = @counterparties_json,
+          attachment_path = @attachment_path,
+          attachment_original_name = @attachment_original_name,
+          procurement_id = @procurement_id,
+          remark = @remark,
+          updated_at = datetime('now', 'localtime')
+        WHERE id = @id
+      `).run({
+        id,
+        contract_no: newContractNo,
+        contract_name: (b.contract_name || '').trim(),
+        contract_type: b.contract_type || '采购',
+        our_entity: (b.our_entity || '').trim(),
+        counterparty: parties.map(p => p.company_name).filter(Boolean).join(' / '),
+        credit_code: first.credit_code || '',
+        contact_person: first.contact_person || '',
+        contact_phone: first.contact_phone || '',
+        bank_account_name: first.bank_account_name || '',
+        bank_account_no: first.bank_account_no || '',
+        bank_name: first.bank_name || '',
+        amount: totalAmount,
+        tax_rate: first.tax_rate || '',
+        amount_excl_tax: totalExcl,
+        invoice_type: first.invoice_type || '增值税专用发票',
+        currency: first.currency || 'CNY',
+        sign_date: signDate,
+        start_date: startDate,
+        expiry_date: expiryDate,
+        status: autoStatus,
+        summary: parties.map(p => p.summary).filter(Boolean).join('\n'),
+        perf_bond_amount: first.perf_bond_amount || 0,
+        perf_bond_status: first.perf_bond_status || '无',
+        perf_bond_return_date: first.perf_bond_return_date || '',
+        warranty_bond_amount: first.warranty_bond_amount || 0,
+        warranty_bond_status: first.warranty_bond_status || '无',
+        warranty_bond_expiry_date: first.warranty_bond_expiry_date || '',
+        counterparties_json: JSON.stringify(parties),
+        attachment_path,
+        attachment_original_name,
+        procurement_id: b.procurement_id ? Number(b.procurement_id) : null,
+        remark: (b.remark || '').trim()
+      });
+
+      const relStmt = db.prepare(`
+        INSERT INTO contract_related_files (contract_id, file_path, file_original_name, file_size)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const rf of relatedFiles) {
+        const relPath = path.relative(UPLOAD_DIR, rf.path).split(path.sep).join('/');
+        relStmt.run(id, relPath, decodeFilename(rf.originalname), rf.size || 0);
+      }
+
+      syncContractProcurementLink(id, newContractNo, b.procurement_id);
+      recalculateAllSeqNos();
+
+      if (mainFile && old.attachment_path && old.attachment_path !== attachment_path) {
+        safeUnlinkUploadFile(old.attachment_path);
+      }
+    });
+
+    updateTx();
+    res.json({ success: true });
+  } catch (err) {
+    cleanupUploadedReqFiles(req);
+    const msg = err.message.includes('UNIQUE') ? '该合同编号已存在，请勿重复' : err.message;
+    res.status(400).json({ success: false, message: msg });
+  }
+});
+
+app.post('/api/contracts/:id/attachment', (req, res, next) => {
+  const row = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
+  if (row) req.body.contract_no = row.contract_no;
+  next();
+}, upload.single('attachment'), (req, res) => {
+  try {
+    const old = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
+    if (!old || !req.file) {
+      cleanupUploadedReqFiles(req);
+      return res.status(400).json({ success: false, message: '上传失败' });
+    }
+    const finalMainPath = renameMainScanToMatchContractNo(req.file.filename, old.contract_no);
+    if (old.attachment_path && old.attachment_path !== finalMainPath) {
+      safeUnlinkUploadFile(old.attachment_path);
+    }
+    const origName = decodeFilename(req.file.originalname);
+    db.prepare(`
+      UPDATE contracts
+      SET attachment_path = ?, attachment_original_name = ?, updated_at = datetime('now', 'localtime')
+      WHERE id = ?
+    `).run(finalMainPath, origName, req.params.id);
+
+    res.json({ success: true, attachment_path: finalMainPath, attachment_original_name: origName });
+  } catch (err) {
+    cleanupUploadedReqFiles(req);
+    res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+app.post('/api/contracts/:id/related-files', (req, res, next) => {
+  const row = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
+  if (row) req.body.contract_no = row.contract_no;
+  next();
+}, upload.array('related_files', 30), (req, res) => {
+  try {
+    const old = db.prepare(`SELECT id FROM contracts WHERE id = ?`).get(req.params.id);
+    if (!old) {
+      cleanupUploadedReqFiles(req);
       return res.status(404).json({ success: false, message: '合同不存在' });
     }
-    archiveContractRelatedFiles(id, existing.contract_no, existing.contract_name, req.files || []);
-    cleanupReqTempFiles(req);
-    res.json({
-      success: true,
-      message: '关联资料上传成功',
-      data: enrichContractRecord(STMTS.getContractById.get(id))
-    });
+    const files = req.files || [];
+    const relStmt = db.prepare(`
+      INSERT INTO contract_related_files (contract_id, file_path, file_original_name, file_size)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const rf of files) {
+      const relPath = path.relative(UPLOAD_DIR, rf.path).split(path.sep).join('/');
+      relStmt.run(old.id, relPath, decodeFilename(rf.originalname), rf.size || 0);
+    }
+    const allRel = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ? ORDER BY id ASC`).all(old.id);
+    res.json({ success: true, related_files: allRel });
   } catch (err) {
-    cleanupReqTempFiles(req);
+    cleanupUploadedReqFiles(req);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
 app.delete('/api/contracts/:id/related-files/:fileId', (req, res) => {
-  const cid = Number(req.params.id);
-  const fid = Number(req.params.fileId);
-  const fRec = STMTS.getRelatedFileById.get(fid, cid);
-  if (!fRec) return res.status(404).json({ success: false, message: '文件不存在' });
-
-  const parentDir = path.dirname(path.join(UPLOAD_DIR, fRec.file_path));
-  STMTS.deleteRelatedFileById.run(fid);
-  deletePhysicalFile(fRec.file_path);
-  removeEmptySubdirIfClean(parentDir, RELATED_UPLOAD_DIR);
-
-  res.json({
-    success: true,
-    message: '附件已删除',
-    data: enrichContractRecord(STMTS.getContractById.get(cid))
-  });
+  const fRow = db.prepare(`SELECT * FROM contract_related_files WHERE id = ? AND contract_id = ?`).get(req.params.fileId, req.params.id);
+  if (!fRow) return res.status(404).json({ success: false, message: '附件不存在' });
+  safeUnlinkUploadFile(fRow.file_path);
+  db.prepare(`DELETE FROM contract_related_files WHERE id = ?`).run(fRow.id);
+  res.json({ success: true });
 });
 
 app.delete('/api/contracts/:id', (req, res) => {
   const id = Number(req.params.id);
-  const existing = STMTS.getContractById.get(id);
-  if (!existing) return res.status(404).json({ success: false, message: '合同不存在' });
-  const relFiles = STMTS.getRelatedFilesByCid.all(id);
-
-  db.transaction(() => {
-    syncBidirectionalLinkFromContract(id, '', null);
-    db.prepare(`DELETE FROM contracts WHERE id = ?`).run(id);
-    recalculateContractSeqNos();
-  })();
-
-  if (existing.attachment_path) deletePhysicalFile(existing.attachment_path);
-  const dirs = new Set();
-  for (const rf of relFiles) {
-    dirs.add(path.dirname(path.join(UPLOAD_DIR, rf.file_path)));
-    deletePhysicalFile(rf.file_path);
+  const old = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(id);
+  if (old) {
+    if (old.attachment_path) safeUnlinkUploadFile(old.attachment_path);
+    const rels = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ?`).all(id);
+    for (const r of rels) safeUnlinkUploadFile(r.file_path);
   }
-  for (const d of dirs) removeEmptySubdirIfClean(d, RELATED_UPLOAD_DIR);
-
-  res.json({ success: true, message: '合同及关联附件已彻底删除' });
+  db.prepare(`UPDATE procurement_projects SET contract_id = NULL WHERE contract_id = ?`).run(id);
+  db.prepare(`DELETE FROM contracts WHERE id = ?`).run(id);
+  recalculateAllSeqNos();
+  res.json({ success: true });
 });
 
-// ==================== 12. 采购项目立项台账 CRUD 路由 ====================
-function queryFilteredProcurements(query = {}) {
-  const rows = db.prepare(`SELECT * FROM procurements`).all();
-  let list = rows.map(r => enrichProcurementRecord(r));
+// ==================== 11. 采购项目立项台账 CRUD API ====================
+function queryFilteredProcurements(query) {
+  const { kw, year, type, dept, has_contract, sort_order = 'asc' } = query;
+  const conditions = [];
+  const params = {};
 
-  const kw = String(query.keyword || query.kw || '').trim().toLowerCase();
-  const year = String(query.year || '').trim();
-  const pType = String(query.project_type || query.type || '').trim();
-  const dept = String(query.cost_department || query.dept || '').trim().toLowerCase();
-  const hasContract = String(query.has_contract || '').trim();
+  if (kw && kw.trim()) {
+    conditions.push(`(procurement_no LIKE @kw OR project_name LIKE @kw OR supplier_name LIKE @kw OR budget_subject LIKE @kw OR contract_no_manual LIKE @kw)`);
+    params.kw = `%${kw.trim()}%`;
+  }
+  if (year && year.trim()) {
+    conditions.push(`substr(approval_date, 1, 4) = @year`);
+    params.year = year.trim();
+  }
+  if (type && type.trim()) {
+    conditions.push(`project_type = @type`);
+    params.type = type.trim();
+  }
+  if (dept && dept.trim()) {
+    conditions.push(`cost_department LIKE @dept`);
+    params.dept = `%${dept.trim()}%`;
+  }
+  if (has_contract && has_contract.trim()) {
+    conditions.push(`has_contract = @has_contract`);
+    params.has_contract = has_contract.trim();
+  }
 
-  list = list.filter(p => {
-    if (kw) {
-      const hit = [
-        p.seq_no, p.procurement_no, p.project_name, p.supplier_name,
-        p.budget_subject, p.contract_no_manual, p.linked_contract?.contract_no, p.remark
-      ].some(v => String(v || '').toLowerCase().includes(kw));
-      if (!hit) return false;
-    }
-    if (year && !String(p.approval_date || '').startsWith(year)) return false;
-    if (pType && p.project_type !== pType) return false;
-    if (dept && !String(p.cost_department || '').toLowerCase().includes(dept)) return false;
-    if (hasContract && p.has_contract !== hasContract) return false;
-    return true;
-  });
+  const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
+  const dir = String(sort_order).toLowerCase() === 'desc' ? 'DESC' : 'ASC';
+  const orderClause = `ORDER BY substr(approval_date, 1, 4) ${dir}, CAST(substr(seq_no, 6) AS INTEGER) ${dir}, id ${dir}`;
 
-  const sortOrder = String(query.sort_order || 'ASC').toUpperCase() === 'DESC' ? -1 : 1;
-  list.sort((a, b) => {
-    const da = a.approval_date || '';
-    const dbDate = b.approval_date || '';
-    if (da < dbDate) return -1 * sortOrder;
-    if (da > dbDate) return 1 * sortOrder;
-    return (a.id - b.id) * sortOrder;
-  });
-
-  return list;
+  const rawRows = db.prepare(`SELECT * FROM procurement_projects ${whereClause} ${orderClause}`).all(params);
+  return rawRows.map(hydrateProcurementRow);
 }
 
 app.get('/api/procurements', (req, res) => {
-  const list = queryFilteredProcurements(req.query);
-  res.json({ success: true, data: list });
+  try {
+    const rows = queryFilteredProcurements(req.query);
+    res.json({ success: true, data: rows });
+  } catch (err) {
+    res.status(500).json({ success: false, message: err.message });
+  }
 });
 
 app.get('/api/procurements/:id', (req, res) => {
-  const row = STMTS.getProcurementById.get(Number(req.params.id));
-  if (!row) return res.status(404).json({ success: false, message: '采购立项不存在' });
-  res.json({ success: true, data: enrichProcurementRecord(row) });
+  const row = db.prepare(`SELECT * FROM procurement_projects WHERE id = ?`).get(req.params.id);
+  if (!row) return res.status(404).json({ success: false, message: '未找到该采购立项' });
+  res.json({ success: true, data: hydrateProcurementRow(row) });
 });
 
-const procUploadMiddleware = upload.fields([
-  { name: 'procurement_files', maxCount: 25 },
-  { name: 'proc_files', maxCount: 25 }
-]);
-
-app.post('/api/procurements', procUploadMiddleware, (req, res) => {
-  let savedFiles = [];
-
+app.post('/api/procurements', upload.array('procurement_files', 30), (req, res) => {
   try {
-    let finalProcNo = String(req.body.procurement_no || '').trim();
-    const projectName = String(req.body.project_name || '').trim();
-    const projectType = String(req.body.project_type || '服务类项目').trim();
-    const costDepartment = String(req.body.cost_department || req.body.department || '').trim();
-    const budgetAmount = Number(req.body.budget_amount || 0);
-    const budgetSubject = String(req.body.budget_subject || '').trim();
-    const procurementType = String(req.body.procurement_type || '小额零星采购').trim();
-    const procurementMethod = String(req.body.procurement_method || '合作谈判').trim();
-    const approvalDate = normalizeSmartDate(req.body.approval_date, true);
-    const decisionDate = normalizeSmartDate(req.body.decision_date || '');
-    const completionDate = normalizeSmartDate(req.body.completion_date || '');
-    const supplierName = String(req.body.supplier_name || '').trim();
-    const dealAmount = Number(req.body.deal_amount ?? req.body.final_amount ?? 0);
-    const explicitContractId = req.body.contract_id ? Number(req.body.contract_id) : null;
-    const contractNoManual = String(req.body.contract_no_manual || '').trim();
-    const hasContract = (explicitContractId || req.body.has_contract === '是') ? '是' : '否';
-    const remark = String(req.body.remark || '').trim();
+    const b = req.body;
+    const files = req.files || [];
+    const approvalDate = normalizeSmartDateStr(b.approval_date);
+    const decisionDate = normalizeSmartDateStr(b.decision_date);
+    const completionDate = normalizeSmartDateStr(b.completion_date);
 
-    if (!finalProcNo || !projectName) {
-      cleanupReqTempFiles(req);
-      return res.status(400).json({ success: false, message: '采购立项编号与项目名称为必填项' });
-    }
+    let newProcId = null;
+    let finalProcNo = '';
 
-    const uploadedFiles = [
-      ...(req.files?.procurement_files || []),
-      ...(req.files?.proc_files || [])
-    ];
+    const createProcTx = db.transaction(() => {
+      finalProcNo = resolveAvailableNoOnInsert(b.procurement_no, {
+        tableName: 'procurement_projects',
+        colName: 'procurement_no',
+        dateColName: 'approval_date',
+        ruleKey: 'procurement_no_rule',
+        fallbackRule: DEFAULT_PROC_RULE,
+        dateVal: approvalDate
+      });
 
-    let autoAdjustedMsg = '';
+      let targetContractId = b.contract_id ? Number(b.contract_id) : null;
+      let manualContractNo = String(b.contract_no_manual || '').trim();
 
-    const createTx = db.transaction(() => {
-      if (STMTS.checkDupProcNoCreate.get(finalProcNo)) {
-        const resolved = resolveConflictNo(finalProcNo, 'procurement');
-        if (resolved && !STMTS.checkDupProcNoCreate.get(resolved)) {
-          finalProcNo = resolved;
-          autoAdjustedMsg = `（原编号已被占用，已自动顺延为 ${finalProcNo}）`;
-        } else {
-          throw new Error(`采购立项编号 ${finalProcNo} 已存在`);
-        }
+      if (targetContractId) {
+        const cRow = db.prepare(`SELECT id, contract_no FROM contracts WHERE id = ?`).get(targetContractId);
+        if (cRow) manualContractNo = cRow.contract_no;
+      } else if (manualContractNo) {
+        const cRow = db.prepare(`SELECT id FROM contracts WHERE contract_no = ?`).get(manualContractNo);
+        if (cRow) targetContractId = cRow.id;
       }
 
       const info = db.prepare(`
-        INSERT INTO procurements (
-          seq_no, procurement_no, project_name, project_type, cost_department,
+        INSERT INTO procurement_projects (
+          procurement_no, project_name, project_type, cost_department,
           budget_amount, budget_subject, procurement_type, procurement_method,
           approval_date, decision_date, completion_date,
-          supplier_name, deal_amount, has_contract,
-          contract_id, contract_no_manual, remark
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        '', finalProcNo, projectName, projectType, costDepartment,
-        budgetAmount, budgetSubject, procurementType, procurementMethod,
-        approvalDate, decisionDate, completionDate,
-        supplierName, dealAmount, hasContract,
-        explicitContractId, contractNoManual, remark
-      );
+          supplier_name, deal_amount, has_contract, contract_id, contract_no_manual, remark
+        ) VALUES (
+          @procurement_no, @project_name, @project_type, @cost_department,
+          @budget_amount, @budget_subject, @procurement_type, @procurement_method,
+          @approval_date, @decision_date, @completion_date,
+          @supplier_name, @deal_amount, @has_contract, @contract_id, @contract_no_manual, @remark
+        )
+      `).run({
+        procurement_no: finalProcNo,
+        project_name: (b.project_name || '').trim(),
+        project_type: b.project_type || '服务类项目',
+        cost_department: (b.cost_department || '').trim(),
+        budget_amount: Number(b.budget_amount || 0),
+        budget_subject: (b.budget_subject || '').trim(),
+        procurement_type: b.procurement_type || '小额零星采购',
+        procurement_method: (b.procurement_method || '合作谈判').trim(),
+        approval_date: approvalDate,
+        decision_date: decisionDate,
+        completion_date: completionDate,
+        supplier_name: (b.supplier_name || '').trim(),
+        deal_amount: Number(b.deal_amount || 0),
+        has_contract: targetContractId ? '是' : (b.has_contract || '否'),
+        contract_id: targetContractId,
+        contract_no_manual: manualContractNo,
+        remark: (b.remark || '').trim()
+      });
 
-      const newProcId = Number(info.lastInsertRowid);
-      syncBidirectionalLinkFromProcurement(newProcId, explicitContractId, contractNoManual);
+      newProcId = info.lastInsertRowid;
 
-      if (uploadedFiles.length > 0) {
-        savedFiles = archiveProcurementFiles(newProcId, finalProcNo, projectName, uploadedFiles);
+      if (targetContractId) {
+        db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(newProcId, targetContractId);
       }
 
-      recalculateProcSeqNos();
-      return newProcId;
+      const fStmt = db.prepare(`
+        INSERT INTO procurement_files (procurement_id, file_path, file_original_name, file_size)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const pf of files) {
+        const relPath = path.relative(UPLOAD_DIR, pf.path).split(path.sep).join('/');
+        fStmt.run(newProcId, relPath, decodeFilename(pf.originalname), pf.size || 0);
+      }
+
+      recalculateAllProcurementSeqNos();
     });
 
-    const newId = createTx();
-    cleanupReqTempFiles(req);
-    res.json({
-      success: true,
-      id: newId,
-      message: '采购立项保存成功' + autoAdjustedMsg,
-      data: enrichProcurementRecord(STMTS.getProcurementById.get(newId))
-    });
+    createProcTx();
+    res.json({ success: true, id: newProcId, procurement_no: finalProcNo });
   } catch (err) {
-    cleanupReqTempFiles(req);
-    for (const fp of savedFiles) deletePhysicalFile(fp);
-    res.status(400).json({ success: false, message: err.message || '保存采购立项失败' });
+    cleanupUploadedReqFiles(req);
+    res.status(400).json({ success: false, message: err.message });
   }
 });
 
-app.put('/api/procurements/:id', procUploadMiddleware, (req, res) => {
-  let savedFiles = [];
-
+app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, res) => {
   try {
     const id = Number(req.params.id);
-    const existing = STMTS.getProcurementById.get(id);
-    if (!existing) {
-      cleanupReqTempFiles(req);
-      return res.status(404).json({ success: false, message: '采购立项不存在' });
+    const old = db.prepare(`SELECT * FROM procurement_projects WHERE id = ?`).get(id);
+    if (!old) {
+      cleanupUploadedReqFiles(req);
+      return res.status(404).json({ success: false, message: '立项记录不存在' });
     }
 
-    const finalProcNo = String(req.body.procurement_no || existing.procurement_no).trim();
-    const projectName = String(req.body.project_name || existing.project_name).trim();
-    const projectType = String(req.body.project_type || existing.project_type).trim();
-    const costDepartment = String(req.body.cost_department ?? existing.cost_department).trim();
-    const budgetAmount = Number(req.body.budget_amount ?? existing.budget_amount);
-    const budgetSubject = String(req.body.budget_subject ?? existing.budget_subject).trim();
-    const procurementType = String(req.body.procurement_type || existing.procurement_type).trim();
-    const procurementMethod = String(req.body.procurement_method || existing.procurement_method).trim();
-    const approvalDate = normalizeSmartDate(req.body.approval_date || existing.approval_date, true);
-    const decisionDate = normalizeSmartDate(req.body.decision_date ?? existing.decision_date);
-    const completionDate = normalizeSmartDate(req.body.completion_date ?? existing.completion_date);
-    const supplierName = String(req.body.supplier_name ?? existing.supplier_name).trim();
-    const dealAmount = Number(req.body.deal_amount ?? existing.deal_amount);
-    const explicitContractId = req.body.contract_id !== undefined
-      ? (req.body.contract_id ? Number(req.body.contract_id) : null)
-      : existing.contract_id;
-    const contractNoManual = String(req.body.contract_no_manual ?? existing.contract_no_manual).trim();
-    const hasContract = String(req.body.has_contract || (explicitContractId ? '是' : existing.has_contract)).trim();
-    const remark = String(req.body.remark ?? existing.remark).trim();
+    const b = req.body;
+    const files = req.files || [];
+    const approvalDate = normalizeSmartDateStr(b.approval_date);
+    const decisionDate = normalizeSmartDateStr(b.decision_date);
+    const completionDate = normalizeSmartDateStr(b.completion_date);
 
-    const uploadedFiles = [
-      ...(req.files?.procurement_files || []),
-      ...(req.files?.proc_files || [])
-    ];
+    const updateProcTx = db.transaction(() => {
+      db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ?`).run(id);
 
-    const updateTx = db.transaction(() => {
-      if (STMTS.checkDupProcNoUpdate.get(finalProcNo, id)) {
-        throw new Error(`采购立项编号 ${finalProcNo} 已被占用`);
+      let targetContractId = b.contract_id ? Number(b.contract_id) : null;
+      let manualContractNo = String(b.contract_no_manual || '').trim();
+
+      if (targetContractId) {
+        const cRow = db.prepare(`SELECT id, contract_no FROM contracts WHERE id = ?`).get(targetContractId);
+        if (cRow) manualContractNo = cRow.contract_no;
+      } else if (manualContractNo) {
+        const cRow = db.prepare(`SELECT id FROM contracts WHERE contract_no = ?`).get(manualContractNo);
+        if (cRow) targetContractId = cRow.id;
       }
-
-      syncProcurementFilesOnRename(
-        id,
-        existing.procurement_no,
-        existing.project_name,
-        finalProcNo,
-        projectName
-      );
 
       db.prepare(`
-        UPDATE procurements SET
-          procurement_no = ?, project_name = ?, project_type = ?, cost_department = ?,
-          budget_amount = ?, budget_subject = ?, procurement_type = ?, procurement_method = ?,
-          approval_date = ?, decision_date = ?, completion_date = ?,
-          supplier_name = ?, deal_amount = ?, has_contract = ?,
-          contract_id = ?, contract_no_manual = ?, remark = ?,
+        UPDATE procurement_projects SET
+          procurement_no = @procurement_no,
+          project_name = @project_name,
+          project_type = @project_type,
+          cost_department = @cost_department,
+          budget_amount = @budget_amount,
+          budget_subject = @budget_subject,
+          procurement_type = @procurement_type,
+          procurement_method = @procurement_method,
+          approval_date = @approval_date,
+          decision_date = @decision_date,
+          completion_date = @completion_date,
+          supplier_name = @supplier_name,
+          deal_amount = @deal_amount,
+          has_contract = @has_contract,
+          contract_id = @contract_id,
+          contract_no_manual = @contract_no_manual,
+          remark = @remark,
           updated_at = datetime('now', 'localtime')
-        WHERE id = ?
-      `).run(
-        finalProcNo, projectName, projectType, costDepartment,
-        budgetAmount, budgetSubject, procurementType, procurementMethod,
-        approvalDate, decisionDate, completionDate,
-        supplierName, dealAmount, hasContract,
-        explicitContractId, contractNoManual, remark, id
-      );
+        WHERE id = @id
+      `).run({
+        id,
+        procurement_no: (b.procurement_no || '').trim(),
+        project_name: (b.project_name || '').trim(),
+        project_type: b.project_type || '服务类项目',
+        cost_department: (b.cost_department || '').trim(),
+        budget_amount: Number(b.budget_amount || 0),
+        budget_subject: (b.budget_subject || '').trim(),
+        procurement_type: b.procurement_type || '小额零星采购',
+        procurement_method: (b.procurement_method || '合作谈判').trim(),
+        approval_date: approvalDate,
+        decision_date: decisionDate,
+        completion_date: completionDate,
+        supplier_name: (b.supplier_name || '').trim(),
+        deal_amount: Number(b.deal_amount || 0),
+        has_contract: targetContractId ? '是' : (b.has_contract || '否'),
+        contract_id: targetContractId,
+        contract_no_manual: manualContractNo,
+        remark: (b.remark || '').trim()
+      });
 
-      syncBidirectionalLinkFromProcurement(id, explicitContractId, contractNoManual);
-
-      if (uploadedFiles.length > 0) {
-        savedFiles = archiveProcurementFiles(id, finalProcNo, projectName, uploadedFiles);
+      if (targetContractId) {
+        db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(id, targetContractId);
       }
 
-      recalculateProcSeqNos();
+      const fStmt = db.prepare(`
+        INSERT INTO procurement_files (procurement_id, file_path, file_original_name, file_size)
+        VALUES (?, ?, ?, ?)
+      `);
+      for (const pf of files) {
+        const relPath = path.relative(UPLOAD_DIR, pf.path).split(path.sep).join('/');
+        fStmt.run(id, relPath, decodeFilename(pf.originalname), pf.size || 0);
+      }
+
+      recalculateAllProcurementSeqNos();
     });
 
-    updateTx();
-    cleanupReqTempFiles(req);
-    res.json({
-      success: true,
-      id,
-      message: '采购立项更新成功',
-      data: enrichProcurementRecord(STMTS.getProcurementById.get(id))
-    });
+    updateProcTx();
+    res.json({ success: true });
   } catch (err) {
-    cleanupReqTempFiles(req);
-    for (const fp of savedFiles) deletePhysicalFile(fp);
-    res.status(400).json({ success: false, message: err.message || '更新立项失败' });
+    cleanupUploadedReqFiles(req);
+    const msg = err.message.includes('UNIQUE') ? '该立项编号已存在，请勿重复' : err.message;
+    res.status(400).json({ success: false, message: msg });
   }
 });
 
-app.post('/api/procurements/:id/files', procUploadMiddleware, (req, res) => {
+app.post('/api/procurements/:id/files', (req, res, next) => {
+  const row = db.prepare(`SELECT procurement_no FROM procurement_projects WHERE id = ?`).get(req.params.id);
+  if (row) req.body.procurement_no = row.procurement_no;
+  next();
+}, upload.array('procurement_files', 30), (req, res) => {
   try {
-    const id = Number(req.params.id);
-    const existing = STMTS.getProcurementById.get(id);
-    if (!existing) {
-      cleanupReqTempFiles(req);
+    const old = db.prepare(`SELECT id FROM procurement_projects WHERE id = ?`).get(req.params.id);
+    if (!old) {
+      cleanupUploadedReqFiles(req);
       return res.status(404).json({ success: false, message: '采购立项不存在' });
     }
-    const files = [
-      ...(req.files?.procurement_files || []),
-      ...(req.files?.proc_files || [])
-    ];
-    archiveProcurementFiles(id, existing.procurement_no, existing.project_name, files);
-    cleanupReqTempFiles(req);
-    res.json({
-      success: true,
-      message: '立项资料上传成功',
-      data: enrichProcurementRecord(STMTS.getProcurementById.get(id))
-    });
+    const files = req.files || [];
+    const fStmt = db.prepare(`
+      INSERT INTO procurement_files (procurement_id, file_path, file_original_name, file_size)
+      VALUES (?, ?, ?, ?)
+    `);
+    for (const pf of files) {
+      const relPath = path.relative(UPLOAD_DIR, pf.path).split(path.sep).join('/');
+      fStmt.run(old.id, relPath, decodeFilename(pf.originalname), pf.size || 0);
+    }
+    const allFiles = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(old.id);
+    res.json({ success: true, files: allFiles });
   } catch (err) {
-    cleanupReqTempFiles(req);
+    cleanupUploadedReqFiles(req);
     res.status(500).json({ success: false, message: err.message });
   }
 });
 
 app.delete('/api/procurements/:id/files/:fileId', (req, res) => {
-  const pid = Number(req.params.id);
-  const fid = Number(req.params.fileId);
-  const fRec = STMTS.getProcFileById.get(fid, pid);
-  if (!fRec) return res.status(404).json({ success: false, message: '资料不存在' });
-
-  const parentDir = path.dirname(path.join(UPLOAD_DIR, fRec.file_path));
-  STMTS.deleteProcFileById.run(fid);
-  deletePhysicalFile(fRec.file_path);
-  removeEmptySubdirIfClean(parentDir, PROCUREMENT_UPLOAD_DIR);
-
-  res.json({
-    success: true,
-    message: '立项资料已删除',
-    data: enrichProcurementRecord(STMTS.getProcurementById.get(pid))
-  });
+  const fRow = db.prepare(`SELECT * FROM procurement_files WHERE id = ? AND procurement_id = ?`).get(req.params.fileId, req.params.id);
+  if (!fRow) return res.status(404).json({ success: false, message: '文件不存在' });
+  safeUnlinkUploadFile(fRow.file_path);
+  db.prepare(`DELETE FROM procurement_files WHERE id = ?`).run(fRow.id);
+  res.json({ success: true });
 });
 
 app.delete('/api/procurements/:id', (req, res) => {
   const id = Number(req.params.id);
-  const existing = STMTS.getProcurementById.get(id);
-  if (!existing) return res.status(404).json({ success: false, message: '采购立项不存在' });
-  const files = STMTS.getProcFilesByPid.all(id);
-
-  db.transaction(() => {
-    syncBidirectionalLinkFromProcurement(id, null, '');
-    db.prepare(`DELETE FROM procurements WHERE id = ?`).run(id);
-    recalculateProcSeqNos();
-  })();
-
-  const dirs = new Set();
-  for (const pf of files) {
-    dirs.add(path.dirname(path.join(UPLOAD_DIR, pf.file_path)));
-    deletePhysicalFile(pf.file_path);
-  }
-  for (const d of dirs) removeEmptySubdirIfClean(d, PROCUREMENT_UPLOAD_DIR);
-
-  res.json({ success: true, message: '采购立项及关联资料已彻底删除' });
+  const files = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ?`).all(id);
+  for (const f of files) safeUnlinkUploadFile(f.file_path);
+  db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ?`).run(id);
+  db.prepare(`DELETE FROM procurement_projects WHERE id = ?`).run(id);
+  recalculateAllProcurementSeqNos();
+  res.json({ success: true });
 });
 
-// ==================== 13. 基于 xlsx-js-style 的专业双子表导出引擎 ====================
-function escapeExcelFormulaStr(str) {
-  return String(str || '').replace(/"/g, '""');
+// ==================== 12. Excel 样式构建器：全闭合边框 + 隔编号斑马纹浅色背景 + 精准居中对齐 ====================
+function buildBorderSpec(isGroupBottom = false) {
+  return {
+    top: { style: 'thin', color: { rgb: 'CBD5E1' } },
+    bottom: isGroupBottom
+      ? { style: 'medium', color: { rgb: '64748B' } }
+      : { style: 'thin', color: { rgb: 'CBD5E1' } },
+    left: { style: 'thin', color: { rgb: 'CBD5E1' } },
+    right: { style: 'thin', color: { rgb: 'CBD5E1' } }
+  };
 }
 
-function createContractWorksheet(contracts) {
+function buildContractWorksheet(rows) {
+  // 共 35 列 (索引 0 ~ 34，对应 Excel 的 A 列 ~ AI 列)
+  // 表头去掉所有括号赘述，规范为“履约摘要”和“备注”
   const headers = [
     '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
-    '签订日期', '开始履约日', '合同到期日', '合同状态', '关联采购立项号',
-    '履约摘要', '对方单位名称', '统一社会信用代码', '联系人', '联系电话',
-    '收款账户名称', '收款银行账号', '开户银行', '含税金额(元)', '不含税金额(元)',
-    '税率(%)', '发票类型', '币种', '履约保证金(元)', '保证金状态',
-    '保证金应退日', '质保金(元)', '质保金状态', '质保金到期日', '分项备注',
-    '① 合同扫描件(超链接)', '② 采购立项资料夹(超链接)', '③ 合同其他附件夹(超链接)'
+    '签订日期', '开始履约日', '合同到期日', '状态',
+    '履约摘要', '对方单位名称', '统一社会信用代码',
+    '联系人', '联系电话', '收款账户名称', '收款银行账号', '开户银行', '开户行号',
+    '含税金额(元)', '不含税价(元)', '税率', '发票类型', '币种',
+    '履约保证金(元)', '保证金状态', '保证金应退日',
+    '质保金金额(元)', '质保金状态', '质保金到期日', '备注',
+    '主合同扫描件(点击打开)', '关联采购立项号', '采购立项资料(点击打开)', '其他相关资料(点击打开)', '本合同含税总额(元)'
   ];
 
   const aoa = [
-    ['企业合同管理台账明细表'],
+    ['企业合同管理台账总表（含对方单位独立核算、银行四要素、保证金/质保金及三大资料库直连）'],
     headers
   ];
 
@@ -2049,29 +1732,24 @@ function createContractWorksheet(contracts) {
     { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
   ];
 
+  const rowMeta = [];
   let currentRowIdx = 2;
-  const rowGroupParity = [];
-  const formulaCells = [];
 
-  contracts.forEach((c, cIdx) => {
+  rows.forEach((c, groupIdx) => {
     const parties = c.counterparties && c.counterparties.length > 0 ? c.counterparties : [{}];
+    const span = parties.length;
     const startRow = currentRowIdx;
+    const endRow = currentRowIdx + span - 1;
+    const isOddGroup = groupIdx % 2 === 1;
 
-    const scanRelLink = escapeExcelFormulaStr(c.attachment_path ? `uploads/${c.attachment_path}` : `uploads/`);
-    const procFolderRelLink = escapeExcelFormulaStr(
-      c.linked_procurement
-        ? `uploads/procurement/${buildFolderKey(c.linked_procurement.procurement_no, c.linked_procurement.project_name)}`
-        : `uploads/procurement/`
-    );
-    const relatedFolderRelLink = escapeExcelFormulaStr(`uploads/related/${buildFolderKey(c.contract_no, c.contract_name)}`);
+    const totalContractAmt = parties.reduce((sum, p) => sum + Number(p.amount || 0), 0);
+    const procNo = c.linked_procurement ? c.linked_procurement.procurement_no : '';
+    const procFiles = (c.linked_procurement && c.linked_procurement.files) || [];
+    const relFiles = c.related_files || [];
 
     parties.forEach((cp, pIdx) => {
-      const rIdx = currentRowIdx++;
-      rowGroupParity[rIdx] = cIdx % 2;
-
-      const combinedRemark = [cp.remark, c.remark].filter(Boolean).join('；');
-
-      aoa.push([
+      const combinedRemark = [cp.remark, c.remark].filter(Boolean).join('\n');
+      const rowData = [
         c.seq_no || '',
         c.contract_no || '',
         c.contract_name || '',
@@ -2081,7 +1759,6 @@ function createContractWorksheet(contracts) {
         c.start_date || '',
         c.expiry_date || '',
         c.status || '',
-        c.linked_procurement ? c.linked_procurement.procurement_no : '未关联',
         cp.summary || '',
         cp.company_name || '',
         cp.credit_code || '',
@@ -2090,9 +1767,10 @@ function createContractWorksheet(contracts) {
         cp.bank_account_name || '',
         cp.bank_account_no || '',
         cp.bank_name || '',
+        cp.bank_code || '',
         Number(cp.amount || 0),
         Number(cp.amount_excl_tax || 0),
-        cp.tax_rate || '',
+        normalizeSmartTaxRateServer(cp.tax_rate || ''),
         cp.invoice_type || '',
         cp.currency || 'CNY',
         Number(cp.perf_bond_amount || 0),
@@ -2102,117 +1780,134 @@ function createContractWorksheet(contracts) {
         cp.warranty_bond_status || '无',
         cp.warranty_bond_expiry_date || '',
         combinedRemark,
-        c.attachment_path ? '📄 打开合同扫描件' : '未上传扫描件',
-        c.linked_procurement ? '📁 打开立项资料夹' : '未关联立项夹',
-        (c.related_files && c.related_files.length > 0) ? `📎 打开附件夹(${c.related_files.length}份)` : '打开附件夹'
-      ]);
-
-      if (pIdx === 0) {
-        formulaCells.push({
-          r: rIdx,
-          c: 30,
-          f: `HYPERLINK("${scanRelLink}","${c.attachment_path ? '📄 打开合同扫描件' : '未上传扫描件'}")`
-        });
-        formulaCells.push({
-          r: rIdx,
-          c: 31,
-          f: `HYPERLINK("${procFolderRelLink}","${c.linked_procurement ? '📁 打开立项资料夹' : '未关联立项夹'}")`
-        });
-        formulaCells.push({
-          r: rIdx,
-          c: 32,
-          f: `HYPERLINK("${relatedFolderRelLink}","📎 打开合同附件夹")`
-        });
-      }
+        c.attachment_path ? `点击打开：${c.contract_no}` : '未上传',
+        procNo || '未关联',
+        procFiles.length > 0 ? `立项资料(${procFiles.length}份)` : '无',
+        relFiles.length > 0 ? `其他资料(${relFiles.length}份)` : '无',
+        totalContractAmt
+      ];
+      aoa.push(rowData);
+      rowMeta[currentRowIdx] = {
+        isOddGroup,
+        isGroupBottom: pIdx === span - 1,
+        c,
+        procFiles,
+        relFiles,
+        isFirstInGroup: pIdx === 0
+      };
+      currentRowIdx++;
     });
 
-    const endRow = currentRowIdx - 1;
-    if (endRow > startRow) {
-      const mergeCols = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 30, 31, 32];
-      for (const colIdx of mergeCols) {
+    if (span > 1) {
+      [0, 1, 2, 3, 4, 5, 6, 7, 8, 30, 31, 32, 33, 34].forEach(colIdx => {
         merges.push({ s: { r: startRow, c: colIdx }, e: { r: endRow, c: colIdx } });
-      }
+      });
     }
   });
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
 
-  for (const fc of formulaCells) {
-    const addr = XLSX.utils.encode_cell({ r: fc.r, c: fc.c });
-    if (!ws[addr]) ws[addr] = { t: 's', v: '' };
-    ws[addr].f = fc.f;
+  // 列宽紧凑收窄，履约摘要(28)与备注(26)给足换行空间
+  ws['!cols'] = [
+    { wch: 11 }, { wch: 19 }, { wch: 22 }, { wch: 8 },  { wch: 14 },
+    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 9 },
+    { wch: 28 }, { wch: 20 }, { wch: 18 },
+    { wch: 9 },  { wch: 13 }, { wch: 18 }, { wch: 19 }, { wch: 18 }, { wch: 14 },
+    { wch: 13 }, { wch: 13 }, { wch: 10 }, { wch: 15 }, { wch: 7 },
+    { wch: 13 }, { wch: 9 },  { wch: 11 },
+    { wch: 13 }, { wch: 9 },  { wch: 11 }, { wch: 26 },
+    { wch: 20 }, { wch: 16 }, { wch: 18 }, { wch: 18 }, { wch: 15 }
+  ];
+
+  ws['!rows'] = [{ hpt: 30 }, { hpt: 26 }];
+  for (let r = 2; r < currentRowIdx; r++) {
+    ws['!rows'][r] = { hpt: 24 };
   }
 
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:AG2');
-  for (let R = range.s.r; R <= range.e.r; R++) {
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const addr = XLSX.utils.encode_cell({ r: R, c: C });
-      if (!ws[addr]) continue;
-      if (R === 0) {
-        ws[addr].s = {
-          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: '1E3A8A' } },
+  const centerCols = new Set([0, 1, 3, 4, 5, 6, 7, 8, 11, 12, 13, 15, 17, 20, 21, 22, 24, 25, 27, 28, 30, 31, 32, 33]);
+  const moneyCols = new Set([18, 19, 23, 26, 34]);
+
+  for (let r = 0; r < currentRowIdx; r++) {
+    for (let c = 0; c < headers.length; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r, c });
+      if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
+
+      if (r === 0) {
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '1E3A8A' } },
           alignment: { horizontal: 'center', vertical: 'center' },
-          fill: { fgColor: { rgb: 'EFF6FF' } }
+          border: buildBorderSpec(false)
         };
-      } else if (R === 1) {
-        ws[addr].s = {
-          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+      } else if (r === 1) {
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '1E293B' } },
+          fill: { fgColor: { rgb: 'DBEAFE' } },
           alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
-          fill: { fgColor: { rgb: '1E40AF' } }
+          border: buildBorderSpec(true)
         };
       } else {
-        const isOddGroup = rowGroupParity[R] === 1;
-        const isLinkCol = C >= 30;
-        ws[addr].s = {
+        const meta = rowMeta[r];
+        const bgRgb = meta.isOddGroup ? 'F1F5F9' : 'FFFFFF';
+        const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
+
+        if (meta.isFirstInGroup) {
+          if (c === 30 && meta.c.attachment_path) {
+            const relUrl = escapeExcelFormulaStr(`uploads/${meta.c.attachment_path}`);
+            const label = escapeExcelFormulaStr(`点击打开：${meta.c.contract_no}`);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `点击打开：${meta.c.contract_no}` };
+          } else if (c === 32 && meta.procFiles.length > 0) {
+            const relUrl = escapeExcelFormulaStr(`uploads/${meta.procFiles[0].file_path}`);
+            const label = escapeExcelFormulaStr(`立项资料(${meta.procFiles.length}份)`);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `立项资料(${meta.procFiles.length}份)` };
+          } else if (c === 33 && meta.relFiles.length > 0) {
+            const relUrl = escapeExcelFormulaStr(`uploads/${meta.relFiles[0].file_path}`);
+            const label = escapeExcelFormulaStr(`其他资料(${meta.relFiles.length}份)`);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `其他资料(${meta.relFiles.length}份)` };
+          }
+        }
+
+        const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
+        const isMultiTaxCell = c === 20 && String(ws[cellRef].v || '').startsWith('*');
+
+        ws[cellRef].s = {
           font: {
             name: '微软雅黑',
             sz: 10,
-            color: { rgb: isLinkCol ? '2563EB' : '1F2937' },
-            underline: isLinkCol
+            bold: c === 1 || c === 18 || c === 34 || isMultiTaxCell,
+            underline: isHyperlinkCell,
+            color: { rgb: isHyperlinkCell ? '2563EB' : (isMultiTaxCell ? '92400E' : '0F172A') }
           },
-          alignment: { vertical: 'center', horizontal: isLinkCol ? 'center' : 'left' },
-          fill: { fgColor: { rgb: isOddGroup ? 'F1F5F9' : 'FFFFFF' } }
+          fill: { fgColor: { rgb: bgRgb } },
+          alignment: { horizontal: hAlign, vertical: 'center', wrapText: true },
+          border: buildBorderSpec(meta.isGroupBottom),
+          ...(moneyCols.has(c) ? { numFmt: '#,##0.00' } : {})
         };
       }
     }
   }
 
-  ws['!cols'] = headers.map((h, i) => ({
-    wch: [10, 24, 28, 10, 18, 12, 12, 14, 10, 20, 22, 28, 22, 10, 14, 22, 22, 20, 14, 14, 9, 16, 8, 14, 10, 12, 14, 10, 12, 20, 20, 20, 20][i] || 15
-  }));
-
   return ws;
 }
 
-function createProcurementWorksheet(procurements) {
+function buildProcurementWorksheet(rows) {
+  // 共 18 列 (索引 0 ~ 17，对应 Excel 的 A 列 ~ R 列)
   const headers = [
-    '序号', '采购立项编号', '采购项目名称', '立项类型', '费用承担部门',
-    '采购预算(元)', '预算科目', '采购类型', '采购方式', '立项时间',
-    '决策/成交确认时间', '完结时间', '成交供应商', '成交金额(元)', '是否签订合同',
-    '关联合同编号', '备注', '① 立项相关资料夹(超链接)', '② 关联合同扫描件(超链接)'
+    '序号', '项目立项编号', '项目名称', '立项类型', '费用承担部门',
+    '预算金额(元)', '预算科目名称', '采购类型', '采购方式',
+    '立项时间', '决策时间', '采购完成时间', '成交供应商全称',
+    '成交金额(元)', '是否签合同', '关联合同编号', '备注', '立项相关资料(点击打开)'
   ];
 
   const aoa = [
-    ['企业采购项目立项台账明细表'],
+    ['企业采购项目立项台账总表（含寻源决策、成交结果及关联合同双向穿透）'],
     headers
   ];
 
-  const merges = [
-    { s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }
-  ];
-
-  const formulaCells = [];
-
-  procurements.forEach((p, idx) => {
-    const rIdx = idx + 2;
-    const procFolderLink = escapeExcelFormulaStr(`uploads/procurement/${buildFolderKey(p.procurement_no, p.project_name)}`);
-    const contractScanLink = escapeExcelFormulaStr(
-      (p.linked_contract && p.linked_contract.attachment_path)
-        ? `uploads/${p.linked_contract.attachment_path}`
-        : `uploads/`
-    );
-
+  rows.forEach(p => {
+    const cNo = p.linked_contract ? p.linked_contract.contract_no : (p.contract_no_manual || '');
+    const files = p.files || [];
     aoa.push([
       p.seq_no || '',
       p.procurement_no || '',
@@ -2229,244 +1924,165 @@ function createProcurementWorksheet(procurements) {
       p.supplier_name || '',
       Number(p.deal_amount || 0),
       p.has_contract || '否',
-      p.linked_contract ? p.linked_contract.contract_no : (p.contract_no_manual || ''),
+      cNo || '-',
       p.remark || '',
-      '📁 打开立项资料夹',
-      (p.linked_contract && p.linked_contract.attachment_path) ? '📄 打开关联合同扫描件' : '未上传合同扫描件'
+      files.length > 0 ? `点击打开资料(${files.length}份)` : '未上传'
     ]);
-
-    formulaCells.push({
-      r: rIdx,
-      c: 17,
-      f: `HYPERLINK("${procFolderLink}","📁 打开立项资料夹")`
-    });
-    formulaCells.push({
-      r: rIdx,
-      c: 18,
-      f: `HYPERLINK("${contractScanLink}","${(p.linked_contract && p.linked_contract.attachment_path) ? '📄 打开关联合同扫描件' : '未上传合同扫描件'}")`
-    });
   });
 
   const ws = XLSX.utils.aoa_to_sheet(aoa);
-  ws['!merges'] = merges;
+  ws['!merges'] = [{ s: { r: 0, c: 0 }, e: { r: 0, c: headers.length - 1 } }];
+  ws['!cols'] = [
+    { wch: 11 }, { wch: 18 }, { wch: 24 }, { wch: 12 }, { wch: 14 },
+    { wch: 13 }, { wch: 14 }, { wch: 13 }, { wch: 13 },
+    { wch: 11 }, { wch: 11 }, { wch: 11 }, { wch: 22 },
+    { wch: 13 }, { wch: 9 },  { wch: 19 }, { wch: 24 }, { wch: 20 }
+  ];
 
-  for (const fc of formulaCells) {
-    const addr = XLSX.utils.encode_cell({ r: fc.r, c: fc.c });
-    if (!ws[addr]) ws[addr] = { t: 's', v: '' };
-    ws[addr].f = fc.f;
-  }
+  ws['!rows'] = [{ hpt: 30 }, { hpt: 26 }];
+  const totalRows = aoa.length;
+  const centerCols = new Set([0, 1, 3, 4, 6, 7, 8, 9, 10, 11, 14, 15, 17]);
+  const moneyCols = new Set([5, 13]);
 
-  const range = XLSX.utils.decode_range(ws['!ref'] || 'A1:S2');
-  for (let R = range.s.r; R <= range.e.r; R++) {
-    for (let C = range.s.c; C <= range.e.c; C++) {
-      const addr = XLSX.utils.encode_cell({ r: R, c: C });
-      if (!ws[addr]) continue;
-      if (R === 0) {
-        ws[addr].s = {
-          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: '0F766E' } },
+  for (let r = 0; r < totalRows; r++) {
+    if (r >= 2) ws['!rows'][r] = { hpt: 24 };
+    for (let c = 0; c < headers.length; c++) {
+      const cellRef = XLSX.utils.encode_cell({ r, c });
+      if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
+
+      if (r === 0) {
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: 'FFFFFF' } },
+          fill: { fgColor: { rgb: '4C1D95' } },
           alignment: { horizontal: 'center', vertical: 'center' },
-          fill: { fgColor: { rgb: 'F0FDF4' } }
+          border: buildBorderSpec(false)
         };
-      } else if (R === 1) {
-        ws[addr].s = {
-          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: 'FFFFFF' } },
+      } else if (r === 1) {
+        ws[cellRef].s = {
+          font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '1E293B' } },
+          fill: { fgColor: { rgb: 'EDE9FE' } },
           alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
-          fill: { fgColor: { rgb: '0F766E' } }
+          border: buildBorderSpec(true)
         };
       } else {
-        const isOdd = (R % 2) === 1;
-        const isLinkCol = C >= 17;
-        ws[addr].s = {
+        const pItem = rows[r - 2];
+        const isOddRow = (r - 2) % 2 === 1;
+        const bgRgb = isOddRow ? 'F1F5F9' : 'FFFFFF';
+        const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
+
+        if (c === 17 && pItem.files && pItem.files.length > 0) {
+          const relUrl = escapeExcelFormulaStr(`uploads/${pItem.files[0].file_path}`);
+          const label = escapeExcelFormulaStr(`点击打开资料(${pItem.files.length}份)`);
+          ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: `点击打开资料(${pItem.files.length}份)` };
+        }
+
+        const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
+        ws[cellRef].s = {
           font: {
             name: '微软雅黑',
             sz: 10,
-            color: { rgb: isLinkCol ? '0D9488' : '1F2937' },
-            underline: isLinkCol
+            bold: c === 1 || c === 13,
+            underline: isHyperlinkCell,
+            color: { rgb: isHyperlinkCell ? '2563EB' : '0F172A' }
           },
-          alignment: { vertical: 'center', horizontal: isLinkCol ? 'center' : 'left' },
-          fill: { fgColor: { rgb: isOdd ? 'F0FDFA' : 'FFFFFF' } }
+          fill: { fgColor: { rgb: bgRgb } },
+          alignment: { horizontal: hAlign, vertical: 'center', wrapText: true },
+          border: buildBorderSpec(false),
+          ...(moneyCols.has(c) ? { numFmt: '#,##0.00' } : {})
         };
       }
     }
   }
 
-  ws['!cols'] = headers.map((h, i) => ({
-    wch: [8, 22, 30, 14, 16, 14, 16, 14, 14, 12, 16, 12, 28, 14, 12, 24, 20, 20, 22][i] || 15
-  }));
-
   return ws;
 }
 
-app.get(['/api/export/excel', '/api/contracts/export'], (req, res) => {
+// ==================== 13. Excel 三大导出路由 ====================
+app.get('/api/export/excel', (req, res) => {
   try {
-    const list = req.query.mode === 'all' ? queryFilteredContracts({}) : queryFilteredContracts(req.query);
+    const query = req.query.mode === 'all' ? {} : req.query;
+    const rows = queryFilteredContracts(query);
     const wb = XLSX.utils.book_new();
-    const ws = createContractWorksheet(list);
-    XLSX.utils.book_append_sheet(wb, ws, '合同台账');
+    XLSX.utils.book_append_sheet(wb, buildContractWorksheet(rows), '合同台账');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
-    const fname = encodeURIComponent(`合同管理台账_${getLocalTodayStr()}.xlsx`);
+    const fname = encodeURIComponent(`企业合同管理台账_${getLocalTodayStr()}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fname}`);
     res.send(buf);
   } catch (err) {
-    res.status(500).json({ success: false, message: '导出失败: ' + err.message });
+    res.status(500).send('导出合同Excel失败: ' + err.message);
   }
 });
 
-app.get(['/api/procurements/export', '/api/export/procurements'], (req, res) => {
+app.get('/api/procurements/export', (req, res) => {
   try {
-    const list = req.query.mode === 'all' ? queryFilteredProcurements({}) : queryFilteredProcurements(req.query);
+    const query = req.query.mode === 'all' ? {} : req.query;
+    const rows = queryFilteredProcurements(query);
     const wb = XLSX.utils.book_new();
-    const ws = createProcurementWorksheet(list);
-    XLSX.utils.book_append_sheet(wb, ws, '采购项目台账');
+    XLSX.utils.book_append_sheet(wb, buildProcurementWorksheet(rows), '采购项目台账');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 
-    const fname = encodeURIComponent(`采购项目台账_${getLocalTodayStr()}.xlsx`);
+    const fname = encodeURIComponent(`企业采购项目立项台账_${getLocalTodayStr()}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fname}`);
     res.send(buf);
   } catch (err) {
-    res.status(500).json({ success: false, message: '导出失败: ' + err.message });
+    res.status(500).send('导出采购Excel失败: ' + err.message);
   }
 });
 
 app.get('/api/export/combined', (req, res) => {
   try {
-    const contractList = queryFilteredContracts({});
-    const procList = queryFilteredProcurements({});
-
+    const contractRows = queryFilteredContracts({});
+    const procRows = queryFilteredProcurements({});
     const wb = XLSX.utils.book_new();
-    const wsContract = createContractWorksheet(contractList);
-    const wsProc = createProcurementWorksheet(procList);
-
-    XLSX.utils.book_append_sheet(wb, wsContract, '合同台账');
-    XLSX.utils.book_append_sheet(wb, wsProc, '采购项目台账');
-
+    XLSX.utils.book_append_sheet(wb, buildContractWorksheet(contractRows), '合同台账');
+    XLSX.utils.book_append_sheet(wb, buildProcurementWorksheet(procRows), '采购项目台账');
     const buf = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-    const fname = encodeURIComponent(`企业合同与采购项目总台账_${getLocalTodayStr()}.xlsx`);
+
+    const fname = encodeURIComponent(`企业合同与采购项目双台账总表_${getLocalTodayStr()}.xlsx`);
+    res.setHeader('Content-Disposition', `attachment; filename="${fname}"; filename*=UTF-8''${fname}`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Content-Disposition', `attachment; filename*=UTF-8''${fname}`);
     res.send(buf);
   } catch (err) {
-    res.status(500).json({ success: false, message: '合并导出失败: ' + err.message });
+    res.status(500).send('导出合并总表失败: ' + err.message);
   }
 });
 
-app.use((err, req, res, next) => {
-  cleanupReqTempFiles(req);
-  if (err instanceof multer.MulterError) {
-    if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ success: false, message: '单个上传文件不能超过 50MB' });
-    }
-    return res.status(400).json({ success: false, message: `文件上传异常: ${err.message}` });
-  }
-  if (err) {
-    return res.status(400).json({ success: false, message: err.message || '请求处理失败' });
-  }
-  next();
-});
+// ==================== 14. 服务启动与优雅退出封装 ====================
+let activeServer = null;
 
-// ==================== 14. 服务启动与优雅退出控制器 ====================
-const activeSockets = new Set();
-let serverInstance = null;
-
-const maintenanceTimer = setInterval(() => {
-  try {
-    autoRefreshExpiredContractStatus();
-    sweepOrphanUploads();
-    if (db && db.open) db.pragma('wal_checkpoint(PASSIVE)');
-    triggerSafeGC();
-  } catch (e) {}
-}, 6 * 60 * 60 * 1000);
-if (typeof maintenanceTimer.unref === 'function') maintenanceTimer.unref();
-
-function shutdown() {
-  return new Promise((resolve) => {
-    try {
-      clearInterval(maintenanceTimer);
-      cleanTmpDir();
-      sweepOrphanUploads();
-    } catch (e) {}
-
-    for (const socket of activeSockets) {
-      try { socket.destroy(); } catch (e) {}
-    }
-    activeSockets.clear();
-
-    const closeDb = () => {
-      try {
-        if (db && db.open) {
-          db.pragma('wal_checkpoint(TRUNCATE)');
-          db.close();
-        }
-      } catch (e) {}
-      resolve();
-    };
-
-    if (serverInstance && serverInstance.server) {
-      const srv = serverInstance.server;
-      serverInstance = null;
-      try {
-        srv.close(() => closeDb());
-        setTimeout(() => closeDb(), 1000).unref();
-      } catch (e) {
-        closeDb();
-      }
-    } else {
-      closeDb();
-    }
-  });
-}
-
-function startServer(customPort = DEFAULT_PORT, customHost = DEFAULT_HOST) {
+function startServer(port = PORT, host = '0.0.0.0') {
   return new Promise((resolve, reject) => {
-    const srv = app.listen(customPort, customHost, () => {
-      const addr = srv.address();
-      const actualPort = addr && typeof addr === 'object' ? addr.port : customPort;
-
-      const controller = {
-        port: actualPort,
-        server: srv,
-        app,
-        db,
-        shutdown,
-        closeServer: shutdown
-      };
-      serverInstance = controller;
-
-      console.log(`========================================================`);
-      console.log(`🚀 合同与采购立项全生命周期管理系统已启动！`);
-      console.log(`👉 本机访问地址: http://localhost:${actualPort}`);
-      const interfaces = os.networkInterfaces();
-      for (const name of Object.keys(interfaces)) {
-        for (const net of interfaces[name] || []) {
-          if (net.family === 'IPv4' && !net.internal) {
-            console.log(`🌐 局域网共享地址: http://${net.address}:${actualPort}`);
-          }
-        }
-      }
-      console.log(`========================================================`);
-
-      resolve(controller);
-    });
-
-    srv.on('error', (err) => reject(err));
-    srv.on('connection', (socket) => {
-      activeSockets.add(socket);
-      socket.on('close', () => activeSockets.delete(socket));
-    });
+    try {
+      const srv = app.listen(port, host, () => {
+        activeServer = srv;
+        const actualPort = srv.address().port;
+        console.log(`✅ 台账服务已启动: http://127.0.0.1:${actualPort}`);
+        resolve({
+          server: srv,
+          port: actualPort,
+          shutdown: () => new Promise(resClose => {
+            srv.close(() => {
+              try { db.close(); } catch (e) {}
+              resClose();
+            });
+          })
+        });
+      });
+      srv.on('error', reject);
+    } catch (err) {
+      reject(err);
+    }
   });
 }
 
 if (require.main === module) {
-  startServer(DEFAULT_PORT, DEFAULT_HOST);
+  startServer(PORT, '0.0.0.0').catch(err => {
+    console.error('启动失败:', err);
+    process.exit(1);
+  });
 }
 
-module.exports = {
-  app,
-  db,
-  startServer,
-  shutdown,
-  closeServer: shutdown
-};
+module.exports = { app, db, startServer };
