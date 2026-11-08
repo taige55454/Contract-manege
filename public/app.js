@@ -1,5 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.1 排他绑定与一键解绑版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.2 全标准下拉菜单版)
  */
 
 let currentTab = 'contract';
@@ -193,10 +193,6 @@ function pickDateToInput(pickerEl, targetInputId, isSignDate) {
   }
 }
 
-/**
- * 所有到期日（合同到期日、履约保证金应退日、质保金到期日）动态色彩渐变渲染器：
- * 随着剩余时间逼近，由绿色 (Hue=135°) -> 黄色 (60°) -> 橙色 (30°) -> 红色 (0°) 平滑渐变，且时间越近颜色越深！
- */
 function renderDueChip(dateStr, isReturned = false) {
   if (!dateStr) return '<span style="color:#9ca3af;">-</span>';
   if (isReturned) {
@@ -231,42 +227,59 @@ function renderDueChip(dateStr, isReturned = false) {
   return `<span class="due-chip" style="background:hsl(142, 72%, ${safeBgLight}%);color:hsl(142, 82%, 24%);border:1px solid hsl(142, 65%, 76%);font-weight:500;">${escapeHtml(dateStr)} (${diffDays}天)</span>`;
 }
 
-// ==================== 2. 自定义下拉选项与预设词库引擎 ====================
+// ==================== 2. 自定义下拉选项引擎（全部 8 项均采用原生 <select> 标准下拉） ====================
 function populateSelectWithOptions(selectId, optionsArr, placeholderText = null, defaultSelectedVal = null) {
   const el = document.getElementById(selectId);
   if (!el) return;
   const prevVal = el.value;
+  const list = Array.isArray(optionsArr) ? optionsArr : [];
   let html = '';
   if (placeholderText !== null) {
     html += `<option value="">${escapeHtml(placeholderText)}</option>`;
   }
-  for (const item of (optionsArr || [])) {
+  for (const item of list) {
     html += `<option value="${escapeHtml(item)}">${escapeHtml(item)}</option>`;
   }
   el.innerHTML = html;
-  if (prevVal && (optionsArr.includes(prevVal) || prevVal === '')) {
+  if (prevVal && (list.includes(prevVal) || (placeholderText !== null && prevVal === ''))) {
     el.value = prevVal;
-  } else if (defaultSelectedVal && optionsArr.includes(defaultSelectedVal)) {
+  } else if (defaultSelectedVal && list.includes(defaultSelectedVal)) {
     el.value = defaultSelectedVal;
+  } else if (placeholderText !== null) {
+    el.value = '';
+  } else if (list.length > 0) {
+    el.value = list[0];
   }
-}
-
-function populateDatalistWithOptions(datalistId, optionsArr) {
-  const el = document.getElementById(datalistId);
-  if (!el) return;
-  el.innerHTML = (optionsArr || []).map(item => `<option value="${escapeHtml(item)}"></option>`).join('');
 }
 
 function setSelectValueWithFallback(selectId, val) {
   const el = document.getElementById(selectId);
   if (!el) return;
   const cleanVal = String(val ?? '').trim();
-  if (!cleanVal) return;
+  if (!cleanVal) {
+    const hasEmpty = Array.from(el.options).some(opt => opt.value === '');
+    if (hasEmpty) el.value = '';
+    return;
+  }
   const exists = Array.from(el.options).some(opt => opt.value === cleanVal);
   if (!exists) {
-    el.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(cleanVal)}">${escapeHtml(cleanVal)} (历史值)</option>`);
+    el.insertAdjacentHTML('beforeend', `<option value="${escapeHtml(cleanVal)}">${escapeHtml(cleanVal)}</option>`);
   }
   el.value = cleanVal;
+}
+
+/**
+ * 构建对方单位卡片中的【发票类型】标准 <select> 选项 HTML
+ */
+function buildInvoiceTypeOptionsHtml(selectedVal) {
+  const list = (dropdownPresets.invoice_types && dropdownPresets.invoice_types.length > 0)
+    ? [...dropdownPresets.invoice_types]
+    : ['增值税专用发票', '增值税普通发票', '数电专票', '数电普票'];
+  const cleanSel = String(selectedVal ?? '').trim() || list[0];
+  if (cleanSel && !list.includes(cleanSel)) {
+    list.push(cleanSel);
+  }
+  return list.map(inv => `<option value="${escapeHtml(inv)}" ${inv === cleanSel ? 'selected' : ''}>${escapeHtml(inv)}</option>`).join('');
 }
 
 function applyDropdownPresetsToDOM() {
@@ -277,19 +290,29 @@ function applyDropdownPresetsToDOM() {
 
   const { activeLabel } = getDynamicContractStatusPair();
 
+  // 顶部筛选栏下拉框
   populateSelectWithOptions('filter_type', dropdownPresets.contract_types, '全部类型');
   populateSelectWithOptions('filter_status', dropdownPresets.contract_statuses, '全部状态');
   populateSelectWithOptions('proc_filter_type', dropdownPresets.project_types, '全部立项类型');
+  populateSelectWithOptions('proc_filter_dept', dropdownPresets.cost_departments, '全部费用承担部门');
 
+  // 合同表单标准下拉框
   populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null, dropdownPresets.contract_types[0] || '采购');
   populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null, activeLabel);
-  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null, dropdownPresets.project_types[0] || '服务类项目');
-  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null, dropdownPresets.procurement_types[0] || '小额零星采购');
 
-  populateDatalistWithOptions('dept_list', dropdownPresets.cost_departments);
-  populateDatalistWithOptions('budget_subject_list', dropdownPresets.budget_subjects);
-  populateDatalistWithOptions('proc_method_list', dropdownPresets.procurement_methods);
-  populateDatalistWithOptions('invoice_type_list', dropdownPresets.invoice_types);
+  // 采购立项表单标准下拉框（全部统一为 <select>，不再使用 input+datalist）
+  populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null, dropdownPresets.project_types[0] || '服务类项目');
+  populateSelectWithOptions('p_cost_department', dropdownPresets.cost_departments, null, dropdownPresets.cost_departments[0] || '');
+  populateSelectWithOptions('p_budget_subject', dropdownPresets.budget_subjects, '-- 请选择预算科目(选填) --', '');
+  populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null, dropdownPresets.procurement_types[0] || '小额零星采购');
+  populateSelectWithOptions('p_procurement_method', dropdownPresets.procurement_methods, null, dropdownPresets.procurement_methods[0] || '合作谈判');
+
+  // 同步更新已打开的对方单位卡片中的【发票类型】<select>
+  document.querySelectorAll('#counterparties_container select.cp-invoice').forEach(sel => {
+    const curVal = sel.value;
+    sel.innerHTML = buildInvoiceTypeOptionsHtml(curVal);
+    sel.value = curVal;
+  });
 }
 
 async function loadDropdownPresets() {
@@ -348,7 +371,8 @@ async function savePresetsForm(e) {
     dropdownPresets = json.presets;
     applyDropdownPresetsToDOM();
     closePresetsModal();
-    await loadContracts();
+    if (currentTab === 'procurement') await loadProcurements();
+    else await loadContracts();
   }
 }
 
@@ -906,7 +930,7 @@ function renderContractLedgerTable(list) {
   tbody.innerHTML = htmlRows.join('');
 }
 
-// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片（排他过滤已绑定的立项） ====================
+// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片（发票类型改为标准 <select>） ====================
 function removeCounterpartyCard(btnEl) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
@@ -925,6 +949,7 @@ function addCounterpartyCard(data = {}) {
   const pStatus = data.perf_bond_status || '无';
   const wStatus = data.warranty_bond_status || '无';
   const initTax = formatSmartTaxRate(data.tax_rate ?? '6%');
+  const invoiceOptionsHtml = buildInvoiceTypeOptionsHtml(data.invoice_type || defaultInv);
 
   const card = document.createElement('div');
   card.className = 'party-card';
@@ -987,7 +1012,7 @@ function addCounterpartyCard(data = {}) {
       <div class="form-group">
         <label>发票类型 & 币种</label>
         <div style="display:flex;gap:4px;">
-          <input type="text" class="cp-invoice" style="flex:1;min-width:0;" list="invoice_type_list" value="${escapeHtml(data.invoice_type || defaultInv)}" />
+          <select class="cp-invoice" style="flex:1;min-width:0;">${invoiceOptionsHtml}</select>
           <input type="text" class="cp-currency" style="width:58px;text-align:center;" value="${escapeHtml(data.currency || 'CNY')}" placeholder="币种" />
         </div>
       </div>
@@ -1052,6 +1077,7 @@ function calcExclTaxForCard(inputEl) {
 function collectCounterpartiesFromDOM() {
   const cards = document.querySelectorAll('#counterparties_container .party-card');
   const arr = [];
+  const defaultInv = (dropdownPresets.invoice_types && dropdownPresets.invoice_types[0]) || '增值税专用发票';
   cards.forEach(card => {
     const perfAmt = Number(card.querySelector('.cp-perf-amt')?.value || 0);
     let perfStatus = card.querySelector('.cp-perf-status')?.value || '无';
@@ -1074,7 +1100,7 @@ function collectCounterpartiesFromDOM() {
       amount: Number(card.querySelector('.cp-amount')?.value || 0),
       tax_rate: formatSmartTaxRate(card.querySelector('.cp-tax-rate')?.value || ''),
       amount_excl_tax: Number(card.querySelector('.cp-amount-excl')?.value || 0),
-      invoice_type: card.querySelector('.cp-invoice')?.value.trim() || '增值税专用发票',
+      invoice_type: card.querySelector('.cp-invoice')?.value.trim() || defaultInv,
       currency: card.querySelector('.cp-currency')?.value.trim() || 'CNY',
       perf_bond_amount: perfAmt,
       perf_bond_status: perfStatus,
@@ -1179,6 +1205,7 @@ async function openFormModal(editId = null) {
     document.getElementById('f_expiry_date').value = `${new Date().getFullYear() + 1}-${today.slice(5)}`;
     const rmkEl = document.getElementById('f_remark');
     if (rmkEl) rmkEl.value = '';
+    setSelectValueWithFallback('f_contract_type', (dropdownPresets.contract_types && dropdownPresets.contract_types[0]) || '采购');
     setSelectValueWithFallback('f_status', activeLabel);
     document.getElementById('seg_mid_custom_input').value = contractRule.default_mid || '';
     toggleFreeContractNoMode(false);
@@ -1276,7 +1303,7 @@ async function deleteContractRecord(id, no) {
   }
 }
 
-// ==================== 9. 采购项目立项台账主表与表单逻辑（排他过滤已绑定的合同） ====================
+// ==================== 9. 采购项目立项台账主表与表单逻辑（全部采用标准 <select> 下拉框） ====================
 function buildProcQueryParams() {
   const p = new URLSearchParams();
   const kw = document.getElementById('proc_filter_kw')?.value.trim();
@@ -1430,13 +1457,21 @@ async function openProcurementFormModal(editId = null) {
   const pfEl = document.getElementById('p_procurement_files');
   if (pfEl) pfEl.value = '';
   const today = getLocalTodayStr();
+
+  const defaultProjectType = (dropdownPresets.project_types && dropdownPresets.project_types[0]) || '服务类项目';
+  const defaultDept = (dropdownPresets.cost_departments && dropdownPresets.cost_departments[0]) || '';
+  const defaultProcType = (dropdownPresets.procurement_types && dropdownPresets.procurement_types[0]) || '小额零星采购';
   const defaultMethod = (dropdownPresets.procurement_methods && dropdownPresets.procurement_methods[0]) || '合作谈判';
 
   if (!editId) {
     document.getElementById('p_form_id').value = '';
     document.getElementById('proc_form_modal_title').textContent = '🛒 新增采购项目立项台账';
     document.getElementById('p_approval_date').value = today;
-    document.getElementById('p_procurement_method').value = defaultMethod;
+    setSelectValueWithFallback('p_project_type', defaultProjectType);
+    setSelectValueWithFallback('p_cost_department', defaultDept);
+    setSelectValueWithFallback('p_budget_subject', '');
+    setSelectValueWithFallback('p_procurement_type', defaultProcType);
+    setSelectValueWithFallback('p_procurement_method', defaultMethod);
     document.getElementById('p_seg_mid_custom_input').value = procRule.default_mid || '';
     toggleFreeProcNoMode(false);
     await populateContractDropdownInProcForm(null, null);
@@ -1451,12 +1486,12 @@ async function openProcurementFormModal(editId = null) {
     toggleFreeProcNoMode(true);
     document.getElementById('p_procurement_no').value = p.procurement_no;
     document.getElementById('p_project_name').value = p.project_name;
-    setSelectValueWithFallback('p_project_type', p.project_type);
-    document.getElementById('p_cost_department').value = p.cost_department || '';
+    setSelectValueWithFallback('p_project_type', p.project_type || defaultProjectType);
+    setSelectValueWithFallback('p_cost_department', p.cost_department || defaultDept);
     document.getElementById('p_budget_amount').value = p.budget_amount || '';
-    document.getElementById('p_budget_subject').value = p.budget_subject || '';
-    setSelectValueWithFallback('p_procurement_type', p.procurement_type);
-    document.getElementById('p_procurement_method').value = p.procurement_method || defaultMethod;
+    setSelectValueWithFallback('p_budget_subject', p.budget_subject || '');
+    setSelectValueWithFallback('p_procurement_type', p.procurement_type || defaultProcType);
+    setSelectValueWithFallback('p_procurement_method', p.procurement_method || defaultMethod);
     document.getElementById('p_approval_date').value = p.approval_date || '';
     document.getElementById('p_decision_date').value = p.decision_date || '';
     document.getElementById('p_completion_date').value = p.completion_date || '';
