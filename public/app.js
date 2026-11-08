@@ -1,5 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.0 终极定稿完整版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.1 排他绑定与一键解绑版)
  */
 
 let currentTab = 'contract';
@@ -207,14 +207,12 @@ function renderDueChip(dateStr, isReturned = false) {
   const diffDays = Math.ceil((new Date(dateStr) - new Date(today)) / (86400 * 1000));
   if (isNaN(diffDays)) return `<span>${escapeHtml(dateStr)}</span>`;
 
-  // 1. 已超期 (< 0天)：深红色高对比强预警，超期越久红得越深沉
   if (diffDays < 0) {
     const overDays = Math.abs(diffDays);
     const bgLight = Math.max(30, 44 - Math.min(overDays, 45) * 0.3);
     return `<span class="due-chip" style="background:hsl(0, 84%, ${bgLight.toFixed(0)}%);color:#ffffff;font-weight:700;box-shadow:0 1px 3px rgba(185,28,28,0.35);">${escapeHtml(dateStr)} (超期${overDays}天)</span>`;
   }
 
-  // 2. 0 ~ 90天内：由绿(135°) -> 黄(60°) -> 橙(28°) -> 红(0°) 连续渐变，且越逼近 0 天背景色越深、文字越醒目
   if (diffDays <= 90) {
     const ratio = diffDays / 90;
     const hue = Math.round(ratio * 135);
@@ -228,7 +226,6 @@ function renderDueChip(dateStr, isReturned = false) {
     return `<span class="due-chip" style="background:hsl(${hue}, ${sat}%, ${bgLight}%);color:hsl(${hue}, 90%, ${textLight}%);border:1px solid hsl(${hue}, ${sat}%, ${borderLight}%);font-weight:${weight};">${escapeHtml(dateStr)} (${tip})</span>`;
   }
 
-  // 3. > 90天（宽裕安全期）：清爽翠绿底色，离 90 天越近绿色略微加深
   const safeRatio = Math.min(1, (diffDays - 90) / 275);
   const safeBgLight = Math.round(90 + safeRatio * 5);
   return `<span class="due-chip" style="background:hsl(142, 72%, ${safeBgLight}%);color:hsl(142, 82%, 24%);border:1px solid hsl(142, 65%, 76%);font-weight:500;">${escapeHtml(dateStr)} (${diffDays}天)</span>`;
@@ -760,7 +757,7 @@ function toggleFreeProcNoMode(forceFree) {
   document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
 }
 
-// ==================== 7. 合同管理台账主表渲染（年份序号 + 履约摘要与备注完整换行 + 银行四要素 + 绿转红渐变） ====================
+// ==================== 7. 合同管理台账主表渲染 ====================
 function buildContractQueryParams() {
   const p = new URLSearchParams();
   const no = document.getElementById('filter_no')?.value.trim();
@@ -909,7 +906,7 @@ function renderContractLedgerTable(list) {
   tbody.innerHTML = htmlRows.join('');
 }
 
-// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片（履约摘要独占一行 + 分项备注独占一行） ====================
+// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片（排他过滤已绑定的立项） ====================
 function removeCounterpartyCard(btnEl) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
@@ -953,7 +950,6 @@ function addCounterpartyCard(data = {}) {
         </div>
       </div>
 
-      <!-- 履约摘要：单独占满整行（span-4），采用多行文本框方便输入较长内容 -->
       <div class="form-group span-4">
         <label>履约摘要（单独占一行，支持换行输入详细履约内容、核心标的或结算节点）</label>
         <textarea class="cp-summary" rows="2" placeholder="请输入本单位负责的具体履约摘要内容...">${escapeHtml(data.summary || '')}</textarea>
@@ -1021,7 +1017,6 @@ function addCounterpartyCard(data = {}) {
         </div>
       </div>
 
-      <!-- 分项备注：单独占满整行（span-4） -->
       <div class="form-group span-4">
         <label>备注（本单位分项备注，独占一行）</label>
         <input type="text" class="cp-remark" value="${escapeHtml(data.remark || '')}" placeholder="针对该对方单位的分项补充备注（选填）" />
@@ -1093,26 +1088,58 @@ function collectCounterpartiesFromDOM() {
   return arr;
 }
 
-async function populateProcDropdownInContractForm(selectedId = null) {
+/**
+ * 在合同表单中加载可选的采购立项：
+ * 排他过滤：已经绑定了其他合同的采购立项不再显示，除非解绑后才恢复显示！
+ */
+async function populateProcDropdownInContractForm(selectedId = null, currentContractId = null) {
   const sel = document.getElementById('f_procurement_id');
   if (!sel) return;
   try {
     const res = await apiFetch('/api/procurements');
     const json = await res.json();
     const list = json.data || [];
-    sel.innerHTML = `<option value="">-- 暂不关联采购立项 (或稍后在采购台账中反向关联) --</option>` + list.map(p => {
+
+    const availableList = list.filter(p => {
+      if (selectedId && Number(p.id) === Number(selectedId)) return true;
+      const boundContractId = p.contract_id || (p.linked_contract && p.linked_contract.id) || null;
+      if (!boundContractId) return true;
+      if (currentContractId && Number(boundContractId) === Number(currentContractId)) return true;
+      return false;
+    });
+
+    sel.innerHTML = `<option value="">-- 暂不关联采购立项 (已绑定的立项已自动隐藏) --</option>` + availableList.map(p => {
+      const isCurrentBound = selectedId && Number(p.id) === Number(selectedId);
       return `<option value="${p.id}"
         data-name="${escapeHtml(p.project_name)}"
         data-supplier="${escapeHtml(p.supplier_name || '')}"
         data-amount="${p.deal_amount || p.budget_amount || 0}">
-        ${escapeHtml(p.procurement_no)} - ${escapeHtml(p.project_name)}
+        ${escapeHtml(p.procurement_no)} - ${escapeHtml(p.project_name)}${isCurrentBound ? ' (当前已绑定)' : ''}
       </option>`;
     }).join('');
-    if (selectedId) sel.value = String(selectedId);
+    sel.value = selectedId ? String(selectedId) : '';
+    updateUnbindBtnVisibilityInContractForm();
   } catch (e) {}
 }
 
+function updateUnbindBtnVisibilityInContractForm() {
+  const sel = document.getElementById('f_procurement_id');
+  const btn = document.getElementById('btn_unbind_proc_in_form');
+  if (btn && sel) {
+    btn.classList.toggle('hidden', !sel.value);
+  }
+}
+
+function clearLinkedProcInContractForm() {
+  const sel = document.getElementById('f_procurement_id');
+  if (sel) {
+    sel.value = '';
+    updateUnbindBtnVisibilityInContractForm();
+  }
+}
+
 function onSelectLinkedProcurementInContractForm(sel) {
+  updateUnbindBtnVisibilityInContractForm();
   const opt = sel.options[sel.selectedIndex];
   if (!opt || !sel.value) return;
   const nameInput = document.getElementById('f_contract_name');
@@ -1156,7 +1183,7 @@ async function openFormModal(editId = null) {
     document.getElementById('seg_mid_custom_input').value = contractRule.default_mid || '';
     toggleFreeContractNoMode(false);
     addCounterpartyCard();
-    await populateProcDropdownInContractForm(null);
+    await populateProcDropdownInContractForm(null, null);
     await fillAutoContractNo(today);
   } else {
     const res = await apiFetch(`/api/contracts/${editId}`);
@@ -1177,7 +1204,8 @@ async function openFormModal(editId = null) {
     const rmkEl = document.getElementById('f_remark');
     if (rmkEl) rmkEl.value = c.remark || '';
     syncContractStatusByExpiryDate(c.expiry_date);
-    await populateProcDropdownInContractForm(c.procurement_id);
+    const linkedProcId = c.procurement_id || (c.linked_procurement && c.linked_procurement.id) || null;
+    await populateProcDropdownInContractForm(linkedProcId, c.id);
     (c.counterparties || [{}]).forEach(cp => addCounterpartyCard(cp));
   }
 
@@ -1248,7 +1276,7 @@ async function deleteContractRecord(id, no) {
   }
 }
 
-// ==================== 9. 采购项目立项台账主表与表单逻辑（第一列同样采用 YYYY-001 年份序号格式） ====================
+// ==================== 9. 采购项目立项台账主表与表单逻辑（排他过滤已绑定的合同） ====================
 function buildProcQueryParams() {
   const p = new URLSearchParams();
   const kw = document.getElementById('proc_filter_kw')?.value.trim();
@@ -1335,18 +1363,53 @@ function renderProcurementTable(list) {
   }).join('');
 }
 
-async function populateContractDropdownInProcForm(selectedContractId = null) {
+/**
+ * 在采购立项表单中加载可选的已有合同：
+ * 排他过滤：已经绑定了其他采购立项的合同自动隐藏，除非解绑后才恢复显示！
+ */
+async function populateContractDropdownInProcForm(selectedContractId = null, currentProcId = null) {
   const sel = document.getElementById('p_contract_id');
   if (!sel) return;
   try {
     const res = await apiFetch('/api/contracts');
     const json = await res.json();
     const list = json.data || [];
-    sel.innerHTML = `<option value="">-- 暂不绑定已有合同 (或右侧直接手填合同编号) --</option>` + list.map(c => {
-      return `<option value="${c.id}" data-no="${escapeHtml(c.contract_no)}">${escapeHtml(c.contract_no)} - ${escapeHtml(c.contract_name)}</option>`;
+
+    const availableList = list.filter(c => {
+      if (selectedContractId && Number(c.id) === Number(selectedContractId)) return true;
+      const boundProcId = c.procurement_id || (c.linked_procurement && c.linked_procurement.id) || null;
+      if (!boundProcId) return true;
+      if (currentProcId && Number(boundProcId) === Number(currentProcId)) return true;
+      return false;
+    });
+
+    sel.innerHTML = `<option value="">-- 暂不绑定已有合同 (已绑定的合同已自动隐藏) --</option>` + availableList.map(c => {
+      const isCurrentBound = selectedContractId && Number(c.id) === Number(selectedContractId);
+      return `<option value="${c.id}" data-no="${escapeHtml(c.contract_no)}">${escapeHtml(c.contract_no)} - ${escapeHtml(c.contract_name)}${isCurrentBound ? ' (当前已绑定)' : ''}</option>`;
     }).join('');
-    if (selectedContractId) sel.value = String(selectedContractId);
+    sel.value = selectedContractId ? String(selectedContractId) : '';
+    updateUnbindBtnVisibilityInProcForm();
   } catch (e) {}
+}
+
+function updateUnbindBtnVisibilityInProcForm() {
+  const sel = document.getElementById('p_contract_id');
+  const manual = document.getElementById('p_contract_no_manual');
+  const btn = document.getElementById('btn_unbind_contract_in_form');
+  if (btn) {
+    const hasLink = Boolean((sel && sel.value) || (manual && manual.value.trim()));
+    btn.classList.toggle('hidden', !hasLink);
+  }
+}
+
+function clearLinkedContractInProcForm() {
+  const sel = document.getElementById('p_contract_id');
+  const manual = document.getElementById('p_contract_no_manual');
+  const hasC = document.getElementById('p_has_contract');
+  if (sel) sel.value = '';
+  if (manual) manual.value = '';
+  if (hasC) hasC.value = '否';
+  updateUnbindBtnVisibilityInProcForm();
 }
 
 function onSelectLinkedContractInProcForm(sel) {
@@ -1354,7 +1417,10 @@ function onSelectLinkedContractInProcForm(sel) {
   if (opt && sel.value) {
     document.getElementById('p_contract_no_manual').value = opt.dataset.no || '';
     document.getElementById('p_has_contract').value = '是';
+  } else {
+    document.getElementById('p_contract_no_manual').value = '';
   }
+  updateUnbindBtnVisibilityInProcForm();
 }
 
 async function openProcurementFormModal(editId = null) {
@@ -1373,7 +1439,7 @@ async function openProcurementFormModal(editId = null) {
     document.getElementById('p_procurement_method').value = defaultMethod;
     document.getElementById('p_seg_mid_custom_input').value = procRule.default_mid || '';
     toggleFreeProcNoMode(false);
-    await populateContractDropdownInProcForm(null);
+    await populateContractDropdownInProcForm(null, null);
     await fillAutoProcurementNo(today);
   } else {
     const res = await apiFetch(`/api/procurements/${editId}`);
@@ -1399,7 +1465,8 @@ async function openProcurementFormModal(editId = null) {
     document.getElementById('p_has_contract').value = p.has_contract || '否';
     document.getElementById('p_contract_no_manual').value = p.contract_no_manual || '';
     document.getElementById('p_remark').value = p.remark || '';
-    await populateContractDropdownInProcForm(p.contract_id);
+    const linkedContractId = p.contract_id || (p.linked_contract && p.linked_contract.id) || null;
+    await populateContractDropdownInProcForm(linkedContractId, p.id);
   }
 
   document.getElementById('proc_form_modal').classList.remove('hidden');
@@ -1470,7 +1537,26 @@ async function deleteProcRecord(id, no) {
   }
 }
 
-// ==================== 10. 全能详情与三大文件在线预览/一键补传/单文件删除中心 ====================
+// ==================== 10. 全能详情与三大文件在线预览 / 一键解绑中心 ====================
+async function unbindInDetailModal(mode, id) {
+  const tip = mode === 'contract'
+    ? '确定解除该合同与采购立项的绑定吗？\n解绑后，双方将恢复为未绑定状态，可在下拉列表中重新被其他记录选择。'
+    : '确定解除该采购立项与合同的绑定吗？\n解绑后，双方将恢复为未绑定状态，可在下拉列表中重新被其他记录选择。';
+  if (!confirm(tip)) return;
+
+  const url = mode === 'contract'
+    ? `/api/contracts/${id}/unbind-procurement`
+    : `/api/procurements/${id}/unbind-contract`;
+
+  const res = await apiFetch(url, { method: 'POST' });
+  const json = await res.json();
+  if (json.success) {
+    await openDetailModal(mode, id);
+    await loadContracts();
+    await loadProcurements();
+  }
+}
+
 async function quickUploadContractMainScan(contractId, inputEl) {
   if (!inputEl.files || !inputEl.files[0]) return;
   const fd = new FormData();
@@ -1608,10 +1694,13 @@ async function openDetailModal(mode, id) {
         <h4>
           <span>② 关联采购立项及立项资料 (${procFiles.length}份)</span>
           ${c.linked_procurement ? `
-            <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
-              + 补传立项资料
-              <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${c.linked_procurement.id}, this, 'contract', ${c.id})" />
-            </label>
+            <div style="display:flex;gap:6px;">
+              <button type="button" class="btn btn-danger btn-sm" onclick="unbindInDetailModal('contract', ${c.id})">🔓 解除绑定</button>
+              <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
+                + 补传立项资料
+                <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${c.linked_procurement.id}, this, 'contract', ${c.id})" />
+              </label>
+            </div>
           ` : ''}
         </h4>
         ${c.linked_procurement
@@ -1668,6 +1757,8 @@ async function openDetailModal(mode, id) {
     document.getElementById('detail_modal_title').textContent = `🛒 采购立项详情：${p.procurement_no} - ${p.project_name}`;
 
     const files = p.files || [];
+    const hasAnyContractBind = Boolean(p.linked_contract || p.contract_id || p.contract_no_manual);
+
     fieldsBox.innerHTML = `
       <div class="detail-card">
         <h4>📌 采购立项核心信息</h4>
@@ -1701,15 +1792,24 @@ async function openDetailModal(mode, id) {
       </div>
 
       <div class="detail-card">
-        <h4>📄 关联合同扫描件直连</h4>
-        ${p.linked_contract && p.linked_contract.attachment_path
-          ? `<div class="related-list-item">
-               <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 主扫描件</span>
-               <div class="factions">
-                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(p.linked_contract.attachment_path)}', '${escapeJsStr(p.linked_contract.contract_no)}')">预览</button>
-               </div>
-             </div>`
-          : `<div style="color:#9ca3af;">暂未关联已上传扫描件的合同</div>`}
+        <h4>
+          <span>📄 关联合同及扫描件直连</span>
+          ${hasAnyContractBind ? `<button type="button" class="btn btn-danger btn-sm" onclick="unbindInDetailModal('procurement', ${p.id})">🔓 解除绑定</button>` : ''}
+        </h4>
+        ${p.linked_contract
+          ? `<div style="margin-bottom:6px;font-weight:600;color:#1e40af;">已绑定合同：${escapeHtml(p.linked_contract.contract_no)} (${escapeHtml(p.linked_contract.contract_name)})</div>` +
+            (p.linked_contract.attachment_path
+              ? `<div class="related-list-item">
+                   <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 主合同扫描件</span>
+                   <div class="factions">
+                     <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(p.linked_contract.attachment_path)}', '${escapeJsStr(p.linked_contract.contract_no)}')">预览</button>
+                     <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(p.linked_contract.attachment_path)}?download=1`)}">下载</a>
+                   </div>
+                 </div>`
+              : `<div style="color:#9ca3af;">该合同暂未上传主合同扫描件</div>`)
+          : (p.contract_no_manual
+              ? `<div style="color:#d97706;">预填待绑定合同号：${escapeHtml(p.contract_no_manual)}</div>`
+              : `<div style="color:#9ca3af;">暂未关联合同</div>`)}
       </div>
     `;
 
