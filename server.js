@@ -16,7 +16,7 @@ app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 // ==================== 1. 存储路径与上传目录初始化 ====================
 const DATA_ROOT = process.env.DATA_ROOT || __dirname;
 const DB_PATH = process.env.DB_PATH || path.join(DATA_ROOT, 'database.sqlite');
-const UPLOAD_DIR = path.join(DATA_ROOT, 'uploads');
+const UPLOAD_DIR = path.join(UPLOAD_DIR_ENV = path.join(DATA_ROOT, 'uploads'));
 const RELATED_UPLOAD_DIR = path.join(UPLOAD_DIR, 'related');
 const PROC_UPLOAD_DIR = path.join(UPLOAD_DIR, 'procurement');
 
@@ -301,10 +301,10 @@ db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_securit
 db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('dropdown_presets', ?)`).run(JSON.stringify(DEFAULT_DROPDOWN_PRESETS));
 db.prepare(`INSERT OR IGNORE INTO app_settings (key, value) VALUES ('lan_secret_salt', ?)`).run(crypto.randomBytes(24).toString('hex'));
 
-// 若数据库中残留旧的实体名称，平滑更新为脱敏后的 ABC公司
+// 确保默认签约主体非空，默认为脱敏后的 ABC公司
 const entRow = db.prepare(`SELECT value FROM app_settings WHERE key = 'default_our_entity'`).get();
-if (entRow && (!entRow.value || entRow.value.includes('毕节'))) {
-  db.prepare(`UPDATE app_settings SET value = 'ABC公司' WHERE key = 'default_our_entity'`).run();
+if (!entRow || !String(entRow.value || '').trim()) {
+  db.prepare(`INSERT OR REPLACE INTO app_settings (key, value) VALUES ('default_our_entity', 'ABC公司')`).run();
 }
 
 function getDropdownPresets() {
@@ -1027,7 +1027,7 @@ function queryFilteredContracts(query) {
   const params = {};
 
   if (no && no.trim()) {
-    conditions.push(`(contract_no LIKE @no OR contract_name LIKE @no OR seq_no LIKE @no OR summary LIKE @no OR counterparties_json LIKE @no)`);
+    conditions.push(`(contract_no LIKE @no OR contract_name LIKE @no OR seq_no LIKE @no OR summary LIKE @no OR remark LIKE @no OR counterparties_json LIKE @no)`);
     params.no = `%${no.trim()}%`;
   }
   if (counterparty && counterparty.trim()) {
@@ -1422,7 +1422,7 @@ function queryFilteredProcurements(query) {
   const params = {};
 
   if (kw && kw.trim()) {
-    conditions.push(`(procurement_no LIKE @kw OR project_name LIKE @kw OR supplier_name LIKE @kw OR budget_subject LIKE @kw OR contract_no_manual LIKE @kw)`);
+    conditions.push(`(seq_no LIKE @kw OR procurement_no LIKE @kw OR project_name LIKE @kw OR supplier_name LIKE @kw OR budget_subject LIKE @kw OR contract_no_manual LIKE @kw OR remark LIKE @kw)`);
     params.kw = `%${kw.trim()}%`;
   }
   if (year && year.trim()) {
@@ -1711,7 +1711,7 @@ function buildBorderSpec(isGroupBottom = false) {
 
 function buildContractWorksheet(rows) {
   // 共 35 列 (索引 0 ~ 34，对应 Excel 的 A 列 ~ AI 列)
-  // 表头去掉所有括号赘述，规范为“履约摘要”和“备注”
+  // 表头规范为“履约摘要”和“备注”
   const headers = [
     '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
     '签订日期', '开始履约日', '合同到期日', '状态',
