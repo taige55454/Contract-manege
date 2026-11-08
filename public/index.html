@@ -206,7 +206,9 @@
         <select id="proc_filter_type" onchange="loadProcurements()">
           <option value="">全部立项类型</option>
         </select>
-        <input type="text" id="proc_filter_dept" placeholder="搜费用承担部门" style="width:140px;" onkeydown="if(event.key==='Enter') loadProcurements()" />
+        <select id="proc_filter_dept" onchange="loadProcurements()">
+          <option value="">全部费用承担部门</option>
+        </select>
         <select id="proc_filter_has_contract" onchange="loadProcurements()">
           <option value="">是否签合同(全部)</option>
           <option value="是">是 (需签合同)</option>
@@ -286,44 +288,44 @@
   <div id="presets_modal" class="modal hidden">
     <div class="modal-content" style="max-width: 780px;">
       <div class="modal-header">
-        <h3>🎛️ 自定义下拉选项与常用词库预设</h3>
+        <h3>🎛️ 自定义下拉选项预设</h3>
         <button class="close-btn" onclick="closePresetsModal()">&times;</button>
       </div>
       <form onsubmit="savePresetsForm(event)" style="padding: 16px 20px; overflow-y:auto;">
         <p style="font-size:12px; color:#64748b; margin-bottom:12px;">
-          💡 提示：每项支持用<strong>逗号、顿号或换行</strong>分隔多个选项。保存后，所有筛选框、新增/编辑表单下拉框将立即同步生效。
+          💡 提示：每项支持用<strong>逗号、顿号或换行</strong>分隔多个选项。保存后，所有筛选框、新增/编辑表单中的标准下拉选择框将立即同步生效。
         </p>
         <div class="form-grid-4">
           <div class="form-group span-2">
-            <label>① 合同类型选项</label>
+            <label>① 合同类型下拉选项</label>
             <textarea id="preset_contract_types" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>② 合同状态选项（支持自定义名称，自动识别生效态与到期态）</label>
+            <label>② 合同状态下拉选项（支持自定义名称，自动识别生效态与到期态）</label>
             <textarea id="preset_contract_statuses" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>③ 采购立项类型选项</label>
+            <label>③ 采购立项类型下拉选项</label>
             <textarea id="preset_project_types" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>④ 费用承担部门常用选项</label>
+            <label>④ 费用承担部门下拉选项</label>
             <textarea id="preset_cost_departments" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>⑤ 采购类型选项</label>
+            <label>⑤ 采购类型下拉选项</label>
             <textarea id="preset_procurement_types" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>⑥ 采购方式选项</label>
+            <label>⑥ 采购方式下拉选项</label>
             <textarea id="preset_procurement_methods" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>⑦ 预算科目常用选项</label>
+            <label>⑦ 预算科目名称下拉选项</label>
             <textarea id="preset_budget_subjects" rows="2"></textarea>
           </div>
           <div class="form-group span-2">
-            <label>⑧ 发票类型选项</label>
+            <label>⑧ 发票类型下拉选项</label>
             <textarea id="preset_invoice_types" rows="2"></textarea>
           </div>
         </div>
@@ -331,7 +333,7 @@
           <button type="button" class="btn btn-outline" onclick="restoreDefaultPresets()">🔄 恢复出厂默认选项</button>
           <div style="flex:1;"></div>
           <button type="button" class="btn btn-outline" onclick="closePresetsModal()">取消</button>
-          <button type="submit" class="btn btn-primary">💾 保存并应用全部选项</button>
+          <button type="submit" class="btn btn-primary">💾 保存并应用全部下拉选项</button>
         </div>
       </form>
     </div>
@@ -619,8 +621,7 @@
 
           <div class="form-group">
             <label>费用承担部门 *</label>
-            <input type="text" id="p_cost_department" list="dept_list" placeholder="如：综合管理部 / 运营管理部" />
-            <datalist id="dept_list"></datalist>
+            <select id="p_cost_department" required></select>
           </div>
 
           <div class="form-group">
@@ -630,8 +631,7 @@
 
           <div class="form-group">
             <label>预算科目名称</label>
-            <input type="text" id="p_budget_subject" list="budget_subject_list" placeholder="如：办公费 / 运输费" />
-            <datalist id="budget_subject_list"></datalist>
+            <select id="p_budget_subject"></select>
           </div>
 
           <div class="form-group">
@@ -641,8 +641,7 @@
 
           <div class="form-group">
             <label>采购方式</label>
-            <input type="text" id="p_procurement_method" list="proc_method_list" placeholder="如：合作谈判 / 邀请竞争谈判" />
-            <datalist id="proc_method_list"></datalist>
+            <select id="p_procurement_method"></select>
           </div>
 
           <div class="form-group">
@@ -723,9 +722,6 @@
       </form>
     </div>
   </div>
-
-  <!-- 发票类型公共 datalist -->
-  <datalist id="invoice_type_list"></datalist>
 
   <!-- ==================== 弹窗8：全能详情与文件在线预览中心 ==================== -->
   <div id="detail_modal" class="modal hidden">
