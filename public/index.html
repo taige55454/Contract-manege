@@ -116,7 +116,7 @@
   <div id="view_contract">
     <section class="filter-bar">
       <div class="filter-row">
-        <input type="text" id="filter_no" placeholder="搜年份序号 / 合同编号 / 名称 / 履约摘要" onkeydown="if(event.key==='Enter') loadContracts()" />
+        <input type="text" id="filter_no" placeholder="搜年份序号 / 合同编号 / 名称 / 履约摘要 / 备注" onkeydown="if(event.key==='Enter') loadContracts()" />
         <input type="text" id="filter_counterparty" placeholder="搜对方单位 / 信用代码 / 账户 / 开户行" onkeydown="if(event.key==='Enter') loadContracts()" />
         <select id="filter_year" onchange="loadContracts()">
           <option value="">全部年份</option>
@@ -199,7 +199,7 @@
   <div id="view_procurement" class="hidden">
     <section class="filter-bar">
       <div class="filter-row">
-        <input type="text" id="proc_filter_kw" placeholder="搜年份序号 / 立项编号 / 项目名称 / 供应商 / 合同号" style="width:270px;" onkeydown="if(event.key==='Enter') loadProcurements()" />
+        <input type="text" id="proc_filter_kw" placeholder="搜年份序号 / 立项编号 / 项目名称 / 供应商 / 合同号 / 备注" style="width:280px;" onkeydown="if(event.key==='Enter') loadProcurements()" />
         <select id="proc_filter_year" onchange="loadProcurements()">
           <option value="">全部立项年份</option>
         </select>
@@ -517,10 +517,13 @@
             <select id="f_status"></select>
           </div>
           <div class="form-group span-2">
-            <label>🔗 关联采购项目立项（选填，选定后可自动带出项目名/供应商/成交额）</label>
-            <select id="f_procurement_id" onchange="onSelectLinkedProcurementInContractForm(this)">
-              <option value="">-- 暂不关联采购立项 (或稍后在采购台账中反向关联) --</option>
-            </select>
+            <label>🔗 关联采购项目立项（已绑定的立项自动隐藏，解绑后恢复可选）</label>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <select id="f_procurement_id" style="flex:1; min-width:0;" onchange="onSelectLinkedProcurementInContractForm(this)">
+                <option value="">-- 暂不关联采购立项 --</option>
+              </select>
+              <button type="button" id="btn_unbind_proc_in_form" class="btn btn-danger btn-sm hidden" onclick="clearLinkedProcInContractForm()" title="解除当前立项绑定，保存后立即释放">🔓 解绑</button>
+            </div>
           </div>
 
           <div class="form-group">
@@ -688,15 +691,18 @@
           </div>
 
           <div class="form-group span-2">
-            <label>🔗 选择已有合同（选定后双向绑定合同扫描件与立项资料）</label>
-            <select id="p_contract_id" onchange="onSelectLinkedContractInProcForm(this)">
-              <option value="">-- 暂不绑定已有合同 (或右侧直接手填合同编号) --</option>
-            </select>
+            <label>🔗 选择已有合同（已绑定的合同自动隐藏，解绑后恢复可选）</label>
+            <div style="display:flex; gap:6px; align-items:center;">
+              <select id="p_contract_id" style="flex:1; min-width:0;" onchange="onSelectLinkedContractInProcForm(this)">
+                <option value="">-- 暂不绑定已有合同 (或右侧直接手填合同编号) --</option>
+              </select>
+              <button type="button" id="btn_unbind_contract_in_form" class="btn btn-danger btn-sm hidden" onclick="clearLinkedContractInProcForm()" title="解除当前合同绑定，保存后立即释放">🔓 解绑</button>
+            </div>
           </div>
 
           <div class="form-group">
             <label>或预填合同编号(录合同后自动绑定)</label>
-            <input type="text" id="p_contract_no_manual" placeholder="如：HT-ABC-202601001" />
+            <input type="text" id="p_contract_no_manual" placeholder="如：HT-ABC-202601001" oninput="updateUnbindBtnVisibilityInProcForm()" />
           </div>
 
           <div class="form-group span-2">
