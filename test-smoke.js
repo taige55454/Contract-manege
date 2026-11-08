@@ -11,7 +11,7 @@ process.env.DB_PATH = path.join(tempDir, 'test.sqlite');
 const { startServer } = require('./server');
 
 (async () => {
-  console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (脱敏及年份序号定稿版)...');
+  console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (v2.5.0 终极定稿版)...');
   const { port, shutdown } = await startServer(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${port}`;
   let exitCode = 0;
@@ -99,7 +99,7 @@ const { startServer } = require('./server');
     assert.strictEqual(cCreateRes.success, true);
     const contractId = cCreateRes.id;
 
-    // 5. 校验年份序号 YYYY-001 与数据字段
+    // 5. 校验年份序号 YYYY-001、双向搜索与数据字段
     const cDetail = (await fetch(`${baseUrl}/api/contracts/${contractId}`).then(r => r.json())).data;
     const pDetail = (await fetch(`${baseUrl}/api/procurements/${procId}`).then(r => r.json())).data;
 
@@ -111,7 +111,13 @@ const { startServer } = require('./server');
     assert.ok(cDetail.counterparties[0].summary.includes('第一季度'), '履约摘要应完整保存换行内容');
     assert.strictEqual(cDetail.procurement_id, procId, '双向穿透：合同关联采购 ID 验证成功');
     assert.strictEqual(pDetail.contract_id, contractId, '双向穿透：采购关联合同 ID 验证成功');
-    console.log('✅ [通过] 年份序号 2026-001 + 履约摘要/备注独立换行 + 银行四要素 + 多税率验证成功');
+
+    // 验证采购台账按年份序号 2026-001 搜索与合同按备注搜索
+    const pSearchBySeq = (await fetch(`${baseUrl}/api/procurements?kw=2026-001`).then(r => r.json())).data;
+    assert.strictEqual(pSearchBySeq.length, 1, '采购台账必须支持按年份序号 2026-001 搜索');
+    const cSearchByRemark = (await fetch(`${baseUrl}/api/contracts?no=${encodeURIComponent('主表合同层公共备注')}`).then(r => r.json())).data;
+    assert.strictEqual(cSearchByRemark.length, 1, '合同台账必须支持按备注关键字搜索');
+    console.log('✅ [通过] 年份序号 2026-001 检索 + 履约摘要/备注独立换行 + 银行四要素 + 多税率验证成功');
 
     // 6. 验证双台账一键合并导出 Excel 表头与样式
     const expRes = await fetch(`${baseUrl}/api/export/combined`);
