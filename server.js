@@ -522,7 +522,6 @@ function syncContractRelatedFolderOnDisk(contractId) {
     const origStem = sanitizeFileToken(path.basename(f.file_original_name || currentBase, ext), 55);
     const noToken = sanitizeFileToken(c.contract_no, 35);
 
-    // 若文件名此前以 CONTRACT_ 或 FILE_ 开头，一并规范化为 合同编号_原文件名
     let newFileName = currentBase;
     if (/^(CONTRACT_|FILE_|TEMP)/i.test(currentBase)) {
       newFileName = `${noToken}_${origStem}${ext}`;
@@ -1057,17 +1056,34 @@ app.get('/api/procurements/next-no', (req, res) => {
   res.json({ success: true, ...preview });
 });
 
-// ==================== 9. 合同与采购双向绑定水合引擎 ====================
-function syncContractProcurementLink(contractId, contractNo, procurementId) {
-  db.prepare(`UPDATE procurement_projects SET contract_id = NULL WHERE contract_id = ?`).run(contractId);
+// ==================== 9. 合同与采购双向排他绑定、一键解绑与水合引擎 ====================
+/**
+ * 同步合同 -> 采购立项的双向排他绑定：
+ * - 当 allowAutoMatchManual=true（新增合同时）且未选立项，可自动吸附预填了该合同号的未绑定立项
+ * - 当 allowAutoMatchManual=false（编辑合同主動解绑时），彻底清除双端绑定与预填合同号
+ */
+function syncContractProcurementLink(contractId, contractNo, procurementId, allowAutoMatchManual = false) {
+  // 1. 先清理旧绑定到该合同的所有采购立项
+  db.prepare(`
+    UPDATE procurement_projects
+    SET contract_id = NULL,
+        contract_no_manual = CASE WHEN contract_id = ? THEN '' ELSE contract_no_manual END,
+        has_contract = CASE WHEN contract_id = ? THEN '否' ELSE has_contract END
+    WHERE contract_id = ?
+  `).run(contractId, contractId, contractId);
 
   let targetProcId = procurementId ? Number(procurementId) : null;
-  if (!targetProcId && contractNo) {
-    const matchedProc = db.prepare(`SELECT id FROM procurement_projects WHERE contract_no_manual = ?`).get(contractNo);
+  if (!targetProcId && allowAutoMatchManual && contractNo) {
+    const matchedProc = db.prepare(`
+      SELECT id FROM procurement_projects
+      WHERE contract_no_manual = ? AND (contract_id IS NULL OR contract_id = ?)
+    `).get(contractNo, contractId);
     if (matchedProc) targetProcId = matchedProc.id;
   }
 
   if (targetProcId) {
+    // 确保一对一排他：若目标立项此前绑了其他合同，先解绑旧合同
+    db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ? AND id != ?`).run(targetProcId, contractId);
     db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(targetProcId, contractId);
     db.prepare(`
       UPDATE procurement_projects
@@ -1076,7 +1092,49 @@ function syncContractProcurementLink(contractId, contractNo, procurementId) {
     `).run(contractId, contractNo, targetProcId);
   } else {
     db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE id = ?`).run(contractId);
+    if (contractNo && !allowAutoMatchManual) {
+      db.prepare(`
+        UPDATE procurement_projects
+        SET contract_id = NULL, contract_no_manual = '', has_contract = '否'
+        WHERE contract_no_manual = ?
+      `).run(contractNo);
+    }
   }
+}
+
+/**
+ * 原子解绑：解除指定合同与采购立项之间的双向关联
+ */
+function unbindContractAndProcurement({ contractId = null, procurementId = null }) {
+  const tx = db.transaction(() => {
+    if (contractId) {
+      const cRow = db.prepare(`SELECT id, contract_no, procurement_id FROM contracts WHERE id = ?`).get(contractId);
+      if (cRow) {
+        db.prepare(`UPDATE contracts SET procurement_id = NULL, updated_at = datetime('now', 'localtime') WHERE id = ?`).run(cRow.id);
+        db.prepare(`
+          UPDATE procurement_projects
+          SET contract_id = NULL, contract_no_manual = '', has_contract = '否', updated_at = datetime('now', 'localtime')
+          WHERE contract_id = ? OR id = ? OR (contract_no_manual != '' AND contract_no_manual = ?)
+        `).run(cRow.id, cRow.procurement_id || -1, cRow.contract_no);
+      }
+    }
+    if (procurementId) {
+      const pRow = db.prepare(`SELECT id, contract_id, contract_no_manual FROM procurement_projects WHERE id = ?`).get(procurementId);
+      if (pRow) {
+        db.prepare(`
+          UPDATE procurement_projects
+          SET contract_id = NULL, contract_no_manual = '', has_contract = '否', updated_at = datetime('now', 'localtime')
+          WHERE id = ?
+        `).run(pRow.id);
+        db.prepare(`
+          UPDATE contracts
+          SET procurement_id = NULL, updated_at = datetime('now', 'localtime')
+          WHERE procurement_id = ? OR id = ? OR (contract_no != '' AND contract_no = ?)
+        `).run(pRow.id, pRow.contract_id || -1, pRow.contract_no_manual || '');
+      }
+    }
+  });
+  tx();
 }
 
 function hydrateContractRow(row) {
@@ -1125,6 +1183,13 @@ function hydrateContractRow(row) {
     : db.prepare(`SELECT * FROM procurement_projects WHERE contract_id = ? OR (contract_no_manual != '' AND contract_no_manual = ?)`).get(row.id, row.contract_no);
 
   if (procRow) {
+    // 若数据库单侧外键尚未写回，自动自愈补齐双向指针
+    if (row.procurement_id !== procRow.id || procRow.contract_id !== row.id) {
+      try {
+        db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(procRow.id, row.id);
+        db.prepare(`UPDATE procurement_projects SET contract_id = ?, has_contract = '是', contract_no_manual = ? WHERE id = ?`).run(row.id, row.contract_no, procRow.id);
+      } catch (e) {}
+    }
     const procFiles = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(procRow.id);
     linked_procurement = { ...procRow, files: procFiles };
   }
@@ -1137,17 +1202,38 @@ function hydrateContractRow(row) {
   };
 }
 
+/**
+ * 采购立项行水合：
+ * 支持三重双向反查（按 contract_id / 按 contracts.procurement_id / 按预填合同号），
+ * 确保关联合同后 100% 拿到合同的 attachment_path（主合同扫描件路径）用于生成 Excel 超链接！
+ */
 function hydrateProcurementRow(row) {
   if (!row) return null;
   const files = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(row.id);
   let linked_contract = null;
-  const cRow = row.contract_id
-    ? db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name FROM contracts WHERE id = ?`).get(row.contract_id)
-    : (row.contract_no_manual
-        ? db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name FROM contracts WHERE contract_no = ?`).get(row.contract_no_manual)
-        : null);
+
+  let cRow = null;
+  if (row.contract_id) {
+    cRow = db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name, procurement_id FROM contracts WHERE id = ?`).get(row.contract_id);
+  }
+  if (!cRow) {
+    cRow = db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name, procurement_id FROM contracts WHERE procurement_id = ?`).get(row.id);
+  }
+  if (!cRow && row.contract_no_manual) {
+    cRow = db.prepare(`SELECT id, seq_no, contract_no, contract_name, status, attachment_path, attachment_original_name, procurement_id FROM contracts WHERE contract_no = ?`).get(row.contract_no_manual);
+  }
 
   if (cRow) {
+    // 自动自愈同步双端外键，确保数据绝对一致
+    if (row.contract_id !== cRow.id || cRow.procurement_id !== row.id) {
+      try {
+        db.prepare(`UPDATE procurement_projects SET contract_id = ?, has_contract = '是', contract_no_manual = ? WHERE id = ?`).run(cRow.id, cRow.contract_no, row.id);
+        db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(row.id, cRow.id);
+        row.contract_id = cRow.id;
+        row.has_contract = '是';
+        row.contract_no_manual = cRow.contract_no;
+      } catch (e) {}
+    }
     const cRelFiles = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ? ORDER BY id ASC`).all(cRow.id);
     linked_contract = { ...cRow, related_files: cRelFiles };
   }
@@ -1265,9 +1351,9 @@ function buildBorderSpec(isGroupBottom = false) {
 /**
  * 合同台账 Excel 构建器：
  * - 共 34 列 (索引 0 ~ 33，对应 A ~ AH 列)
- * - 去掉“采购立项资料(点击打开)”冗余列，若关联立项上传了资料，直接在“关联采购立项号”列加超链接（显示文字仍为立项号）
- * - 主合同扫描件直接显示文件名（如 HT-ABC-xxx.pdf），去掉“点击打开”
- * - 第 1、2 行不填充任何颜色，所有行高统一为 50 磅 (hpt: 50)
+ * - 关联采购立项号列：若关联立项上传了立项资料，直接在立项号上加超链接（显示文字仍为立项号）
+ * - 主合同扫描件列：直接显示文件名（如 HT-ABC-xxx.pdf）并带超链接
+ * - 第 1、2 行无底色填充，所有行高统一为 50 磅 (hpt: 50)
  */
 function buildContractWorksheet(rows) {
   const headers = [
@@ -1394,14 +1480,12 @@ function buildContractWorksheet(rows) {
       if (!ws[cellRef]) ws[cellRef] = { t: 's', v: '' };
 
       if (r === 0) {
-        // 第1行标题行：无填充底色，黑字加粗居中
         ws[cellRef].s = {
           font: { name: '微软雅黑', sz: 14, bold: true, color: { rgb: '000000' } },
           alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
           border: buildBorderSpec(false)
         };
       } else if (r === 1) {
-        // 第2行表头行：无填充底色，黑字加粗居中
         ws[cellRef].s = {
           font: { name: '微软雅黑', sz: 10, bold: true, color: { rgb: '000000' } },
           alignment: { horizontal: 'center', vertical: 'center', wrapText: true },
@@ -1414,17 +1498,14 @@ function buildContractWorksheet(rows) {
 
         if (meta.isFirstInGroup) {
           if (c === 30 && meta.c.attachment_path) {
-            // 主合同扫描件：直接显示文件名
             const relUrl = escapeExcelFormulaStr(`uploads/${meta.c.attachment_path}`);
             const label = escapeExcelFormulaStr(meta.scanFileName);
             ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.scanFileName };
           } else if (c === 31 && meta.procNo && meta.procFiles.length > 0) {
-            // 关联采购立项号：如果上传了立项资料，直接在立项号上加超链接（显示文字仍为立项号）
             const relUrl = escapeExcelFormulaStr(`uploads/${meta.procFiles[0].file_path}`);
             const label = escapeExcelFormulaStr(meta.procNo);
             ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.procNo };
           } else if (c === 32 && meta.relFiles.length > 0) {
-            // 其他相关资料：指向文件夹或首份文件，显示文件名
             const relUrl = escapeExcelFormulaStr(`uploads/${meta.relFiles[0].file_path}`);
             const dispText = meta.relFiles.length === 1
               ? meta.relFiles[0].file_original_name
@@ -1460,7 +1541,8 @@ function buildContractWorksheet(rows) {
 /**
  * 采购立项台账 Excel 构建器：
  * - 共 18 列 (索引 0 ~ 17，对应 A ~ R 列)
- * - 表头去掉“(点击打开)”，第 1、2 行不填充任何颜色，所有行高统一为 50 磅
+ * - 第 16 列 (索引 15，P 列：关联合同编号)：只要关联的合同上传了主合同扫描件（attachment_path），
+ *   直接在合同编号上生成超链接（显示文字仍为合同编号，点击直接打开合同扫描件）！
  */
 function buildProcurementWorksheet(rows) {
   const headers = [
@@ -1544,10 +1626,16 @@ function buildProcurementWorksheet(rows) {
         const bgRgb = isOddRow ? 'F8FAFC' : 'FFFFFF';
         const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
 
-        if (c === 15 && pItem.linked_contract && pItem.linked_contract.attachment_path) {
-          const relUrl = escapeExcelFormulaStr(`uploads/${pItem.linked_contract.attachment_path}`);
-          const label = escapeExcelFormulaStr(pItem.linked_contract.contract_no);
-          ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: pItem.linked_contract.contract_no };
+        if (c === 15 && pItem.linked_contract) {
+          // 优先链接到关联合同的主合同扫描件；若未传主扫描件但有其他资料，则回退链接到第一份其他资料
+          const targetContractFile = pItem.linked_contract.attachment_path
+            || (pItem.linked_contract.related_files && pItem.linked_contract.related_files[0] && pItem.linked_contract.related_files[0].file_path)
+            || '';
+          if (targetContractFile) {
+            const relUrl = escapeExcelFormulaStr(`uploads/${targetContractFile}`);
+            const label = escapeExcelFormulaStr(pItem.linked_contract.contract_no);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: pItem.linked_contract.contract_no };
+          }
         } else if (c === 17 && pItem.files && pItem.files.length > 0) {
           const relUrl = escapeExcelFormulaStr(`uploads/${pItem.files[0].file_path}`);
           const dispText = pItem.files.length === 1
@@ -1631,7 +1719,7 @@ app.get('/api/export/combined', (req, res) => {
   }
 });
 
-// ==================== 12. 合同管理 CRUD API ====================
+// ==================== 12. 合同管理 CRUD 与解绑 API ====================
 app.get('/api/contracts', (req, res) => {
   try {
     const rows = queryFilteredContracts(req.query);
@@ -1645,6 +1733,16 @@ app.get('/api/contracts/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该合同' });
   res.json({ success: true, data: hydrateContractRow(row) });
+});
+
+app.post('/api/contracts/:id/unbind-procurement', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    unbindContractAndProcurement({ contractId: id });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
 });
 
 const contractUploadFields = upload.fields([
@@ -1751,7 +1849,8 @@ app.post('/api/contracts', contractUploadFields, (req, res) => {
         relStmt.run(newId, relPath, decodeFilename(rf.originalname), rf.size || 0);
       }
 
-      syncContractProcurementLink(newId, finalContractNo, b.procurement_id);
+      // 新增合同时 allowAutoMatchManual = true，允许自动匹配预填了该合同号的未绑定立项
+      syncContractProcurementLink(newId, finalContractNo, b.procurement_id, true);
       recalculateAllSeqNos();
     });
 
@@ -1879,7 +1978,8 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
         relStmt.run(id, relPath, decodeFilename(rf.originalname), rf.size || 0);
       }
 
-      syncContractProcurementLink(id, newContractNo, b.procurement_id);
+      // 编辑合同时 allowAutoMatchManual = false，若用户清空了关联立项则彻底解绑
+      syncContractProcurementLink(id, newContractNo, b.procurement_id, false);
       recalculateAllSeqNos();
 
       if (mainFile && old.attachment_path && old.attachment_path !== attachment_path) {
@@ -1962,13 +2062,13 @@ app.delete('/api/contracts/:id', (req, res) => {
     const rels = db.prepare(`SELECT * FROM contract_related_files WHERE contract_id = ?`).all(id);
     for (const r of rels) safeUnlinkUploadFile(r.file_path);
   }
-  db.prepare(`UPDATE procurement_projects SET contract_id = NULL WHERE contract_id = ?`).run(id);
+  unbindContractAndProcurement({ contractId: id });
   db.prepare(`DELETE FROM contracts WHERE id = ?`).run(id);
   recalculateAllSeqNos();
   res.json({ success: true });
 });
 
-// ==================== 13. 采购项目立项台账 CRUD API ====================
+// ==================== 13. 采购项目立项台账 CRUD 与解绑 API ====================
 app.get('/api/procurements', (req, res) => {
   try {
     const rows = queryFilteredProcurements(req.query);
@@ -1982,6 +2082,16 @@ app.get('/api/procurements/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM procurement_projects WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该采购立项' });
   res.json({ success: true, data: hydrateProcurementRow(row) });
+});
+
+app.post('/api/procurements/:id/unbind-contract', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    unbindContractAndProcurement({ procurementId: id });
+    res.json({ success: true });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
 });
 
 app.post('/api/procurements', upload.array('procurement_files', 30), (req, res) => {
@@ -2014,6 +2124,11 @@ app.post('/api/procurements', upload.array('procurement_files', 30), (req, res) 
       } else if (manualContractNo) {
         const cRow = db.prepare(`SELECT id FROM contracts WHERE contract_no = ?`).get(manualContractNo);
         if (cRow) targetContractId = cRow.id;
+      }
+
+      if (targetContractId) {
+        // 确保一对一排他：若目标合同此前绑了其他立项，先解除旧立项绑定
+        db.prepare(`UPDATE procurement_projects SET contract_id = NULL, contract_no_manual = '', has_contract = '否' WHERE contract_id = ?`).run(targetContractId);
       }
 
       const info = db.prepare(`
@@ -2091,6 +2206,9 @@ app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, re
 
     const updateProcTx = db.transaction(() => {
       db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ?`).run(id);
+      if (old.contract_id) {
+        db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE id = ?`).run(old.contract_id);
+      }
 
       let targetContractId = b.contract_id ? Number(b.contract_id) : null;
       let manualContractNo = String(b.contract_no_manual || '').trim();
@@ -2101,6 +2219,10 @@ app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, re
       } else if (manualContractNo) {
         const cRow = db.prepare(`SELECT id FROM contracts WHERE contract_no = ?`).get(manualContractNo);
         if (cRow) targetContractId = cRow.id;
+      }
+
+      if (targetContractId) {
+        db.prepare(`UPDATE procurement_projects SET contract_id = NULL, contract_no_manual = '', has_contract = '否' WHERE contract_id = ? AND id != ?`).run(targetContractId, id);
       }
 
       db.prepare(`
@@ -2207,7 +2329,7 @@ app.delete('/api/procurements/:id', (req, res) => {
   const id = Number(req.params.id);
   const files = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ?`).all(id);
   for (const f of files) safeUnlinkUploadFile(f.file_path);
-  db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ?`).run(id);
+  unbindContractAndProcurement({ procurementId: id });
   db.prepare(`DELETE FROM procurement_projects WHERE id = ?`).run(id);
   recalculateAllProcurementSeqNos();
   res.json({ success: true });
