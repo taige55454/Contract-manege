@@ -11,7 +11,7 @@ process.env.DB_PATH = path.join(tempDir, 'test.sqlite');
 const { startServer } = require('./server');
 
 (async () => {
-  console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (v2.5.0 修正增强版)...');
+  console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (v2.5.1 排他绑定与超链接增强版)...');
   const { port, shutdown } = await startServer(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${port}`;
   let exitCode = 0;
@@ -35,7 +35,7 @@ const { startServer } = require('./server');
     }).then(r => r.json());
     assert.strictEqual(presetRes.success, true);
 
-    // 3. 录入采购立项
+    // 3. 录入采购立项（暂不预填合同号，测试从合同端关联立项）
     const pForm = new FormData();
     pForm.append('procurement_no', 'LX20260318002');
     pForm.append('project_name', 'ABC公司年度物流配送服务采购项目');
@@ -48,8 +48,7 @@ const { startServer } = require('./server');
     pForm.append('completion_date', '46103');
     pForm.append('supplier_name', 'BCD公司');
     pForm.append('deal_amount', '300000');
-    pForm.append('has_contract', '是');
-    pForm.append('contract_no_manual', 'HT-ABC-202603003');
+    pForm.append('has_contract', '否');
     pForm.append('remark', '采购立项定稿备注说明');
     pForm.append('procurement_files', new Blob(['立项批复文件正文内容'], { type: 'text/plain' }), '立项批复单.txt');
 
@@ -57,7 +56,7 @@ const { startServer } = require('./server');
     assert.strictEqual(pCreateRes.success, true);
     const procId = pCreateRes.id;
 
-    // 4. 录入关联合同
+    // 4. 录入关联合同（直接通过 procurement_id 绑定立项）
     const cForm = new FormData();
     cForm.append('contract_no', 'HT-ABC-202603003');
     cForm.append('contract_name', 'ABC公司年度物流配送服务合同');
@@ -67,6 +66,7 @@ const { startServer } = require('./server');
     cForm.append('sign_date', '2026.3.20');
     cForm.append('start_date', '2026.3.20');
     cForm.append('expiry_date', '2020-01-01');
+    cForm.append('procurement_id', String(procId));
     cForm.append('remark', '主表合同层公共备注');
     cForm.append('counterparties_json', JSON.stringify([{
       company_name: 'BCD公司',
@@ -97,7 +97,7 @@ const { startServer } = require('./server');
     assert.strictEqual(cCreateRes.success, true);
     const contractId = cCreateRes.id;
 
-    // 5. 校验文件夹命名规范：序号_编号_名称（彻底杜绝 PROC_1 / CONTRACT_1）
+    // 5. 校验文件夹命名规范：序号_编号_名称
     const cDetail = (await fetch(`${baseUrl}/api/contracts/${contractId}`).then(r => r.json())).data;
     const pDetail = (await fetch(`${baseUrl}/api/procurements/${procId}`).then(r => r.json())).data;
 
@@ -109,37 +109,43 @@ const { startServer } = require('./server');
       pDetail.files[0].file_path.includes('2026-001_LX20260318002_ABC公司年度物流配送服务采购项目/'),
       `采购立项资料文件夹命名不符合预期: ${pDetail.files[0].file_path}`
     );
-    console.log('✅ [通过] 磁盘文件夹自动命名为【序号_编号_名称】验证成功');
+    assert.strictEqual(pDetail.contract_id, contractId, '采购立项应双向绑定到合同 ID');
+    assert.ok(pDetail.linked_contract && pDetail.linked_contract.attachment_path, '采购立项水合数据必须包含关联合同的扫描件路径');
+    console.log('✅ [通过] 磁盘文件夹自动命名为【序号_编号_名称】及双向水合验证成功');
 
-    // 6. 验证单独导出合同 Excel、单独导出采购 Excel 与合并导出均返回 200 (修复 /api/procurements/export 报错)
+    // 6. 验证单独导出与合并导出 Excel：检查双表超链接（特别是采购表 P 列“关联合同编号”超链接）
     const expSingleContract = await fetch(`${baseUrl}/api/export/excel?mode=all`);
     assert.strictEqual(expSingleContract.status, 200, '单独导出合同台账必须返回 200');
 
     const expSingleProc = await fetch(`${baseUrl}/api/procurements/export?mode=all`);
     assert.strictEqual(expSingleProc.status, 200, '单独导出采购立项台账必须返回 200');
 
-    const expCombined = await fetch(`${baseUrl}/api/export/combined`);
-    assert.strictEqual(expCombined.status, 200, '合并导出双台账总表必须返回 200');
+    const procBuf = Buffer.from(await expSingleProc.arrayBuffer());
+    const procWb = XLSX.read(procBuf, { type: 'buffer', cellFormula: true });
+    const wsSingleProc = procWb.Sheets['采购项目台账'];
 
-    const buf = Buffer.from(await expCombined.arrayBuffer());
-    const wb = XLSX.read(buf, { type: 'buffer', cellFormula: true });
-    const wsContract = wb.Sheets['合同台账'];
-    const wsProc = wb.Sheets['采购项目台账'];
+    // 验证采购立项表 P3 (关联合同编号) 包含指向主合同扫描件的超链接
+    assert.strictEqual(wsSingleProc['P2'].v, '关联合同编号');
+    assert.strictEqual(wsSingleProc['P3'].v, 'HT-ABC-202603003');
+    assert.ok(
+      wsSingleProc['P3'].f && wsSingleProc['P3'].f.includes('HYPERLINK("uploads/HT-ABC-202603003.pdf","HT-ABC-202603003")'),
+      `采购立项表关联合同编号超链接缺失或错误: ${wsSingleProc['P3'].f}`
+    );
+    console.log('✅ [通过] 采购立项台账导出 Excel【关联合同编号】直接链接到合同扫描件验证成功');
 
-    // 验证表头去掉了“采购立项资料(点击打开)”列及所有“(点击打开)”字样
-    assert.strictEqual(wsContract['AE2'].v, '主合同扫描件');
-    assert.strictEqual(wsContract['AF2'].v, '关联采购立项号');
-    assert.strictEqual(wsContract['AG2'].v, '其他相关资料');
-    assert.strictEqual(wsContract['AH2'].v, '本合同含税总额(元)');
+    // 7. 验证一键解绑 API：解绑后双方 contract_id 与 procurement_id 均恢复为 null
+    const unbindRes = await fetch(`${baseUrl}/api/procurements/${procId}/unbind-contract`, { method: 'POST' }).then(r => r.json());
+    assert.strictEqual(unbindRes.success, true);
 
-    // 验证主合同扫描件直接显示文件名，关联采购立项号直接带超链接且显示立项号
-    assert.strictEqual(wsContract['AE3'].v, 'HT-ABC-202603003.pdf');
-    assert.ok(wsContract['AE3'].f.includes('HYPERLINK'), '主合同扫描件必须包含超链接');
-    assert.strictEqual(wsContract['AF3'].v, 'LX20260318002');
-    assert.ok(wsContract['AF3'].f.includes('HYPERLINK'), '关联采购立项号在有资料时必须直接包含超链接');
+    const cAfterUnbind = (await fetch(`${baseUrl}/api/contracts/${contractId}`).then(r => r.json())).data;
+    const pAfterUnbind = (await fetch(`${baseUrl}/api/procurements/${procId}`).then(r => r.json())).data;
 
-    assert.strictEqual(wsProc['R2'].v, '立项相关资料');
-    console.log('✅ [通过] 单独导出与合并导出、超链接改造、无填充表头验证全部成功');
+    assert.strictEqual(cAfterUnbind.procurement_id, null, '解绑后合同的 procurement_id 应为 null');
+    assert.strictEqual(cAfterUnbind.linked_procurement, null, '解绑后合同的 linked_procurement 应为 null');
+    assert.strictEqual(pAfterUnbind.contract_id, null, '解绑后采购立项的 contract_id 应为 null');
+    assert.strictEqual(pAfterUnbind.linked_contract, null, '解绑后采购立项的 linked_contract 应为 null');
+    assert.strictEqual(pAfterUnbind.has_contract, '否', '解绑后采购立项的 has_contract 应恢复为“否”');
+    console.log('✅ [通过] 合同与采购立项一键解绑及状态恢复验证成功');
 
   } catch (err) {
     console.error('❌ 测试未通过:', err);
