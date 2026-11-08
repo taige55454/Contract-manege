@@ -320,7 +320,7 @@ input:focus, select:focus, textarea:focus {
 .dropdown-content a:hover { background-color: #f3f4f6; }
 .dropdown:hover .dropdown-content { display: block; }
 
-/* 台账主表格：横向适度收窄 + 全面自动换行 */
+/* 台账主表格：黄金紧凑宽度 + 自动换行 + 冻结前两列（序号+编号） */
 .table-container {
   padding: 10px 14px;
   overflow-x: auto;
@@ -360,6 +360,16 @@ input:focus, select:focus, textarea:focus {
   position: sticky;
   top: 0;
   z-index: 20;
+}
+
+/* 顶部表头前两列固定在左上角 */
+.ledger-table thead th:nth-child(1) {
+  left: 0;
+  z-index: 30;
+}
+.ledger-table thead th:nth-child(2) {
+  left: 74px;
+  z-index: 30;
 }
 
 .contract-group-even td { background-color: #ffffff; }
