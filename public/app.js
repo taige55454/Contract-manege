@@ -1,5 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.2 全标准下拉菜单版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.3 极简清爽界面版)
  */
 
 let currentTab = 'contract';
@@ -98,11 +98,6 @@ function formatMoney(val) {
   return '¥' + n.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
 
-/**
- * 智能税率格式化引擎：
- * - 单税率：输入 "6" 或 "6%" -> 自动格式化为 "6%"
- * - 多税率：输入 "6，9"、"6, 13"、"3/6/9"、"*6,9" -> 自动把每个数字转为百分数并在最前面加星号 "*6%、9%"
- */
 function formatSmartTaxRate(raw) {
   const str = String(raw ?? '').trim();
   if (!str) return '';
@@ -268,9 +263,6 @@ function setSelectValueWithFallback(selectId, val) {
   el.value = cleanVal;
 }
 
-/**
- * 构建对方单位卡片中的【发票类型】标准 <select> 选项 HTML
- */
 function buildInvoiceTypeOptionsHtml(selectedVal) {
   const list = (dropdownPresets.invoice_types && dropdownPresets.invoice_types.length > 0)
     ? [...dropdownPresets.invoice_types]
@@ -290,24 +282,20 @@ function applyDropdownPresetsToDOM() {
 
   const { activeLabel } = getDynamicContractStatusPair();
 
-  // 顶部筛选栏下拉框
   populateSelectWithOptions('filter_type', dropdownPresets.contract_types, '全部类型');
   populateSelectWithOptions('filter_status', dropdownPresets.contract_statuses, '全部状态');
   populateSelectWithOptions('proc_filter_type', dropdownPresets.project_types, '全部立项类型');
   populateSelectWithOptions('proc_filter_dept', dropdownPresets.cost_departments, '全部费用承担部门');
 
-  // 合同表单标准下拉框
   populateSelectWithOptions('f_contract_type', dropdownPresets.contract_types, null, dropdownPresets.contract_types[0] || '采购');
   populateSelectWithOptions('f_status', dropdownPresets.contract_statuses, null, activeLabel);
 
-  // 采购立项表单标准下拉框（全部统一为 <select>，不再使用 input+datalist）
   populateSelectWithOptions('p_project_type', dropdownPresets.project_types, null, dropdownPresets.project_types[0] || '服务类项目');
   populateSelectWithOptions('p_cost_department', dropdownPresets.cost_departments, null, dropdownPresets.cost_departments[0] || '');
-  populateSelectWithOptions('p_budget_subject', dropdownPresets.budget_subjects, '-- 请选择预算科目(选填) --', '');
+  populateSelectWithOptions('p_budget_subject', dropdownPresets.budget_subjects, '-- 未选择 --', '');
   populateSelectWithOptions('p_procurement_type', dropdownPresets.procurement_types, null, dropdownPresets.procurement_types[0] || '小额零星采购');
   populateSelectWithOptions('p_procurement_method', dropdownPresets.procurement_methods, null, dropdownPresets.procurement_methods[0] || '合作谈判');
 
-  // 同步更新已打开的对方单位卡片中的【发票类型】<select>
   document.querySelectorAll('#counterparties_container select.cp-invoice').forEach(sel => {
     const curVal = sel.value;
     sel.innerHTML = buildInvoiceTypeOptionsHtml(curVal);
@@ -377,7 +365,7 @@ async function savePresetsForm(e) {
 }
 
 async function restoreDefaultPresets() {
-  if (!confirm('确定将所有下拉选项恢复为默认设置吗？（不会影响已录入的历史台账数据）')) return;
+  if (!confirm('确定将所有下拉选项恢复为默认设置吗？')) return;
   const res = await apiFetch('/api/settings/presets', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -508,16 +496,16 @@ async function saveLanSecurityForm(e) {
     setLanToken(json.token || '');
     closeLanSecurityModal();
     await checkLanAuthStatus();
-    alert('内网访问口令设置已保存！');
+    alert('设置已保存！');
   }
 }
 
 function copyLanInviteText() {
   const urlText = document.getElementById('lan_urls_box').innerText.split('\n')[0] || '';
   const code = document.getElementById('lan_passcode_input').value.trim();
-  const invite = `【企业合同与采购项目台账系统】\n内网协同网址：${urlText}\n访问验证口令：${code}`;
+  const invite = `【企业合同与采购项目台账系统】\n内网网址：${urlText}\n验证口令：${code}`;
   navigator.clipboard.writeText(invite);
-  alert('已复制【内网网址 + 验证口令】到剪贴板！');
+  alert('已复制到剪贴板！');
 }
 
 async function loadOurEntitySetting() {
@@ -557,7 +545,7 @@ async function saveOurEntityForm(e) {
   }
 }
 
-// ==================== 5. 合同与采购夹心式编号规则设置 ====================
+// ==================== 5. 合同与采购编号规则设置 ====================
 async function loadContractNoRuleSettings() {
   try {
     const res = await apiFetch('/api/settings/no-rule');
@@ -692,7 +680,7 @@ async function saveProcNoRuleForm(e) {
   }
 }
 
-// ==================== 6. 夹心式 4 段编号构建器实时同步逻辑 ====================
+// ==================== 6. 分段编号构建器实时同步逻辑 ====================
 function syncSegmentedContractNo() {
   if (isFreeContractNoMode) return;
   const pfx = document.getElementById('seg_prefix').textContent || '';
@@ -734,7 +722,7 @@ function toggleFreeContractNoMode(forceFree) {
   isFreeContractNoMode = forceFree !== undefined ? forceFree : !isFreeContractNoMode;
   document.getElementById('segmented_no_box').classList.toggle('hidden', isFreeContractNoMode);
   document.getElementById('f_contract_no').classList.toggle('hidden', !isFreeContractNoMode);
-  document.getElementById('toggle_no_mode_btn').textContent = isFreeContractNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
+  document.getElementById('toggle_no_mode_btn').textContent = isFreeContractNoMode ? '🔢 切换分段自动编号' : '✏️ 切换自由手填';
 }
 
 function syncSegmentedProcNo() {
@@ -778,7 +766,7 @@ function toggleFreeProcNoMode(forceFree) {
   isFreeProcNoMode = forceFree !== undefined ? forceFree : !isFreeProcNoMode;
   document.getElementById('p_segmented_no_box').classList.toggle('hidden', isFreeProcNoMode);
   document.getElementById('p_procurement_no').classList.toggle('hidden', !isFreeProcNoMode);
-  document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换纯自由手填';
+  document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换自由手填';
 }
 
 // ==================== 7. 合同管理台账主表渲染 ====================
@@ -831,7 +819,7 @@ function renderContractLedgerTable(list) {
   const tbody = document.getElementById('contract_tbody');
   if (!tbody) return;
   if (!list || list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="30" class="text-center" style="padding:28px;color:#6b7280;">暂无匹配的合同台账，请点击右上角【+ 新增合同】录入</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="30" class="text-center" style="padding:28px;color:#6b7280;">暂无合同台账数据</td></tr>`;
     return;
   }
 
@@ -896,7 +884,7 @@ function renderContractLedgerTable(list) {
 
       const formattedTax = formatSmartTaxRate(cp.tax_rate);
       const taxHtml = formattedTax
-        ? (formattedTax.startsWith('*') ? `<span class="tax-multi-chip" title="多税率合同">${escapeHtml(formattedTax)}</span>` : escapeHtml(formattedTax))
+        ? (formattedTax.startsWith('*') ? `<span class="tax-multi-chip">${escapeHtml(formattedTax)}</span>` : escapeHtml(formattedTax))
         : '-';
 
       const remarkText = [cp.remark, c.remark].filter(Boolean).join('\n') || '-';
@@ -930,12 +918,12 @@ function renderContractLedgerTable(list) {
   tbody.innerHTML = htmlRows.join('');
 }
 
-// ==================== 8. 合同新增/编辑弹窗与动态对方单位卡片（发票类型改为标准 <select>） ====================
+// ==================== 8. 合同新增/编辑弹窗与对方单位卡片（极简清爽版） ====================
 function removeCounterpartyCard(btnEl) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
   if (container.querySelectorAll('.party-card').length <= 1) {
-    alert('每份合同至少需保留 1 个对方单位履约行！');
+    alert('至少需保留 1 个对方单位！');
     return;
   }
   btnEl.closest('.party-card')?.remove();
@@ -955,96 +943,96 @@ function addCounterpartyCard(data = {}) {
   card.className = 'party-card';
   card.innerHTML = `
     <div class="party-card-header">
-      <span>🏢 对方单位履约明细 #${idx}</span>
-      <button type="button" class="btn btn-danger btn-sm" onclick="removeCounterpartyCard(this)">移除该行</button>
+      <span>🏢 对方单位 #${idx}</span>
+      <button type="button" class="btn btn-danger btn-sm" onclick="removeCounterpartyCard(this)">移除</button>
     </div>
     <div class="form-grid-4">
       <div class="form-group span-2">
         <label>对方单位名称 *</label>
-        <input type="text" class="cp-company" value="${escapeHtml(data.company_name || '')}" required placeholder="如：BCD公司" />
+        <input type="text" class="cp-company" value="${escapeHtml(data.company_name || '')}" required />
       </div>
       <div class="form-group">
         <label>统一社会信用代码</label>
-        <input type="text" class="cp-credit" value="${escapeHtml(data.credit_code || '')}" placeholder="18位统一社会信用代码" />
+        <input type="text" class="cp-credit" value="${escapeHtml(data.credit_code || '')}" />
       </div>
       <div class="form-group">
         <label>联系人 & 联系电话</label>
         <div style="display:flex;gap:6px;">
-          <input type="text" class="cp-person" style="width:42%;min-width:0;" value="${escapeHtml(data.contact_person || '')}" placeholder="联系人姓名" />
-          <input type="text" class="cp-phone" style="flex:1;min-width:0;" value="${escapeHtml(data.contact_phone || '')}" placeholder="联系电话" />
+          <input type="text" class="cp-person" style="width:42%;min-width:0;" value="${escapeHtml(data.contact_person || '')}" placeholder="姓名" />
+          <input type="text" class="cp-phone" style="flex:1;min-width:0;" value="${escapeHtml(data.contact_phone || '')}" placeholder="电话" />
         </div>
       </div>
 
       <div class="form-group span-4">
-        <label>履约摘要（单独占一行，支持换行输入详细履约内容、核心标的或结算节点）</label>
-        <textarea class="cp-summary" rows="2" placeholder="请输入本单位负责的具体履约摘要内容...">${escapeHtml(data.summary || '')}</textarea>
+        <label>履约摘要</label>
+        <textarea class="cp-summary" rows="2">${escapeHtml(data.summary || '')}</textarea>
       </div>
 
       <div class="form-group">
         <label>收款账户名称</label>
-        <input type="text" class="cp-bank-user" value="${escapeHtml(data.bank_account_name || '')}" placeholder="如：BCD公司" />
+        <input type="text" class="cp-bank-user" value="${escapeHtml(data.bank_account_name || '')}" />
       </div>
       <div class="form-group">
         <label>收款银行账号</label>
-        <input type="text" class="cp-bank-no" value="${escapeHtml(data.bank_account_no || '')}" placeholder="收款银行卡号/对公账号" />
+        <input type="text" class="cp-bank-no" value="${escapeHtml(data.bank_account_no || '')}" />
       </div>
       <div class="form-group">
         <label>开户银行</label>
-        <input type="text" class="cp-bank-name" value="${escapeHtml(data.bank_name || '')}" placeholder="如：DEF银行营业部" />
+        <input type="text" class="cp-bank-name" value="${escapeHtml(data.bank_name || '')}" />
       </div>
       <div class="form-group">
-        <label>开户行号 (12位联行号)</label>
-        <input type="text" class="cp-bank-code" value="${escapeHtml(data.bank_code || '')}" placeholder="如：102100000018" />
+        <label>开户行号</label>
+        <input type="text" class="cp-bank-code" value="${escapeHtml(data.bank_code || '')}" />
       </div>
 
       <div class="form-group">
         <label>含税金额 (元)</label>
-        <input type="number" step="0.01" class="cp-amount" value="${data.amount ?? ''}" placeholder="0.00" oninput="calcExclTaxForCard(this)" />
+        <input type="number" step="0.01" class="cp-amount" value="${data.amount ?? ''}" oninput="calcExclTaxForCard(this)" />
       </div>
       <div class="form-group">
-        <label>税率 (多税率如 6,9 自动变 *6%、9%)</label>
-        <input type="text" class="cp-tax-rate" value="${escapeHtml(initTax)}" placeholder="如 6 或 6,9" oninput="calcExclTaxForCard(this)" onblur="onTaxRateInputBlur(this)" />
+        <label>税率</label>
+        <input type="text" class="cp-tax-rate" value="${escapeHtml(initTax)}" oninput="calcExclTaxForCard(this)" onblur="onTaxRateInputBlur(this)" />
       </div>
       <div class="form-group">
-        <label>不含税价 (单税率自动算/多税率可手填)</label>
-        <input type="number" step="0.01" class="cp-amount-excl" value="${data.amount_excl_tax ?? ''}" placeholder="0.00" />
+        <label>不含税价 (元)</label>
+        <input type="number" step="0.01" class="cp-amount-excl" value="${data.amount_excl_tax ?? ''}" />
       </div>
       <div class="form-group">
         <label>发票类型 & 币种</label>
         <div style="display:flex;gap:4px;">
           <select class="cp-invoice" style="flex:1;min-width:0;">${invoiceOptionsHtml}</select>
-          <input type="text" class="cp-currency" style="width:58px;text-align:center;" value="${escapeHtml(data.currency || 'CNY')}" placeholder="币种" />
+          <input type="text" class="cp-currency" style="width:58px;text-align:center;" value="${escapeHtml(data.currency || 'CNY')}" />
         </div>
       </div>
 
       <div class="form-group span-2">
         <label>履约保证金 (元) / 状态 / 应退日期</label>
         <div style="display:flex;gap:6px;">
-          <input type="number" step="0.01" class="cp-perf-amt" style="width:120px;" value="${data.perf_bond_amount || 0}" placeholder="保证金金额" />
+          <input type="number" step="0.01" class="cp-perf-amt" style="width:120px;" value="${data.perf_bond_amount || 0}" />
           <select class="cp-perf-status" style="width:80px;padding:4px;">
             <option value="无" ${pStatus === '无' ? 'selected' : ''}>无</option>
             <option value="未退" ${pStatus === '未退' ? 'selected' : ''}>未退</option>
             <option value="已退" ${pStatus === '已退' ? 'selected' : ''}>已退</option>
           </select>
-          <input type="text" class="cp-perf-date" style="flex:1;min-width:0;" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="应退日期 如 2027-03-31" onblur="normalizeDateInputElem(this)" />
+          <input type="text" class="cp-perf-date" style="flex:1;min-width:0;" value="${escapeHtml(data.perf_bond_return_date || '')}" placeholder="应退日期" onblur="normalizeDateInputElem(this)" />
         </div>
       </div>
       <div class="form-group span-2">
         <label>质保金 (元) / 状态 / 到期日期</label>
         <div style="display:flex;gap:6px;">
-          <input type="number" step="0.01" class="cp-warranty-amt" style="width:120px;" value="${data.warranty_bond_amount || 0}" placeholder="质保金金额" />
+          <input type="number" step="0.01" class="cp-warranty-amt" style="width:120px;" value="${data.warranty_bond_amount || 0}" />
           <select class="cp-warranty-status" style="width:80px;padding:4px;">
             <option value="无" ${wStatus === '无' ? 'selected' : ''}>无</option>
             <option value="未退" ${wStatus === '未退' ? 'selected' : ''}>未退</option>
             <option value="已退" ${wStatus === '已退' ? 'selected' : ''}>已退</option>
           </select>
-          <input type="text" class="cp-warranty-date" style="flex:1;min-width:0;" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="到期日期 如 2028-03-31" onblur="normalizeDateInputElem(this)" />
+          <input type="text" class="cp-warranty-date" style="flex:1;min-width:0;" value="${escapeHtml(data.warranty_bond_expiry_date || '')}" placeholder="到期日期" onblur="normalizeDateInputElem(this)" />
         </div>
       </div>
 
       <div class="form-group span-4">
-        <label>备注（本单位分项备注，独占一行）</label>
-        <input type="text" class="cp-remark" value="${escapeHtml(data.remark || '')}" placeholder="针对该对方单位的分项补充备注（选填）" />
+        <label>备注</label>
+        <input type="text" class="cp-remark" value="${escapeHtml(data.remark || '')}" />
       </div>
     </div>
   `;
@@ -1114,10 +1102,6 @@ function collectCounterpartiesFromDOM() {
   return arr;
 }
 
-/**
- * 在合同表单中加载可选的采购立项：
- * 排他过滤：已经绑定了其他合同的采购立项不再显示，除非解绑后才恢复显示！
- */
 async function populateProcDropdownInContractForm(selectedId = null, currentContractId = null) {
   const sel = document.getElementById('f_procurement_id');
   if (!sel) return;
@@ -1134,13 +1118,12 @@ async function populateProcDropdownInContractForm(selectedId = null, currentCont
       return false;
     });
 
-    sel.innerHTML = `<option value="">-- 暂不关联采购立项 (已绑定的立项已自动隐藏) --</option>` + availableList.map(p => {
-      const isCurrentBound = selectedId && Number(p.id) === Number(selectedId);
+    sel.innerHTML = `<option value="">-- 暂不关联 --</option>` + availableList.map(p => {
       return `<option value="${p.id}"
         data-name="${escapeHtml(p.project_name)}"
         data-supplier="${escapeHtml(p.supplier_name || '')}"
         data-amount="${p.deal_amount || p.budget_amount || 0}">
-        ${escapeHtml(p.procurement_no)} - ${escapeHtml(p.project_name)}${isCurrentBound ? ' (当前已绑定)' : ''}
+        ${escapeHtml(p.procurement_no)} - ${escapeHtml(p.project_name)}
       </option>`;
     }).join('');
     sel.value = selectedId ? String(selectedId) : '';
@@ -1294,7 +1277,7 @@ async function submitContractForm(e) {
 }
 
 async function deleteContractRecord(id, no) {
-  if (!confirm(`确定删除合同【${no}】吗？关联扫描件及附件将一并从磁盘清除，且后续年份序号自动重排对齐！`)) return;
+  if (!confirm(`确定删除合同【${no}】吗？`)) return;
   const res = await apiFetch(`/api/contracts/${id}`, { method: 'DELETE' });
   const json = await res.json();
   if (json.success) {
@@ -1303,7 +1286,7 @@ async function deleteContractRecord(id, no) {
   }
 }
 
-// ==================== 9. 采购项目立项台账主表与表单逻辑（全部采用标准 <select> 下拉框） ====================
+// ==================== 9. 采购项目立项台账主表与表单逻辑 ====================
 function buildProcQueryParams() {
   const p = new URLSearchParams();
   const kw = document.getElementById('proc_filter_kw')?.value.trim();
@@ -1345,7 +1328,7 @@ function renderProcurementTable(list) {
   const tbody = document.getElementById('procurement_tbody');
   if (!tbody) return;
   if (!list || list.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="19" class="text-center" style="padding:28px;color:#6b7280;">暂无采购立项记录，请点击右上角【+ 新增采购立项】开始录入</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="19" class="text-center" style="padding:28px;color:#6b7280;">暂无采购立项数据</td></tr>`;
     return;
   }
 
@@ -1353,7 +1336,7 @@ function renderProcurementTable(list) {
     const oddClass = idx % 2 === 1 ? 'proc-group-odd' : '';
     const contractHtml = p.linked_contract
       ? `<a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${p.linked_contract.id})">📄 ${escapeHtml(p.linked_contract.contract_no)}</a>`
-      : (p.contract_no_manual ? `<span title="预填合同号，录入对应合同后自动绑定">${escapeHtml(p.contract_no_manual)} (待录合同)</span>` : '<span style="color:#9ca3af;">-</span>');
+      : (p.contract_no_manual ? `<span>${escapeHtml(p.contract_no_manual)}</span>` : '<span style="color:#9ca3af;">-</span>');
 
     const filesCount = (p.files || []).length;
     const filesHtml = filesCount > 0
@@ -1390,10 +1373,6 @@ function renderProcurementTable(list) {
   }).join('');
 }
 
-/**
- * 在采购立项表单中加载可选的已有合同：
- * 排他过滤：已经绑定了其他采购立项的合同自动隐藏，除非解绑后才恢复显示！
- */
 async function populateContractDropdownInProcForm(selectedContractId = null, currentProcId = null) {
   const sel = document.getElementById('p_contract_id');
   if (!sel) return;
@@ -1410,9 +1389,8 @@ async function populateContractDropdownInProcForm(selectedContractId = null, cur
       return false;
     });
 
-    sel.innerHTML = `<option value="">-- 暂不绑定已有合同 (已绑定的合同已自动隐藏) --</option>` + availableList.map(c => {
-      const isCurrentBound = selectedContractId && Number(c.id) === Number(selectedContractId);
-      return `<option value="${c.id}" data-no="${escapeHtml(c.contract_no)}">${escapeHtml(c.contract_no)} - ${escapeHtml(c.contract_name)}${isCurrentBound ? ' (当前已绑定)' : ''}</option>`;
+    sel.innerHTML = `<option value="">-- 暂不绑定 --</option>` + availableList.map(c => {
+      return `<option value="${c.id}" data-no="${escapeHtml(c.contract_no)}">${escapeHtml(c.contract_no)} - ${escapeHtml(c.contract_name)}</option>`;
     }).join('');
     sel.value = selectedContractId ? String(selectedContractId) : '';
     updateUnbindBtnVisibilityInProcForm();
@@ -1563,7 +1541,7 @@ async function submitProcurementForm(e) {
 }
 
 async function deleteProcRecord(id, no) {
-  if (!confirm(`确定删除采购立项【${no}】吗？关联立项资料文件将同步从磁盘清除！`)) return;
+  if (!confirm(`确定删除采购立项【${no}】吗？`)) return;
   const res = await apiFetch(`/api/procurements/${id}`, { method: 'DELETE' });
   const json = await res.json();
   if (json.success) {
@@ -1572,13 +1550,9 @@ async function deleteProcRecord(id, no) {
   }
 }
 
-// ==================== 10. 全能详情与三大文件在线预览 / 一键解绑中心 ====================
+// ==================== 10. 全能详情与文件在线预览 / 一键解绑中心 ====================
 async function unbindInDetailModal(mode, id) {
-  const tip = mode === 'contract'
-    ? '确定解除该合同与采购立项的绑定吗？\n解绑后，双方将恢复为未绑定状态，可在下拉列表中重新被其他记录选择。'
-    : '确定解除该采购立项与合同的绑定吗？\n解绑后，双方将恢复为未绑定状态，可在下拉列表中重新被其他记录选择。';
-  if (!confirm(tip)) return;
-
+  if (!confirm('确定解除绑定吗？')) return;
   const url = mode === 'contract'
     ? `/api/contracts/${id}/unbind-procurement`
     : `/api/procurements/${id}/unbind-contract`;
@@ -1627,7 +1601,7 @@ async function quickUploadContractRelated(contractId, inputEl) {
 }
 
 async function deleteSingleContractRelatedFile(contractId, fileId) {
-  if (!confirm('确认从磁盘物理删除该份附件？')) return;
+  if (!confirm('确认删除该份附件？')) return;
   const res = await apiFetch(`/api/contracts/${contractId}/related-files/${fileId}`, { method: 'DELETE' });
   const json = await res.json();
   if (json.success) {
@@ -1650,12 +1624,12 @@ async function quickUploadProcFilesInDetail(procId, inputEl, refreshMode = 'proc
     else await loadProcurements();
   } catch (err) {
     inputEl.value = '';
-    alert(err.message || '上传立项资料失败');
+    alert(err.message || '上传失败');
   }
 }
 
 async function deleteSingleProcFileInDetail(procId, fileId, refreshMode = 'procurement', refreshId = null) {
-  if (!confirm('确认从磁盘物理删除该份立项资料？')) return;
+  if (!confirm('确认删除该份资料？')) return;
   const res = await apiFetch(`/api/procurements/${procId}/files/${fileId}`, { method: 'DELETE' });
   const json = await res.json();
   if (json.success) {
@@ -1676,7 +1650,7 @@ async function openDetailModal(mode, id) {
     const json = await res.json();
     if (!json.success) return;
     const c = json.data;
-    document.getElementById('detail_modal_title').textContent = `📄 合同全量详情：${c.contract_no} - ${c.contract_name}`;
+    document.getElementById('detail_modal_title').textContent = `📄 合同详情：${c.contract_no} - ${c.contract_name}`;
 
     const procFiles = c.linked_procurement?.files || [];
     const relFiles = c.related_files || [];
@@ -1710,7 +1684,7 @@ async function openDetailModal(mode, id) {
         <h4>
           <span>① 主合同扫描件</span>
           <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
-            + 上传/替换扫描件
+            + 上传/替换
             <input type="file" accept=".pdf,.jpg,.jpeg,.png" class="hidden" onchange="quickUploadContractMainScan(${c.id}, this)" />
           </label>
         </h4>
@@ -1722,24 +1696,24 @@ async function openDetailModal(mode, id) {
                  <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(c.attachment_path)}?download=1`)}">下载</a>
                </div>
              </div>`
-          : `<div style="color:#9ca3af;">暂未上传主合同扫描件</div>`}
+          : `<div style="color:#9ca3af;">未上传</div>`}
       </div>
 
       <div class="detail-card">
         <h4>
-          <span>② 关联采购立项及立项资料 (${procFiles.length}份)</span>
+          <span>② 关联采购立项 (${procFiles.length}份)</span>
           ${c.linked_procurement ? `
             <div style="display:flex;gap:6px;">
-              <button type="button" class="btn btn-danger btn-sm" onclick="unbindInDetailModal('contract', ${c.id})">🔓 解除绑定</button>
+              <button type="button" class="btn btn-danger btn-sm" onclick="unbindInDetailModal('contract', ${c.id})">🔓 解绑</button>
               <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
-                + 补传立项资料
+                + 补传资料
                 <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${c.linked_procurement.id}, this, 'contract', ${c.id})" />
               </label>
             </div>
           ` : ''}
         </h4>
         ${c.linked_procurement
-          ? `<div style="margin-bottom:6px;font-weight:600;color:#6b21a8;">立项号：${escapeHtml(c.linked_procurement.procurement_no)} (${escapeHtml(c.linked_procurement.project_name)})</div>` +
+          ? `<div style="margin-bottom:6px;font-weight:600;color:#6b21a8;">${escapeHtml(c.linked_procurement.procurement_no)} - ${escapeHtml(c.linked_procurement.project_name)}</div>` +
             (procFiles.map(pf => `
               <div class="related-list-item">
                 <span class="fname">${escapeHtml(pf.file_original_name)}</span>
@@ -1749,13 +1723,13 @@ async function openDetailModal(mode, id) {
                   <button class="btn btn-danger btn-sm" onclick="deleteSingleProcFileInDetail(${c.linked_procurement.id}, ${pf.id}, 'contract', ${c.id})">删除</button>
                 </div>
               </div>
-            `).join('') || `<div style="color:#9ca3af;">该立项暂未上传附件</div>`)
-          : `<div style="color:#9ca3af;">未关联采购立项</div>`}
+            `).join('') || `<div style="color:#9ca3af;">无附件</div>`)
+          : `<div style="color:#9ca3af;">未关联</div>`}
       </div>
 
       <div class="detail-card">
         <h4>
-          <span>③ 合同其他关联资料 (${relFiles.length}份)</span>
+          <span>③ 其他相关资料 (${relFiles.length}份)</span>
           <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
             + 补传资料
             <input type="file" multiple class="hidden" onchange="quickUploadContractRelated(${c.id}, this)" />
@@ -1770,11 +1744,11 @@ async function openDetailModal(mode, id) {
               <button class="btn btn-danger btn-sm" onclick="deleteSingleContractRelatedFile(${c.id}, ${rf.id})">删除</button>
             </div>
           </div>
-        `).join('') || `<div style="color:#9ca3af;">暂无其他关联资料</div>`}
+        `).join('') || `<div style="color:#9ca3af;">无</div>`}
       </div>
     `;
 
-    toolbar.innerHTML = `<span>💡 点击左侧任意文件即可在下方直接在线预览 PDF / 图片</span>`;
+    toolbar.innerHTML = `<span>文件预览</span>`;
     if (c.attachment_path) {
       previewFileInBox(c.attachment_path, c.attachment_original_name || c.attachment_path);
     } else if (procFiles[0]) {
@@ -1796,7 +1770,7 @@ async function openDetailModal(mode, id) {
 
     fieldsBox.innerHTML = `
       <div class="detail-card">
-        <h4>📌 采购立项核心信息</h4>
+        <h4>📌 采购立项信息</h4>
         <div class="detail-row"><span class="label">年份序号 / 立项编号</span><span class="val">${escapeHtml(p.seq_no)} / ${escapeHtml(p.procurement_no)}</span></div>
         <div class="detail-row"><span class="label">项目名称</span><span class="val">${escapeHtml(p.project_name)}</span></div>
         <div class="detail-row"><span class="label">立项类型 / 费用承担部门</span><span class="val">${escapeHtml(p.project_type)} / ${escapeHtml(p.cost_department || '-')}</span></div>
@@ -1810,7 +1784,7 @@ async function openDetailModal(mode, id) {
         <h4>
           <span>📁 立项相关资料 (${files.length}份)</span>
           <label class="btn btn-outline btn-sm" style="cursor:pointer;margin:0;">
-            + 补传立项资料
+            + 补传资料
             <input type="file" multiple class="hidden" onchange="quickUploadProcFilesInDetail(${p.id}, this, 'procurement', ${p.id})" />
           </label>
         </h4>
@@ -1823,32 +1797,32 @@ async function openDetailModal(mode, id) {
               <button class="btn btn-danger btn-sm" onclick="deleteSingleProcFileInDetail(${p.id}, ${f.id}, 'procurement', ${p.id})">删除</button>
             </div>
           </div>
-        `).join('') || `<div style="color:#9ca3af;">暂未上传立项资料</div>`}
+        `).join('') || `<div style="color:#9ca3af;">未上传</div>`}
       </div>
 
       <div class="detail-card">
         <h4>
-          <span>📄 关联合同及扫描件直连</span>
-          ${hasAnyContractBind ? `<button type="button" class="btn btn-danger btn-sm" onclick="unbindInDetailModal('procurement', ${p.id})">🔓 解除绑定</button>` : ''}
+          <span>📄 关联合同</span>
+          ${hasAnyContractBind ? `<button type="button" class="btn btn-danger btn-sm" onclick="unbindInDetailModal('procurement', ${p.id})">🔓 解绑</button>` : ''}
         </h4>
         ${p.linked_contract
-          ? `<div style="margin-bottom:6px;font-weight:600;color:#1e40af;">已绑定合同：${escapeHtml(p.linked_contract.contract_no)} (${escapeHtml(p.linked_contract.contract_name)})</div>` +
+          ? `<div style="margin-bottom:6px;font-weight:600;color:#1e40af;">${escapeHtml(p.linked_contract.contract_no)} - ${escapeHtml(p.linked_contract.contract_name)}</div>` +
             (p.linked_contract.attachment_path
               ? `<div class="related-list-item">
-                   <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 主合同扫描件</span>
+                   <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 扫描件</span>
                    <div class="factions">
                      <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(p.linked_contract.attachment_path)}', '${escapeJsStr(p.linked_contract.contract_no)}')">预览</button>
                      <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(p.linked_contract.attachment_path)}?download=1`)}">下载</a>
                    </div>
                  </div>`
-              : `<div style="color:#9ca3af;">该合同暂未上传主合同扫描件</div>`)
+              : `<div style="color:#9ca3af;">该合同未上传扫描件</div>`)
           : (p.contract_no_manual
-              ? `<div style="color:#d97706;">预填待绑定合同号：${escapeHtml(p.contract_no_manual)}</div>`
-              : `<div style="color:#9ca3af;">暂未关联合同</div>`)}
+              ? `<div style="color:#d97706;">预填合同号：${escapeHtml(p.contract_no_manual)}</div>`
+              : `<div style="color:#9ca3af;">未关联</div>`)}
       </div>
     `;
 
-    toolbar.innerHTML = `<span>💡 点击左侧文件即可在线预览</span>`;
+    toolbar.innerHTML = `<span>文件预览</span>`;
     if (files[0]) {
       previewFileInBox(files[0].file_path, files[0].file_original_name);
     } else if (p.linked_contract?.attachment_path) {
@@ -1876,8 +1850,8 @@ function previewFileInBox(relPath, title) {
   } else {
     box.innerHTML = `
       <div class="empty-preview">
-        <p>文件 <strong>${escapeHtml(title)}</strong> (${ext.toUpperCase()}) 不支持直接内嵌预览</p>
-        <p style="margin-top:12px;"><a class="btn btn-primary" href="${dlUrl}">📥 点击下载到本地查看</a></p>
+        <p>文件 <strong>${escapeHtml(title)}</strong> (${ext.toUpperCase()}) 不支持内嵌预览</p>
+        <p style="margin-top:12px;"><a class="btn btn-primary" href="${dlUrl}">📥 下载查看</a></p>
       </div>
     `;
   }
@@ -1904,7 +1878,7 @@ function exportCombinedWorkbook() {
   window.location.href = withTokenUrl('/api/export/combined');
 }
 
-// ==================== 12. 多机局域网协同：静默同步（带弹窗防打扰锁） ====================
+// ==================== 12. 静默同步 ====================
 function hasOpenModal() {
   const ids = [
     'lan_auth_overlay', 'lan_security_modal', 'presets_modal',
