@@ -8,7 +8,7 @@
     "start": "electron .",
     "server": "electron -r ./server.js",
     "test": "electron test-smoke.js",
-    "postinstall": "node -e \"const {execSync}=require('child_process');const p=require('path');const pkg=require('./node_modules/electron/package.json');const bsDir=p.join(__dirname,'node_modules','better-sqlite3');execSync('npx prebuild-install -r electron -t '+pkg.version,{cwd:bsDir,stdio:'inherit'});\"",
+    "postinstall": "node -e \"const {execSync}=require('child_process');const p=require('path');const pkg=require('./node_modules/electron/package.json');const bsDir=p.join(__dirname,'node_modules','better-sqlite3');const cmd='npx prebuild-install -r electron -t '+pkg.version;let ok=false;for(let i=1;i<=3;i++){try{execSync(cmd,{cwd:bsDir,stdio:'inherit'});ok=true;break;}catch(e){console.warn('prebuild-install retry '+i);}}if(!ok){execSync(cmd+' --mirror https://npmmirror.com/mirrors/better-sqlite3/',{cwd:bsDir,stdio:'inherit'});}\"",
     "dist:win": "electron-builder --win portable nsis --x64 --publish never",
     "dist:portable": "electron-builder --win portable --x64 --publish never",
     "dist:setup": "electron-builder --win nsis --x64 --publish never"
