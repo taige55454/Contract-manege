@@ -9,6 +9,7 @@ const XLSX = require('xlsx-js-style');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+let currentListeningPort = PORT;
 
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
@@ -46,14 +47,28 @@ function sanitizeFileToken(str, maxLen = 85) {
 }
 
 /**
- * 构建规范化的资料文件夹名称：序号_编号_名称
+ * 构建规范化的基础标识前缀：序号_编号_名称
  * 例如：2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同
  */
-function buildStandardFolderName(seqNo, codeNo, itemName) {
+function buildStandardBaseTitle(seqNo, codeNo, itemName) {
   const s = sanitizeFileToken(seqNo || '0000-000', 15);
   const c = sanitizeFileToken(codeNo || 'NO', 35);
   const n = sanitizeFileToken(itemName || '未命名', 50);
   return `${s}_${c}_${n}`;
+}
+
+/**
+ * 合同其他相关资料专属文件夹名称：序号_合同编号_合同名称_其他合同附件
+ */
+function buildContractRelatedFolderName(seqNo, contractNo, contractName) {
+  return `${buildStandardBaseTitle(seqNo, contractNo, contractName)}_其他合同附件`;
+}
+
+/**
+ * 采购立项相关资料专属文件夹名称：序号_立项编号_项目名称_立项资料
+ */
+function buildProcurementFolderName(seqNo, procurementNo, projectName) {
+  return `${buildStandardBaseTitle(seqNo, procurementNo, projectName)}_立项资料`;
 }
 
 function escapeExcelFormulaStr(str) {
@@ -342,7 +357,7 @@ function getDynamicContractStatusPairServer() {
   return { activeLabel, expiredLabel };
 }
 
-// ==================== 4. 局域网安全口令鉴权中间件 ====================
+// ==================== 4. 局域网安全口令鉴权中间件（修复动态端口实时同步） ====================
 function getLanSecurityConfig() {
   try {
     const row = db.prepare(`SELECT value FROM app_settings WHERE key = 'lan_security'`).get();
@@ -381,11 +396,31 @@ function getLanIPv4Addresses() {
   const nets = os.networkInterfaces();
   const ips = [];
   for (const name of Object.keys(nets)) {
+    if (/vmware|virtualbox|vbox|hyper-v|wsl|docker|vethernet|loopback/i.test(name)) continue;
     for (const net of nets[name] || []) {
       if (net.family === 'IPv4' && !net.internal) ips.push(net.address);
     }
   }
+  ips.sort((a, b) => (b.startsWith('192.168.') ? 1 : 0) - (a.startsWith('192.168.') ? 1 : 0));
   return ips;
+}
+
+let activeServer = null;
+
+/**
+ * 动态获取当前真实监听端口（解决 Electron 随机端口启动时前端显示 3000 的问题）
+ */
+function getActualListeningPort(req) {
+  if (activeServer && typeof activeServer.address === 'function') {
+    const addr = activeServer.address();
+    if (addr && typeof addr === 'object' && addr.port) {
+      return addr.port;
+    }
+  }
+  if (req && req.socket && req.socket.localPort) {
+    return req.socket.localPort;
+  }
+  return currentListeningPort || PORT;
 }
 
 app.get('/api/lan-auth/status', (req, res) => {
@@ -394,6 +429,7 @@ app.get('/api/lan-auth/status', (req, res) => {
   const clientToken = req.headers['x-lan-token'] || req.query.token || '';
   const needPasscode = Boolean(cfg.passcode && String(cfg.passcode).trim());
   const isAuthed = isLocal || !needPasscode || verifyLanToken(clientToken, String(cfg.passcode).trim());
+  const realPort = getActualListeningPort(req);
 
   res.json({
     success: true,
@@ -401,8 +437,8 @@ app.get('/api/lan-auth/status', (req, res) => {
     enabled: cfg.enabled !== false,
     locked: !isLocal && needPasscode,
     authorized: isAuthed,
-    lan_urls: getLanIPv4Addresses().map(ip => `http://${ip}:${PORT}`),
-    port: PORT,
+    lan_urls: getLanIPv4Addresses().map(ip => `http://${ip}:${realPort}`),
+    port: realPort,
     ...(isLocal ? { passcode: cfg.passcode || '' } : {})
   });
 });
@@ -448,7 +484,7 @@ function lanAuthGuard(req, res, next) {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', lanAuthGuard);
 
-// ==================== 5. 智能日期解析、年份序号重排与规范化文件夹同步引擎 ====================
+// ==================== 5. 智能日期解析、年份序号重排与规范化文件/文件夹同步引擎 ====================
 function normalizeSmartDateStr(raw) {
   const str = String(raw || '').trim();
   if (!str) return '';
@@ -500,7 +536,39 @@ function autoRefreshExpiredContractsInDB() {
 }
 
 /**
- * 将合同其他资料所在的文件夹自动规范化为：uploads/related/序号_合同编号_合同名称/
+ * 将主合同扫描件自动规范化重命名为：uploads/序号_合同编号_合同名称.ext
+ * 例如：uploads/2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同.pdf
+ */
+function syncContractMainScanOnDisk(contractId) {
+  const c = db.prepare(`SELECT id, seq_no, contract_no, contract_name, attachment_path FROM contracts WHERE id = ?`).get(contractId);
+  if (!c || !c.attachment_path) return;
+
+  const absOld = resolveSafeUploadPath(c.attachment_path);
+  if (!absOld || !fs.existsSync(absOld)) return;
+
+  const ext = path.extname(absOld) || '.pdf';
+  const baseTitle = buildStandardBaseTitle(c.seq_no, c.contract_no, c.contract_name);
+  const idealRelName = `${baseTitle}${ext}`;
+
+  if (c.attachment_path === idealRelName) return;
+
+  let absNew = path.join(UPLOAD_DIR, idealRelName);
+  let finalRelName = idealRelName;
+  if (fs.existsSync(absNew) && path.resolve(absNew) !== path.resolve(absOld)) {
+    finalRelName = `${baseTitle}_${Date.now()}${ext}`;
+    absNew = path.join(UPLOAD_DIR, finalRelName);
+  }
+
+  try {
+    fs.renameSync(absOld, absNew);
+    db.prepare(`UPDATE contracts SET attachment_path = ? WHERE id = ?`).run(finalRelName, c.id);
+  } catch (e) {
+    console.warn('重命名主合同扫描件失败:', e.message);
+  }
+}
+
+/**
+ * 将合同其他资料所在的文件夹自动规范化为：uploads/related/序号_合同编号_合同名称_其他合同附件/
  */
 function syncContractRelatedFolderOnDisk(contractId) {
   const c = db.prepare(`SELECT id, seq_no, contract_no, contract_name FROM contracts WHERE id = ?`).get(contractId);
@@ -508,7 +576,7 @@ function syncContractRelatedFolderOnDisk(contractId) {
   const files = db.prepare(`SELECT id, file_path, file_original_name FROM contract_related_files WHERE contract_id = ?`).all(contractId);
   if (files.length === 0) return;
 
-  const idealFolder = buildStandardFolderName(c.seq_no, c.contract_no, c.contract_name);
+  const idealFolder = buildContractRelatedFolderName(c.seq_no, c.contract_no, c.contract_name);
   const targetDir = path.join(RELATED_UPLOAD_DIR, idealFolder);
   if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
 
@@ -547,7 +615,7 @@ function syncContractRelatedFolderOnDisk(contractId) {
 }
 
 /**
- * 将采购立项资料所在的文件夹自动规范化为：uploads/procurement/序号_立项编号_项目名称/
+ * 将采购立项资料所在的文件夹自动规范化为：uploads/procurement/序号_立项编号_项目名称_立项资料/
  */
 function syncProcurementFolderOnDisk(procId) {
   const p = db.prepare(`SELECT id, seq_no, procurement_no, project_name FROM procurement_projects WHERE id = ?`).get(procId);
@@ -555,7 +623,7 @@ function syncProcurementFolderOnDisk(procId) {
   const files = db.prepare(`SELECT id, file_path, file_original_name FROM procurement_files WHERE procurement_id = ?`).all(procId);
   if (files.length === 0) return;
 
-  const idealFolder = buildStandardFolderName(p.seq_no, p.procurement_no, p.project_name);
+  const idealFolder = buildProcurementFolderName(p.seq_no, p.procurement_no, p.project_name);
   const targetDir = path.join(PROC_UPLOAD_DIR, idealFolder);
   if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
 
@@ -594,7 +662,7 @@ function syncProcurementFolderOnDisk(procId) {
 }
 
 /**
- * 合同台账序号重排（统一为 YYYY-001）并同步所有关联资料文件夹名称
+ * 合同台账序号重排（统一为 YYYY-001）并同步所有主合同扫描件名称与关联资料文件夹名称
  */
 function recalculateAllSeqNos() {
   const all = db.prepare(`SELECT id, sign_date, contract_no FROM contracts ORDER BY sign_date ASC, contract_no ASC, id ASC`).all();
@@ -610,6 +678,7 @@ function recalculateAllSeqNos() {
   });
   tx();
   for (const row of all) {
+    syncContractMainScanOnDisk(row.id);
     syncContractRelatedFolderOnDisk(row.id);
   }
 }
@@ -816,10 +885,10 @@ const uploadStorage = multer.diskStorage({
       let folderToken = '';
       if (req.params && req.params.id) {
         const cRow = db.prepare(`SELECT seq_no, contract_no, contract_name FROM contracts WHERE id = ?`).get(req.params.id);
-        if (cRow) folderToken = buildStandardFolderName(cRow.seq_no, cRow.contract_no, cRow.contract_name);
+        if (cRow) folderToken = buildContractRelatedFolderName(cRow.seq_no, cRow.contract_no, cRow.contract_name);
       }
       if (!folderToken) {
-        folderToken = buildStandardFolderName('TEMP', req.body?.contract_no || 'NEW', req.body?.contract_name || 'CONTRACT');
+        folderToken = buildContractRelatedFolderName('TEMP', req.body?.contract_no || 'NEW', req.body?.contract_name || 'CONTRACT');
       }
       const targetDir = path.join(RELATED_UPLOAD_DIR, folderToken);
       if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
@@ -828,10 +897,10 @@ const uploadStorage = multer.diskStorage({
       let folderToken = '';
       if (req.params && req.params.id) {
         const pRow = db.prepare(`SELECT seq_no, procurement_no, project_name FROM procurement_projects WHERE id = ?`).get(req.params.id);
-        if (pRow) folderToken = buildStandardFolderName(pRow.seq_no, pRow.procurement_no, pRow.project_name);
+        if (pRow) folderToken = buildProcurementFolderName(pRow.seq_no, pRow.procurement_no, pRow.project_name);
       }
       if (!folderToken) {
-        folderToken = buildStandardFolderName('TEMP', req.body?.procurement_no || 'NEW', req.body?.project_name || 'PROC');
+        folderToken = buildProcurementFolderName('TEMP', req.body?.procurement_no || 'NEW', req.body?.project_name || 'PROC');
       }
       const targetDir = path.join(PROC_UPLOAD_DIR, folderToken);
       if (!fs.existsSync(targetDir)) fs.mkdirSync(targetDir, { recursive: true });
@@ -846,15 +915,21 @@ const uploadStorage = multer.diskStorage({
     const baseOrig = sanitizeFileToken(path.basename(orig, ext), 55);
 
     if (file.fieldname === 'attachment') {
-      let cNo = req.body?.contract_no;
-      if (!cNo && req.params?.id) {
-        const cRow = db.prepare(`SELECT contract_no FROM contracts WHERE id = ?`).get(req.params.id);
-        if (cRow) cNo = cRow.contract_no;
+      let seqNo = 'TEMP';
+      let cNo = req.body?.contract_no || '';
+      let cName = req.body?.contract_name || '';
+      if (req.params?.id) {
+        const cRow = db.prepare(`SELECT seq_no, contract_no, contract_name FROM contracts WHERE id = ?`).get(req.params.id);
+        if (cRow) {
+          seqNo = cRow.seq_no || 'TEMP';
+          if (!cNo) cNo = cRow.contract_no;
+          if (!cName) cName = cRow.contract_name;
+        }
       }
-      const token = sanitizeFileToken(cNo || `CONTRACT_${Date.now()}`, 45);
-      let finalName = `${token}${ext}`;
+      const baseTitle = buildStandardBaseTitle(seqNo, cNo || `CONTRACT_${Date.now()}`, cName || '未命名');
+      let finalName = `${baseTitle}${ext}`;
       if (fs.existsSync(path.join(UPLOAD_DIR, finalName))) {
-        finalName = `${token}_${Date.now()}${ext}`;
+        finalName = `${baseTitle}_${Date.now()}${ext}`;
       }
       cb(null, finalName);
     } else if (file.fieldname === 'related_files') {
@@ -881,30 +956,6 @@ const upload = multer({
   storage: uploadStorage,
   limits: { fileSize: 50 * 1024 * 1024 }
 });
-
-function renameMainScanToMatchContractNo(currentRelPath, contractNo) {
-  if (!currentRelPath) return '';
-  const absOld = resolveSafeUploadPath(currentRelPath);
-  if (!absOld || !fs.existsSync(absOld)) return currentRelPath;
-
-  const ext = path.extname(absOld) || '.pdf';
-  const safeToken = sanitizeFileToken(contractNo);
-  const idealRelName = `${safeToken}${ext}`;
-  if (currentRelPath === idealRelName) return currentRelPath;
-
-  let absNew = path.join(UPLOAD_DIR, idealRelName);
-  let finalRelName = idealRelName;
-  if (fs.existsSync(absNew) && path.resolve(absNew) !== path.resolve(absOld)) {
-    finalRelName = `${safeToken}_${Date.now()}${ext}`;
-    absNew = path.join(UPLOAD_DIR, finalRelName);
-  }
-  try {
-    fs.renameSync(absOld, absNew);
-    return finalRelName;
-  } catch (e) {
-    return currentRelPath;
-  }
-}
 
 app.get('/uploads/*', lanAuthGuard, (req, res) => {
   const relPath = req.params[0] || '';
@@ -1057,13 +1108,7 @@ app.get('/api/procurements/next-no', (req, res) => {
 });
 
 // ==================== 9. 合同与采购双向排他绑定、一键解绑与水合引擎 ====================
-/**
- * 同步合同 -> 采购立项的双向排他绑定：
- * - 当 allowAutoMatchManual=true（新增合同时）且未选立项，可自动吸附预填了该合同号的未绑定立项
- * - 当 allowAutoMatchManual=false（编辑合同主動解绑时），彻底清除双端绑定与预填合同号
- */
 function syncContractProcurementLink(contractId, contractNo, procurementId, allowAutoMatchManual = false) {
-  // 1. 先清理旧绑定到该合同的所有采购立项
   db.prepare(`
     UPDATE procurement_projects
     SET contract_id = NULL,
@@ -1082,7 +1127,6 @@ function syncContractProcurementLink(contractId, contractNo, procurementId, allo
   }
 
   if (targetProcId) {
-    // 确保一对一排他：若目标立项此前绑了其他合同，先解绑旧合同
     db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ? AND id != ?`).run(targetProcId, contractId);
     db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(targetProcId, contractId);
     db.prepare(`
@@ -1102,9 +1146,6 @@ function syncContractProcurementLink(contractId, contractNo, procurementId, allo
   }
 }
 
-/**
- * 原子解绑：解除指定合同与采购立项之间的双向关联
- */
 function unbindContractAndProcurement({ contractId = null, procurementId = null }) {
   const tx = db.transaction(() => {
     if (contractId) {
@@ -1183,7 +1224,6 @@ function hydrateContractRow(row) {
     : db.prepare(`SELECT * FROM procurement_projects WHERE contract_id = ? OR (contract_no_manual != '' AND contract_no_manual = ?)`).get(row.id, row.contract_no);
 
   if (procRow) {
-    // 若数据库单侧外键尚未写回，自动自愈补齐双向指针
     if (row.procurement_id !== procRow.id || procRow.contract_id !== row.id) {
       try {
         db.prepare(`UPDATE contracts SET procurement_id = ? WHERE id = ?`).run(procRow.id, row.id);
@@ -1202,11 +1242,6 @@ function hydrateContractRow(row) {
   };
 }
 
-/**
- * 采购立项行水合：
- * 支持三重双向反查（按 contract_id / 按 contracts.procurement_id / 按预填合同号），
- * 确保关联合同后 100% 拿到合同的 attachment_path（主合同扫描件路径）用于生成 Excel 超链接！
- */
 function hydrateProcurementRow(row) {
   if (!row) return null;
   const files = db.prepare(`SELECT * FROM procurement_files WHERE procurement_id = ? ORDER BY id ASC`).all(row.id);
@@ -1224,7 +1259,6 @@ function hydrateProcurementRow(row) {
   }
 
   if (cRow) {
-    // 自动自愈同步双端外键，确保数据绝对一致
     if (row.contract_id !== cRow.id || cRow.procurement_id !== row.id) {
       try {
         db.prepare(`UPDATE procurement_projects SET contract_id = ?, has_contract = '是', contract_no_manual = ? WHERE id = ?`).run(cRow.id, cRow.contract_no, row.id);
@@ -1244,7 +1278,7 @@ function hydrateProcurementRow(row) {
   };
 }
 
-// ==================== 10. 查询过滤函数与 Excel 导出构建器（前置以避免 :id 路由拦截） ====================
+// ==================== 10. 查询过滤函数与 Excel 导出构建器（多文件超链接指向文件夹） ====================
 function queryFilteredContracts(query = {}) {
   autoRefreshExpiredContractsInDB();
 
@@ -1349,11 +1383,23 @@ function buildBorderSpec(isGroupBottom = false) {
 }
 
 /**
+ * 提取相对路径所在的文件夹路径（用于多文件资料超链接直接打开对应文件夹）
+ */
+function getFolderUrlFromRelFile(fileRelPath, fallbackFolderRelPath) {
+  if (fileRelPath) {
+    const dir = path.posix.dirname(String(fileRelPath).replace(/\\/g, '/'));
+    if (dir && dir !== '.') {
+      return `uploads/${dir}`;
+    }
+  }
+  return `uploads/${fallbackFolderRelPath}`;
+}
+
+/**
  * 合同台账 Excel 构建器：
- * - 共 34 列 (索引 0 ~ 33，对应 A ~ AH 列)
- * - 关联采购立项号列：若关联立项上传了立项资料，直接在立项号上加超链接（显示文字仍为立项号）
- * - 主合同扫描件列：直接显示文件名（如 HT-ABC-xxx.pdf）并带超链接
- * - 第 1、2 行无底色填充，所有行高统一为 50 磅 (hpt: 50)
+ * - 第 30 列（主合同扫描件）：单文件，直接超链接到 `uploads/序号_合同编号_合同名称.pdf`
+ * - 第 31 列（关联采购立项号）：多文件，超链接直接指向该立项对应的 `_立项资料` 文件夹
+ * - 第 32 列（其他相关资料）：多文件，超链接直接指向该合同对应的 `_其他合同附件` 文件夹
  */
 function buildContractWorksheet(rows) {
   const headers = [
@@ -1462,10 +1508,9 @@ function buildContractWorksheet(rows) {
     { wch: 13 }, { wch: 13 }, { wch: 10 }, { wch: 15 }, { wch: 7 },
     { wch: 13 }, { wch: 9 },  { wch: 11 },
     { wch: 13 }, { wch: 9 },  { wch: 11 }, { wch: 26 },
-    { wch: 22 }, { wch: 18 }, { wch: 20 }, { wch: 15 }
+    { wch: 24 }, { wch: 18 }, { wch: 22 }, { wch: 15 }
   ];
 
-  // 所有行高统一设为 50 磅
   ws['!rows'] = [];
   for (let r = 0; r < currentRowIdx; r++) {
     ws['!rows'][r] = { hpt: 50 };
@@ -1498,20 +1543,26 @@ function buildContractWorksheet(rows) {
 
         if (meta.isFirstInGroup) {
           if (c === 30 && meta.c.attachment_path) {
+            // 主合同扫描件是单个文件，直接链接到该扫描件文件
             const relUrl = escapeExcelFormulaStr(`uploads/${meta.c.attachment_path}`);
             const label = escapeExcelFormulaStr(meta.scanFileName);
             ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.scanFileName };
           } else if (c === 31 && meta.procNo && meta.procFiles.length > 0) {
-            const relUrl = escapeExcelFormulaStr(`uploads/${meta.procFiles[0].file_path}`);
+            // 关联采购立项资料可能是多个文件，超链接指向对应的【_立项资料】文件夹
+            const lp = meta.c.linked_procurement;
+            const fallbackFolder = `procurement/${buildProcurementFolderName(lp.seq_no, lp.procurement_no, lp.project_name)}`;
+            const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(meta.procFiles[0].file_path, fallbackFolder));
             const label = escapeExcelFormulaStr(meta.procNo);
-            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.procNo };
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${folderUrl}","${label}")`, v: meta.procNo };
           } else if (c === 32 && meta.relFiles.length > 0) {
-            const relUrl = escapeExcelFormulaStr(`uploads/${meta.relFiles[0].file_path}`);
+            // 合同其他相关资料可能是多个文件，超链接指向对应的【_其他合同附件】文件夹
+            const fallbackFolder = `related/${buildContractRelatedFolderName(meta.c.seq_no, meta.c.contract_no, meta.c.contract_name)}`;
+            const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(meta.relFiles[0].file_path, fallbackFolder));
             const dispText = meta.relFiles.length === 1
               ? meta.relFiles[0].file_original_name
               : `${meta.relFiles[0].file_original_name} 等${meta.relFiles.length}份`;
             const label = escapeExcelFormulaStr(dispText);
-            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: dispText };
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${folderUrl}","${label}")`, v: dispText };
           }
         }
 
@@ -1540,9 +1591,8 @@ function buildContractWorksheet(rows) {
 
 /**
  * 采购立项台账 Excel 构建器：
- * - 共 18 列 (索引 0 ~ 17，对应 A ~ R 列)
- * - 第 16 列 (索引 15，P 列：关联合同编号)：只要关联的合同上传了主合同扫描件（attachment_path），
- *   直接在合同编号上生成超链接（显示文字仍为合同编号，点击直接打开合同扫描件）！
+ * - 第 15 列 (P 列：关联合同编号)：单文件扫描件，直接链接到主合同扫描件文件（若未传主扫描件但有其他资料，则链接到其他资料文件夹）
+ * - 第 17 列 (R 列：立项相关资料)：多文件，超链接直接指向对应的【_立项资料】文件夹
  */
 function buildProcurementWorksheet(rows) {
   const headers = [
@@ -1627,22 +1677,26 @@ function buildProcurementWorksheet(rows) {
         const hAlign = moneyCols.has(c) ? 'right' : (centerCols.has(c) ? 'center' : 'left');
 
         if (c === 15 && pItem.linked_contract) {
-          // 优先链接到关联合同的主合同扫描件；若未传主扫描件但有其他资料，则回退链接到第一份其他资料
-          const targetContractFile = pItem.linked_contract.attachment_path
-            || (pItem.linked_contract.related_files && pItem.linked_contract.related_files[0] && pItem.linked_contract.related_files[0].file_path)
-            || '';
-          if (targetContractFile) {
-            const relUrl = escapeExcelFormulaStr(`uploads/${targetContractFile}`);
-            const label = escapeExcelFormulaStr(pItem.linked_contract.contract_no);
-            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: pItem.linked_contract.contract_no };
+          const lc = pItem.linked_contract;
+          if (lc.attachment_path) {
+            const relUrl = escapeExcelFormulaStr(`uploads/${lc.attachment_path}`);
+            const label = escapeExcelFormulaStr(lc.contract_no);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: lc.contract_no };
+          } else if (lc.related_files && lc.related_files.length > 0) {
+            const fallbackFolder = `related/${buildContractRelatedFolderName(lc.seq_no, lc.contract_no, lc.contract_name)}`;
+            const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(lc.related_files[0].file_path, fallbackFolder));
+            const label = escapeExcelFormulaStr(lc.contract_no);
+            ws[cellRef] = { t: 's', f: `HYPERLINK("${folderUrl}","${label}")`, v: lc.contract_no };
           }
         } else if (c === 17 && pItem.files && pItem.files.length > 0) {
-          const relUrl = escapeExcelFormulaStr(`uploads/${pItem.files[0].file_path}`);
+          // 立项相关资料可能是多个文件，超链接直接指向对应的【_立项资料】文件夹
+          const fallbackFolder = `procurement/${buildProcurementFolderName(pItem.seq_no, pItem.procurement_no, pItem.project_name)}`;
+          const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(pItem.files[0].file_path, fallbackFolder));
           const dispText = pItem.files.length === 1
             ? pItem.files[0].file_original_name
             : `${pItem.files[0].file_original_name} 等${pItem.files.length}份`;
           const label = escapeExcelFormulaStr(dispText);
-          ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: dispText };
+          ws[cellRef] = { t: 's', f: `HYPERLINK("${folderUrl}","${label}")`, v: dispText };
         }
 
         const isHyperlinkCell = Boolean(ws[cellRef].f && String(ws[cellRef].f).startsWith('HYPERLINK'));
@@ -1666,7 +1720,7 @@ function buildProcurementWorksheet(rows) {
   return ws;
 }
 
-// ==================== 11. Excel 三大导出路由（置于 :id 路由之前，彻底杜绝路由冲突） ====================
+// ==================== 11. Excel 三大导出路由 ====================
 app.get('/api/export/excel', (req, res) => {
   try {
     const query = req.query.mode === 'all' ? {} : req.query;
@@ -1779,7 +1833,7 @@ app.post('/api/contracts', contractUploadFields, (req, res) => {
         dateVal: signDate
       });
 
-      const finalMainPath = mainFile ? renameMainScanToMatchContractNo(mainFile.filename, finalContractNo) : '';
+      const tempMainPath = mainFile ? mainFile.filename : '';
 
       const stmt = db.prepare(`
         INSERT INTO contracts (
@@ -1832,7 +1886,7 @@ app.post('/api/contracts', contractUploadFields, (req, res) => {
         warranty_bond_status: first.warranty_bond_status || '无',
         warranty_bond_expiry_date: first.warranty_bond_expiry_date || '',
         counterparties_json: JSON.stringify(parties),
-        attachment_path: finalMainPath,
+        attachment_path: tempMainPath,
         attachment_original_name: mainFile ? decodeFilename(mainFile.originalname) : '',
         procurement_id: b.procurement_id ? Number(b.procurement_id) : null,
         remark: (b.remark || '').trim()
@@ -1849,8 +1903,8 @@ app.post('/api/contracts', contractUploadFields, (req, res) => {
         relStmt.run(newId, relPath, decodeFilename(rf.originalname), rf.size || 0);
       }
 
-      // 新增合同时 allowAutoMatchManual = true，允许自动匹配预填了该合同号的未绑定立项
       syncContractProcurementLink(newId, finalContractNo, b.procurement_id, true);
+      // recalculateAllSeqNos 会自动计算出正式 seq_no，并将主合同扫描件与关联资料文件夹重命名为【序号_编号_名称】格式
       recalculateAllSeqNos();
     });
 
@@ -1891,10 +1945,8 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
       let attachment_original_name = old.attachment_original_name;
 
       if (mainFile) {
-        attachment_path = renameMainScanToMatchContractNo(mainFile.filename, newContractNo);
+        attachment_path = mainFile.filename;
         attachment_original_name = decodeFilename(mainFile.originalname);
-      } else if (attachment_path && old.contract_no !== newContractNo) {
-        attachment_path = renameMainScanToMatchContractNo(attachment_path, newContractNo);
       }
 
       db.prepare(`
@@ -1978,13 +2030,12 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
         relStmt.run(id, relPath, decodeFilename(rf.originalname), rf.size || 0);
       }
 
-      // 编辑合同时 allowAutoMatchManual = false，若用户清空了关联立项则彻底解绑
-      syncContractProcurementLink(id, newContractNo, b.procurement_id, false);
-      recalculateAllSeqNos();
-
-      if (mainFile && old.attachment_path && old.attachment_path !== attachment_path) {
+      if (mainFile && old.attachment_path && old.attachment_path !== mainFile.filename) {
         safeUnlinkUploadFile(old.attachment_path);
       }
+
+      syncContractProcurementLink(id, newContractNo, b.procurement_id, false);
+      recalculateAllSeqNos();
     });
 
     updateTx();
@@ -2003,8 +2054,7 @@ app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res
       cleanupUploadedReqFiles(req);
       return res.status(400).json({ success: false, message: '上传失败' });
     }
-    const finalMainPath = renameMainScanToMatchContractNo(req.file.filename, old.contract_no);
-    if (old.attachment_path && old.attachment_path !== finalMainPath) {
+    if (old.attachment_path && old.attachment_path !== req.file.filename) {
       safeUnlinkUploadFile(old.attachment_path);
     }
     const origName = decodeFilename(req.file.originalname);
@@ -2012,9 +2062,15 @@ app.post('/api/contracts/:id/attachment', upload.single('attachment'), (req, res
       UPDATE contracts
       SET attachment_path = ?, attachment_original_name = ?, updated_at = datetime('now', 'localtime')
       WHERE id = ?
-    `).run(finalMainPath, origName, req.params.id);
+    `).run(req.file.filename, origName, old.id);
 
-    res.json({ success: true, attachment_path: finalMainPath, attachment_original_name: origName });
+    syncContractMainScanOnDisk(old.id);
+    const updated = db.prepare(`SELECT attachment_path, attachment_original_name FROM contracts WHERE id = ?`).get(old.id);
+    res.json({
+      success: true,
+      attachment_path: updated.attachment_path,
+      attachment_original_name: updated.attachment_original_name
+    });
   } catch (err) {
     cleanupUploadedReqFiles(req);
     res.status(500).json({ success: false, message: err.message });
@@ -2127,7 +2183,6 @@ app.post('/api/procurements', upload.array('procurement_files', 30), (req, res) 
       }
 
       if (targetContractId) {
-        // 确保一对一排他：若目标合同此前绑了其他立项，先解除旧立项绑定
         db.prepare(`UPDATE procurement_projects SET contract_id = NULL, contract_no_manual = '', has_contract = '否' WHERE contract_id = ?`).run(targetContractId);
       }
 
@@ -2336,14 +2391,13 @@ app.delete('/api/procurements/:id', (req, res) => {
 });
 
 // ==================== 14. 服务启动与优雅退出封装 ====================
-let activeServer = null;
-
 function startServer(port = PORT, host = '0.0.0.0') {
   return new Promise((resolve, reject) => {
     try {
       const srv = app.listen(port, host, () => {
         activeServer = srv;
         const actualPort = srv.address().port;
+        currentListeningPort = actualPort;
         console.log(`✅ 台账服务已启动: http://127.0.0.1:${actualPort}`);
         resolve({
           server: srv,
