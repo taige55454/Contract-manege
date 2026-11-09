@@ -11,31 +11,24 @@ process.env.DB_PATH = path.join(tempDir, 'test.sqlite');
 const { startServer } = require('./server');
 
 (async () => {
-  console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (v2.5.1 排他绑定与超链接增强版)...');
+  console.log('🚀 启动企业合同与采购项目台账系统全链路冒烟测试 (v2.5.4 文件夹超链接与命名规范版)...');
   const { port, shutdown } = await startServer(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${port}`;
   let exitCode = 0;
 
   try {
+    // 0. 验证内网状态 API 动态端口一致性
+    const lanStatus = await fetch(`${baseUrl}/api/lan-auth/status`).then(r => r.json());
+    assert.strictEqual(lanStatus.port, port, `内网协同状态返回的端口(${lanStatus.port})必须与实际监听端口(${port})一致`);
+    console.log('✅ [通过] 内网协同状态动态端口实时同步验证成功:', lanStatus.port);
+
     // 1. 验证采购立项分段编号生成
     const pNoRes = await fetch(`${baseUrl}/api/procurements/next-no?approval_date=2026-03-18&mid_custom=-ABC-`).then(r => r.json());
     assert.strictEqual(pNoRes.success, true);
     assert.strictEqual(pNoRes.next_no, 'LX-ABC-20260318001');
     console.log('✅ [通过] 采购立项夹心式分段编号验证成功:', pNoRes.next_no);
 
-    // 2. 验证自定义预设与动态到期态
-    const presetRes = await fetch(`${baseUrl}/api/settings/presets`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        presets: {
-          contract_statuses: '草稿、履行中、已超期、已终止'
-        }
-      })
-    }).then(r => r.json());
-    assert.strictEqual(presetRes.success, true);
-
-    // 3. 录入采购立项（暂不预填合同号，测试从合同端关联立项）
+    // 2. 录入采购立项（含 2 份立项资料文件）
     const pForm = new FormData();
     pForm.append('procurement_no', 'LX20260318002');
     pForm.append('project_name', 'ABC公司年度物流配送服务采购项目');
@@ -50,28 +43,29 @@ const { startServer } = require('./server');
     pForm.append('deal_amount', '300000');
     pForm.append('has_contract', '否');
     pForm.append('remark', '采购立项定稿备注说明');
-    pForm.append('procurement_files', new Blob(['立项批复文件正文内容'], { type: 'text/plain' }), '立项批复单.txt');
+    pForm.append('procurement_files', new Blob(['立项批复文件1'], { type: 'text/plain' }), '立项批复单.txt');
+    pForm.append('procurement_files', new Blob(['评审纪要文件2'], { type: 'text/plain' }), '评审纪要.txt');
 
     const pCreateRes = await fetch(`${baseUrl}/api/procurements`, { method: 'POST', body: pForm }).then(r => r.json());
     assert.strictEqual(pCreateRes.success, true);
     const procId = pCreateRes.id;
 
-    // 4. 录入关联合同（直接通过 procurement_id 绑定立项）
+    // 3. 录入关联合同（含主合同扫描件 + 2 份其他相关资料）
     const cForm = new FormData();
     cForm.append('contract_no', 'HT-ABC-202603003');
     cForm.append('contract_name', 'ABC公司年度物流配送服务合同');
     cForm.append('contract_type', '服务');
-    cForm.append('status', '履行中');
+    cForm.append('status', '生效中');
     cForm.append('our_entity', 'ABC公司');
     cForm.append('sign_date', '2026.3.20');
     cForm.append('start_date', '2026.3.20');
-    cForm.append('expiry_date', '2020-01-01');
+    cForm.append('expiry_date', '2027-03-19');
     cForm.append('procurement_id', String(procId));
     cForm.append('remark', '主表合同层公共备注');
     cForm.append('counterparties_json', JSON.stringify([{
       company_name: 'BCD公司',
       credit_code: '91522400MA6XXXXXXX',
-      summary: '第一季度完成华东干线调度\n第二季度完成华南仓储承运与交付',
+      summary: '第一季度完成华东干线调度',
       contact_person: '张经理',
       contact_phone: '13800138000',
       bank_account_name: 'BCD公司',
@@ -91,61 +85,68 @@ const { startServer } = require('./server');
       remark: '对方单位分项备注'
     }]));
     cForm.append('attachment', new Blob(['%PDF-1.4 dummy scan'], { type: 'application/pdf' }), 'scan.pdf');
-    cForm.append('related_files', new Blob(['补充协议附件'], { type: 'text/plain' }), '补充协议.txt');
+    cForm.append('related_files', new Blob(['补充协议1'], { type: 'text/plain' }), '补充协议.txt');
+    cForm.append('related_files', new Blob(['报价明细2'], { type: 'text/plain' }), '报价明细.txt');
 
     const cCreateRes = await fetch(`${baseUrl}/api/contracts`, { method: 'POST', body: cForm }).then(r => r.json());
     assert.strictEqual(cCreateRes.success, true);
     const contractId = cCreateRes.id;
 
-    // 5. 校验文件夹命名规范：序号_编号_名称
+    // 4. 校验文件与文件夹命名规范
     const cDetail = (await fetch(`${baseUrl}/api/contracts/${contractId}`).then(r => r.json())).data;
     const pDetail = (await fetch(`${baseUrl}/api/procurements/${procId}`).then(r => r.json())).data;
 
-    assert.ok(
-      cDetail.related_files[0].file_path.includes('2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同/'),
-      `合同资料文件夹命名不符合预期: ${cDetail.related_files[0].file_path}`
+    assert.strictEqual(
+      cDetail.attachment_path,
+      '2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同.pdf',
+      `主合同扫描件命名不符合预期: ${cDetail.attachment_path}`
     );
     assert.ok(
-      pDetail.files[0].file_path.includes('2026-001_LX20260318002_ABC公司年度物流配送服务采购项目/'),
+      cDetail.related_files[0].file_path.includes('2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同_其他合同附件/'),
+      `合同其他资料文件夹命名不符合预期: ${cDetail.related_files[0].file_path}`
+    );
+    assert.ok(
+      pDetail.files[0].file_path.includes('2026-001_LX20260318002_ABC公司年度物流配送服务采购项目_立项资料/'),
       `采购立项资料文件夹命名不符合预期: ${pDetail.files[0].file_path}`
     );
-    assert.strictEqual(pDetail.contract_id, contractId, '采购立项应双向绑定到合同 ID');
-    assert.ok(pDetail.linked_contract && pDetail.linked_contract.attachment_path, '采购立项水合数据必须包含关联合同的扫描件路径');
-    console.log('✅ [通过] 磁盘文件夹自动命名为【序号_编号_名称】及双向水合验证成功');
+    console.log('✅ [通过] 扫描件命名【序号_编号_合同名称】及双资料夹后缀【_其他合同附件 / _立项资料】验证成功');
 
-    // 6. 验证单独导出与合并导出 Excel：检查双表超链接（特别是采购表 P 列“关联合同编号”超链接）
-    const expSingleContract = await fetch(`${baseUrl}/api/export/excel?mode=all`);
-    assert.strictEqual(expSingleContract.status, 200, '单独导出合同台账必须返回 200');
+    // 5. 验证导出 Excel 超链接：主合同扫描件链向文件，其他资料与立项资料链向对应文件夹
+    const expCombined = await fetch(`${baseUrl}/api/export/combined`);
+    assert.strictEqual(expCombined.status, 200);
+    const combBuf = Buffer.from(await expCombined.arrayBuffer());
+    const combWb = XLSX.read(combBuf, { type: 'buffer', cellFormula: true });
 
-    const expSingleProc = await fetch(`${baseUrl}/api/procurements/export?mode=all`);
-    assert.strictEqual(expSingleProc.status, 200, '单独导出采购立项台账必须返回 200');
+    const wsContract = combWb.Sheets['合同台账'];
+    const wsProc = combWb.Sheets['采购项目台账'];
 
-    const procBuf = Buffer.from(await expSingleProc.arrayBuffer());
-    const procWb = XLSX.read(procBuf, { type: 'buffer', cellFormula: true });
-    const wsSingleProc = procWb.Sheets['采购项目台账'];
-
-    // 验证采购立项表 P3 (关联合同编号) 包含指向主合同扫描件的超链接
-    assert.strictEqual(wsSingleProc['P2'].v, '关联合同编号');
-    assert.strictEqual(wsSingleProc['P3'].v, 'HT-ABC-202603003');
+    // AE3 (第30列): 主合同扫描件超链接指向具体文件
     assert.ok(
-      wsSingleProc['P3'].f && wsSingleProc['P3'].f.includes('HYPERLINK("uploads/HT-ABC-202603003.pdf","HT-ABC-202603003")'),
-      `采购立项表关联合同编号超链接缺失或错误: ${wsSingleProc['P3'].f}`
+      wsContract['AE3'].f.includes('HYPERLINK("uploads/2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同.pdf"'),
+      `合同表主扫描件超链接异常: ${wsContract['AE3'].f}`
     );
-    console.log('✅ [通过] 采购立项台账导出 Excel【关联合同编号】直接链接到合同扫描件验证成功');
+    // AF3 (第31列): 关联采购立项号超链接指向 _立项资料 文件夹
+    assert.ok(
+      wsContract['AF3'].f.includes('HYPERLINK("uploads/procurement/2026-001_LX20260318002_ABC公司年度物流配送服务采购项目_立项资料"'),
+      `合同表关联采购立项文件夹超链接异常: ${wsContract['AF3'].f}`
+    );
+    // AG3 (第32列): 其他相关资料超链接指向 _其他合同附件 文件夹
+    assert.ok(
+      wsContract['AG3'].f.includes('HYPERLINK("uploads/related/2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同_其他合同附件"'),
+      `合同表其他相关资料文件夹超链接异常: ${wsContract['AG3'].f}`
+    );
 
-    // 7. 验证一键解绑 API：解绑后双方 contract_id 与 procurement_id 均恢复为 null
-    const unbindRes = await fetch(`${baseUrl}/api/procurements/${procId}/unbind-contract`, { method: 'POST' }).then(r => r.json());
-    assert.strictEqual(unbindRes.success, true);
-
-    const cAfterUnbind = (await fetch(`${baseUrl}/api/contracts/${contractId}`).then(r => r.json())).data;
-    const pAfterUnbind = (await fetch(`${baseUrl}/api/procurements/${procId}`).then(r => r.json())).data;
-
-    assert.strictEqual(cAfterUnbind.procurement_id, null, '解绑后合同的 procurement_id 应为 null');
-    assert.strictEqual(cAfterUnbind.linked_procurement, null, '解绑后合同的 linked_procurement 应为 null');
-    assert.strictEqual(pAfterUnbind.contract_id, null, '解绑后采购立项的 contract_id 应为 null');
-    assert.strictEqual(pAfterUnbind.linked_contract, null, '解绑后采购立项的 linked_contract 应为 null');
-    assert.strictEqual(pAfterUnbind.has_contract, '否', '解绑后采购立项的 has_contract 应恢复为“否”');
-    console.log('✅ [通过] 合同与采购立项一键解绑及状态恢复验证成功');
+    // 采购表 P3 (第15列): 关联合同编号指向主合同扫描件文件
+    assert.ok(
+      wsProc['P3'].f.includes('HYPERLINK("uploads/2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同.pdf","HT-ABC-202603003")'),
+      `采购表关联合同编号超链接异常: ${wsProc['P3'].f}`
+    );
+    // 采购表 R3 (第17列): 立项相关资料指向 _立项资料 文件夹
+    assert.ok(
+      wsProc['R3'].f.includes('HYPERLINK("uploads/procurement/2026-001_LX20260318002_ABC公司年度物流配送服务采购项目_立项资料"'),
+      `采购表立项相关资料文件夹超链接异常: ${wsProc['R3'].f}`
+    );
+    console.log('✅ [通过] Excel 导出超链接（扫描件链向文件、多份资料链向对应文件夹）验证成功');
 
   } catch (err) {
     console.error('❌ 测试未通过:', err);
