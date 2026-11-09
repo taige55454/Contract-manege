@@ -1,5 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.3 极简清爽界面版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.4 极简清爽 + Enter失焦防误触版)
  */
 
 let currentTab = 'contract';
@@ -472,9 +472,10 @@ async function openLanSecurityModal() {
   document.getElementById('lan_enabled_checkbox').checked = json.enabled !== false;
   document.getElementById('lan_passcode_input').value = json.passcode || '888888';
   const urlsBox = document.getElementById('lan_urls_box');
+  const currentPort = json.port || window.location.port || 3000;
   urlsBox.innerHTML = (json.lan_urls && json.lan_urls.length > 0)
     ? json.lan_urls.join('<br/>')
-    : `http://127.0.0.1:${json.port || 3000}`;
+    : `http://127.0.0.1:${currentPort}`;
   document.getElementById('lan_security_modal').classList.remove('hidden');
 }
 
@@ -1690,9 +1691,9 @@ async function openDetailModal(mode, id) {
         </h4>
         ${c.attachment_path
           ? `<div class="related-list-item">
-               <span class="fname">${escapeHtml(c.attachment_original_name || c.attachment_path)}</span>
+               <span class="fname">${escapeHtml(c.attachment_path)}</span>
                <div class="factions">
-                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(c.attachment_path)}', '${escapeJsStr(c.attachment_original_name || c.attachment_path)}')">预览</button>
+                 <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(c.attachment_path)}', '${escapeJsStr(c.attachment_path)}')">预览</button>
                  <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(c.attachment_path)}?download=1`)}">下载</a>
                </div>
              </div>`
@@ -1750,7 +1751,7 @@ async function openDetailModal(mode, id) {
 
     toolbar.innerHTML = `<span>文件预览</span>`;
     if (c.attachment_path) {
-      previewFileInBox(c.attachment_path, c.attachment_original_name || c.attachment_path);
+      previewFileInBox(c.attachment_path, c.attachment_path);
     } else if (procFiles[0]) {
       previewFileInBox(procFiles[0].file_path, procFiles[0].file_original_name);
     } else if (relFiles[0]) {
@@ -1809,9 +1810,9 @@ async function openDetailModal(mode, id) {
           ? `<div style="margin-bottom:6px;font-weight:600;color:#1e40af;">${escapeHtml(p.linked_contract.contract_no)} - ${escapeHtml(p.linked_contract.contract_name)}</div>` +
             (p.linked_contract.attachment_path
               ? `<div class="related-list-item">
-                   <span class="fname">${escapeHtml(p.linked_contract.contract_no)} 扫描件</span>
+                   <span class="fname">${escapeHtml(p.linked_contract.attachment_path)}</span>
                    <div class="factions">
-                     <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(p.linked_contract.attachment_path)}', '${escapeJsStr(p.linked_contract.contract_no)}')">预览</button>
+                     <button class="btn btn-primary btn-sm" onclick="previewFileInBox('${escapeJsStr(p.linked_contract.attachment_path)}', '${escapeJsStr(p.linked_contract.attachment_path)}')">预览</button>
                      <a class="btn btn-outline btn-sm" href="${withTokenUrl(`/uploads/${encodeURI(p.linked_contract.attachment_path)}?download=1`)}">下载</a>
                    </div>
                  </div>`
@@ -1826,7 +1827,7 @@ async function openDetailModal(mode, id) {
     if (files[0]) {
       previewFileInBox(files[0].file_path, files[0].file_original_name);
     } else if (p.linked_contract?.attachment_path) {
-      previewFileInBox(p.linked_contract.attachment_path, p.linked_contract.contract_no);
+      previewFileInBox(p.linked_contract.attachment_path, p.linked_contract.attachment_path);
     } else {
       preview.innerHTML = `<div class="empty-preview">暂无可预览的资料</div>`;
     }
@@ -1914,7 +1915,27 @@ setInterval(() => {
   if (!document.hidden) silentSyncAll();
 }, 30000);
 
-// ==================== 13. 应用启动初始化 ====================
+// ==================== 13. 录入界面按 Enter 结束当前输入框焦点（防误触自动保存） ====================
+function bindEnterToBlurOnForms() {
+  ['contract_form', 'procurement_form'].forEach(formId => {
+    const formEl = document.getElementById(formId);
+    if (!formEl) return;
+    formEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
+        // 多行文本框 textarea 允许回车换行，按钮允许回车触发，其余所有单行输入框/下拉框按 Enter 均结束当前输入状态
+        if (tag === 'TEXTAREA' || tag === 'BUTTON') return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (e.target && typeof e.target.blur === 'function') {
+          e.target.blur();
+        }
+      }
+    });
+  });
+}
+
+// ==================== 14. 应用启动初始化 ====================
 async function initAppData() {
   await loadDropdownPresets();
   await loadOurEntitySetting();
@@ -1925,6 +1946,7 @@ async function initAppData() {
 
 window.addEventListener('DOMContentLoaded', async () => {
   initYearDropdowns();
+  bindEnterToBlurOnForms();
   const ok = await checkLanAuthStatus();
   if (ok) {
     await initAppData();
