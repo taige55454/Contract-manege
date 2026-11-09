@@ -1,5 +1,5 @@
 /**
- * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.4 极简清爽 + Enter失焦防误触版)
+ * 企业合同与采购项目台账管理系统 - 前端交互核心引擎 (v2.5.5 极简清爽 + 点击序号直接调序版)
  */
 
 let currentTab = 'contract';
@@ -770,7 +770,46 @@ function toggleFreeProcNoMode(forceFree) {
   document.getElementById('toggle_p_no_mode_btn').textContent = isFreeProcNoMode ? '🔢 切换分段自动编号' : '✏️ 切换自由手填';
 }
 
-// ==================== 7. 合同管理台账主表渲染 ====================
+// ==================== 7. 点击序号直接调序（选项 B：插队顺延 + 同步文件命名） ====================
+async function promptReorderSeq(mode, id, currentSeqNo, codeNo) {
+  const parts = String(currentSeqNo || '').split('-');
+  const yearPrefix = parts[0] || new Date().getFullYear();
+  const currentNum = parseInt(parts[1] || '1', 10) || 1;
+
+  const input = prompt(
+    `【调整序号位置】\n当前条目：${codeNo}（当前序号：${currentSeqNo}）\n\n请输入希望调整到的目标序号数字（如输入 1 代表排到 ${yearPrefix}-001，其余条目将自动顺延重排）：`,
+    String(currentNum)
+  );
+  if (input === null) return;
+  const clean = input.trim();
+  if (!clean) return;
+
+  const url = mode === 'contract'
+    ? `/api/contracts/${id}/reorder`
+    : `/api/procurements/${id}/reorder`;
+
+  try {
+    const res = await apiFetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ target_seq: clean })
+    });
+    const json = await res.json();
+    if (!json.success) {
+      alert(json.message || '调整序号失败');
+      return;
+    }
+    if (mode === 'contract') {
+      await loadContracts();
+    } else {
+      await loadProcurements();
+    }
+  } catch (err) {
+    alert(err.message || '调整序号请求失败');
+  }
+}
+
+// ==================== 8. 合同管理台账主表渲染 ====================
 function buildContractQueryParams() {
   const p = new URLSearchParams();
   const no = document.getElementById('filter_no')?.value.trim();
@@ -851,7 +890,9 @@ function renderContractLedgerTable(list) {
       const trClass = `${parityClass} ${isLastInGroup ? 'contract-group-end' : ''}`;
 
       const mergedLeftCells = pIdx === 0 ? `
-        <td rowspan="${span}" class="text-center"><span class="seq-badge">${escapeHtml(c.seq_no)}</span></td>
+        <td rowspan="${span}" class="text-center">
+          <span class="seq-badge" style="cursor:pointer;" title="点击可调整本条序号位置" onclick="promptReorderSeq('contract', ${c.id}, '${escapeJsStr(c.seq_no)}', '${escapeJsStr(c.contract_no)}')">${escapeHtml(c.seq_no)}</span>
+        </td>
         <td rowspan="${span}" class="text-center"><strong>${escapeHtml(c.contract_no)}</strong></td>
         <td rowspan="${span}"><a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('contract', ${c.id})">${escapeHtml(c.contract_name)}</a></td>
         <td rowspan="${span}" class="text-center">${escapeHtml(c.contract_type)}</td>
@@ -919,7 +960,7 @@ function renderContractLedgerTable(list) {
   tbody.innerHTML = htmlRows.join('');
 }
 
-// ==================== 8. 合同新增/编辑弹窗与对方单位卡片（极简清爽版） ====================
+// ==================== 9. 合同新增/编辑弹窗与对方单位卡片（极简清爽版） ====================
 function removeCounterpartyCard(btnEl) {
   const container = document.getElementById('counterparties_container');
   if (!container) return;
@@ -1287,7 +1328,7 @@ async function deleteContractRecord(id, no) {
   }
 }
 
-// ==================== 9. 采购项目立项台账主表与表单逻辑 ====================
+// ==================== 10. 采购项目立项台账主表与表单逻辑 ====================
 function buildProcQueryParams() {
   const p = new URLSearchParams();
   const kw = document.getElementById('proc_filter_kw')?.value.trim();
@@ -1346,7 +1387,9 @@ function renderProcurementTable(list) {
 
     return `
       <tr class="${oddClass}">
-        <td class="text-center"><span class="seq-badge">${escapeHtml(p.seq_no)}</span></td>
+        <td class="text-center">
+          <span class="seq-badge" style="cursor:pointer;" title="点击可调整本条序号位置" onclick="promptReorderSeq('procurement', ${p.id}, '${escapeJsStr(p.seq_no)}', '${escapeJsStr(p.procurement_no)}')">${escapeHtml(p.seq_no)}</span>
+        </td>
         <td class="text-center"><strong>${escapeHtml(p.procurement_no)}</strong></td>
         <td><a class="link-btn" href="javascript:void(0)" onclick="openDetailModal('procurement', ${p.id})">${escapeHtml(p.project_name)}</a></td>
         <td class="text-center">${escapeHtml(p.project_type)}</td>
@@ -1551,7 +1594,7 @@ async function deleteProcRecord(id, no) {
   }
 }
 
-// ==================== 10. 全能详情与文件在线预览 / 一键解绑中心 ====================
+// ==================== 11. 全能详情与文件在线预览 / 一键解绑中心 ====================
 async function unbindInDetailModal(mode, id) {
   if (!confirm('确定解除绑定吗？')) return;
   const url = mode === 'contract'
@@ -1864,7 +1907,7 @@ function closeDetailModal() {
   if (box) box.innerHTML = '';
 }
 
-// ==================== 11. Excel 导出动作绑定 ====================
+// ==================== 12. Excel 导出动作绑定 ====================
 function exportExcel(mode) {
   const params = mode === 'all' ? new URLSearchParams({ mode: 'all' }) : buildContractQueryParams();
   window.location.href = withTokenUrl(`/api/export/excel?${params.toString()}`);
@@ -1879,7 +1922,7 @@ function exportCombinedWorkbook() {
   window.location.href = withTokenUrl('/api/export/combined');
 }
 
-// ==================== 12. 静默同步 ====================
+// ==================== 13. 静默同步 ====================
 function hasOpenModal() {
   const ids = [
     'lan_auth_overlay', 'lan_security_modal', 'presets_modal',
@@ -1915,7 +1958,7 @@ setInterval(() => {
   if (!document.hidden) silentSyncAll();
 }, 30000);
 
-// ==================== 13. 录入界面按 Enter 结束当前输入框焦点（防误触自动保存） ====================
+// ==================== 14. 录入界面按 Enter 结束当前输入框焦点（防误触自动保存） ====================
 function bindEnterToBlurOnForms() {
   ['contract_form', 'procurement_form'].forEach(formId => {
     const formEl = document.getElementById(formId);
@@ -1923,7 +1966,6 @@ function bindEnterToBlurOnForms() {
     formEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter') {
         const tag = (e.target && e.target.tagName) ? e.target.tagName.toUpperCase() : '';
-        // 多行文本框 textarea 允许回车换行，按钮允许回车触发，其余所有单行输入框/下拉框按 Enter 均结束当前输入状态
         if (tag === 'TEXTAREA' || tag === 'BUTTON') return;
         e.preventDefault();
         e.stopPropagation();
@@ -1935,7 +1977,7 @@ function bindEnterToBlurOnForms() {
   });
 }
 
-// ==================== 14. 应用启动初始化 ====================
+// ==================== 15. 应用启动初始化 ====================
 async function initAppData() {
   await loadDropdownPresets();
   await loadOurEntitySetting();
