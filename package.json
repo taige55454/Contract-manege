@@ -1,6 +1,6 @@
 {
   "name": "contract-manager",
-  "version": "2.5.0",
+  "version": "2.5.5",
   "description": "Enterprise Contract & Procurement Ledger Desktop Application",
   "author": "Enterprise Contract Team",
   "main": "main.js",
@@ -8,24 +8,26 @@
     "start": "electron .",
     "server": "electron -r ./server.js",
     "test": "electron test-smoke.js",
-    "postinstall": "electron-builder install-app-deps",
+    "postinstall": "node -e \"const {execSync}=require('child_process');const p=require('path');const pkg=require('./node_modules/electron/package.json');const bsDir=p.join(__dirname,'node_modules','better-sqlite3');execSync('npx prebuild-install -r electron -t '+pkg.version,{cwd:bsDir,stdio:'inherit'});\"",
     "dist:win": "electron-builder --win portable nsis --x64 --publish never",
     "dist:portable": "electron-builder --win portable --x64 --publish never",
     "dist:setup": "electron-builder --win nsis --x64 --publish never"
   },
   "dependencies": {
-    "better-sqlite3": "^11.3.0",
-    "express": "^4.19.2",
-    "multer": "^1.4.5-lts.1",
-    "xlsx-js-style": "^1.2.0"
+    "better-sqlite3": "11.3.0",
+    "express": "4.19.2",
+    "multer": "1.4.5-lts.1",
+    "prebuild-install": "7.1.2",
+    "xlsx-js-style": "1.2.0"
   },
   "devDependencies": {
-    "electron": "^31.7.0",
-    "electron-builder": "^25.1.8"
+    "electron": "31.7.0",
+    "electron-builder": "25.1.8"
   },
   "build": {
     "appId": "com.enterprise.contractmanager",
     "productName": "ContractManager",
+    "npmRebuild": false,
     "compression": "maximum",
     "asar": true,
     "asarUnpack": [
@@ -43,11 +45,15 @@
       "target": [
         {
           "target": "portable",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         },
         {
           "target": "nsis",
-          "arch": ["x64"]
+          "arch": [
+            "x64"
+          ]
         }
       ]
     },
