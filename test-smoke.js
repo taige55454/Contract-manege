@@ -11,7 +11,7 @@ process.env.DB_PATH = path.join(tempDir, 'test.sqlite');
 const { startServer } = require('./server');
 
 (async () => {
-  console.log('🚀 启动企业合同与采购项目台账系统【全量回归测试 (15大模块全覆盖)】...');
+  console.log('🚀 启动企业合同与采购项目台账系统【全量回归测试 (18大模块全覆盖)】...');
   const { port, shutdown } = await startServer(0, '127.0.0.1');
   const baseUrl = `http://127.0.0.1:${port}`;
   let exitCode = 0;
@@ -46,7 +46,7 @@ const { startServer } = require('./server');
     }).then(r => r.json());
     assert.strictEqual(goodLogin.success, true);
     assert.ok(goodLogin.token, '正确口令必须签发会话 Token');
-    console.log('✅ [1/15 通过] 内网协同动态端口实时同步与口令安全鉴权验证成功');
+    console.log('✅ [1/18 通过] 内网协同动态端口实时同步与口令安全鉴权验证成功');
 
     // ==================== 测试 2：默认我方签约主体设置与读取 ====================
     const entityInit = await fetch(`${baseUrl}/api/settings/our-entity`).then(r => r.json());
@@ -58,13 +58,12 @@ const { startServer } = require('./server');
       body: JSON.stringify({ our_entity: 'ABC集团总部' })
     }).then(r => r.json());
     assert.strictEqual(entitySave.our_entity, 'ABC集团总部');
-    // 恢复为 ABC公司
     await fetch(`${baseUrl}/api/settings/our-entity`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ our_entity: 'ABC公司' })
     });
-    console.log('✅ [2/15 通过] 默认我方签约主体读写验证成功');
+    console.log('✅ [2/18 通过] 默认我方签约主体读写验证成功');
 
     // ==================== 测试 3：全局 8 类下拉预设自定义与恢复默认 ====================
     const presetSave = await fetch(`${baseUrl}/api/settings/presets`, {
@@ -82,7 +81,7 @@ const { startServer } = require('./server');
     assert.ok(presetSave.presets.contract_types.includes('战略合作'));
     assert.ok(presetSave.presets.contract_statuses.includes('履行中'));
     assert.ok(presetSave.presets.contract_statuses.includes('已超期'));
-    console.log('✅ [3/15 通过] 全局下拉预设自定义与动态状态词识别验证成功');
+    console.log('✅ [3/18 通过] 全局下拉预设自定义与动态状态词识别验证成功');
 
     // ==================== 测试 4：合同与采购立项夹心式 4 段编号生成规则 ====================
     const cNoRes = await fetch(`${baseUrl}/api/contracts/next-no?sign_date=2026-03-18&mid_custom=ZX-`).then(r => r.json());
@@ -92,7 +91,7 @@ const { startServer } = require('./server');
     const pNoRes = await fetch(`${baseUrl}/api/procurements/next-no?approval_date=2026-03-18&mid_custom=-ABC-`).then(r => r.json());
     assert.strictEqual(pNoRes.success, true);
     assert.strictEqual(pNoRes.next_no, 'LX-ABC-20260318001');
-    console.log('✅ [4/15 通过] 合同与采购夹心式分段编号生成引擎验证成功');
+    console.log('✅ [4/18 通过] 合同与采购夹心式分段编号生成引擎验证成功');
 
     // ==================== 测试 5：采购立项创建、智能日期解析与多附件上传 ====================
     const pForm1 = new FormData();
@@ -116,7 +115,6 @@ const { startServer } = require('./server');
     assert.strictEqual(pCreate1.success, true);
     const procId1 = pCreate1.id;
 
-    // 再创建第 2 条采购立项用于测试采购立项调序
     const pForm2 = new FormData();
     pForm2.append('procurement_no', 'LX20260410002');
     pForm2.append('project_name', 'ABC公司园区安防监控升级采购项目');
@@ -137,7 +135,7 @@ const { startServer } = require('./server');
       pDetail1.files[0].file_path.includes('2026-001_LX20260318001_ABC公司年度物流配送服务采购项目_立项资料/'),
       `立项资料文件夹命名必须以 _立项资料 结尾: ${pDetail1.files[0].file_path}`
     );
-    console.log('✅ [5/15 通过] 采购立项创建、智能日期解析及【_立项资料】文件夹命名验证成功');
+    console.log('✅ [5/18 通过] 采购立项创建、智能日期解析及【_立项资料】文件夹命名验证成功');
 
     // ==================== 测试 6：多对方单位合同录入、智能多税率、到期自动流转与双向绑定 ====================
     const cForm1 = new FormData();
@@ -148,7 +146,7 @@ const { startServer } = require('./server');
     cForm1.append('our_entity', 'ABC公司');
     cForm1.append('sign_date', '2026.3.20');
     cForm1.append('start_date', '2026.3.20');
-    cForm1.append('expiry_date', '2020-01-01'); // 故意设为过去日期，验证自动流转为“已超期”
+    cForm1.append('expiry_date', '2020-01-01'); // 过去日期，自动流转为“已超期”
     cForm1.append('procurement_id', String(procId1));
     cForm1.append('remark', '合同级公共备注');
     cForm1.append('counterparties_json', JSON.stringify([
@@ -207,7 +205,7 @@ const { startServer } = require('./server');
     assert.strictEqual(cDetail1.counterparties[0].bank_code, '102100000018', '开户行号应完整保存');
     assert.strictEqual(cDetail1.counterparties[1].tax_rate, '6%', '单税率应自动补齐 %');
     assert.strictEqual(cDetail1.counterparties[1].amount_excl_tax, 89622.64, '单税率应自动计算不含税价');
-    console.log('✅ [6/15 通过] 一合同多乙方、智能多税率、不含税价推算及到期状态自动流转验证成功');
+    console.log('✅ [6/18 通过] 一合同多乙方、智能多税率、不含税价推算及到期状态自动流转验证成功');
 
     // ==================== 测试 7：主合同扫描件与合同其他资料文件夹命名规范 ====================
     assert.strictEqual(
@@ -219,9 +217,12 @@ const { startServer } = require('./server');
       cDetail1.related_files[0].file_path.includes('2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同_其他合同附件/'),
       `合同其他资料文件夹命名必须以 _其他合同附件 结尾: ${cDetail1.related_files[0].file_path}`
     );
-    console.log('✅ [7/15 通过] 主合同扫描件【序号_编号_合同名称】与【_其他合同附件】文件夹命名验证成功');
+    console.log('✅ [7/18 通过] 主合同扫描件【序号_编号_合同名称】与【_其他合同附件】文件夹命名验证成功');
 
-    // ==================== 测试 8：详情页在线补传附件与单文件删除 ====================
+    // ==================== 测试 8：详情页在线补传附件、下载验证与单文件删除 ====================
+    const dlScanRes = await fetch(`${baseUrl}/uploads/${encodeURI(cDetail1.attachment_path)}?download=1`);
+    assert.strictEqual(dlScanRes.status, 200, '扫描件在线预览/下载路由应返回 200');
+
     const extraRelForm = new FormData();
     extraRelForm.append('related_files', new Blob(['验收单内容'], { type: 'text/plain' }), '验收单.txt');
     const extraRelRes = await fetch(`${baseUrl}/api/contracts/${contractId1}/related-files`, {
@@ -236,7 +237,7 @@ const { startServer } = require('./server');
       method: 'DELETE'
     }).then(r => r.json());
     assert.strictEqual(delRelRes.success, true);
-    console.log('✅ [8/15 通过] 详情页在线补传资料与单文件独立删除验证成功');
+    console.log('✅ [8/18 通过] 详情页在线预览下载、补传资料与单文件独立删除验证成功');
 
     // ==================== 测试 9：点击序号手动调序（选项 B：插队顺延 + 硬盘文件自动改名） ====================
     const cForm2 = new FormData();
@@ -298,25 +299,28 @@ const { startServer } = require('./server');
       afterP1.files[0].file_path.includes('2026-002_LX20260318001_ABC公司年度物流配送服务采购项目_立项资料/'),
       '顺延后立项资料文件夹名应同步变更为 2026-002_...'
     );
-    console.log('✅ [9/15 通过] 合同与采购立项点击序号插队调序、顺延及硬盘文件自动同步改名验证成功');
+    console.log('✅ [9/18 通过] 合同与采购立项点击序号插队调序、顺延及硬盘文件自动同步改名验证成功');
 
-    // ==================== 测试 10：验证编辑已调序合同不会打乱手动调好的顺序 ====================
-    const editForm = new FormData();
-    editForm.append('contract_no', afterC2.contract_no);
-    editForm.append('contract_name', afterC2.contract_name);
-    editForm.append('contract_type', afterC2.contract_type);
-    editForm.append('status', afterC2.status);
-    editForm.append('our_entity', afterC2.our_entity);
-    editForm.append('sign_date', afterC2.sign_date);
-    editForm.append('start_date', afterC2.start_date);
-    editForm.append('expiry_date', afterC2.expiry_date);
-    editForm.append('remark', '更新备注后依然保持001');
-    editForm.append('counterparties_json', JSON.stringify(afterC2.counterparties));
-    const editRes = await fetch(`${baseUrl}/api/contracts/${contractId2}`, { method: 'PUT', body: editForm }).then(r => r.json());
-    assert.strictEqual(editRes.success, true);
-    const afterEditC2 = (await fetch(`${baseUrl}/api/contracts/${contractId2}`).then(r => r.json())).data;
-    assert.strictEqual(afterEditC2.seq_no, '2026-001', '编辑保存后应继续保持手动调整后的 2026-001 序号');
-    console.log('✅ [10/15 通过] 手动调序持久化记忆（编辑不打乱顺序）验证成功');
+    // ==================== 测试 10：验证编辑已调序合同不会打乱手动调好的顺序 & 到期日延后自动恢复履行中 ====================
+    const editForm1 = new FormData();
+    editForm1.append('contract_no', afterC1.contract_no);
+    editForm1.append('contract_name', afterC1.contract_name);
+    editForm1.append('contract_type', afterC1.contract_type);
+    editForm1.append('status', afterC1.status); // 当前为 已超期
+    editForm1.append('our_entity', afterC1.our_entity);
+    editForm1.append('sign_date', afterC1.sign_date);
+    editForm1.append('start_date', afterC1.start_date);
+    editForm1.append('expiry_date', '2029-12-31'); // 延后到期日，应自动从“已超期”恢复为“履行中”
+    editForm1.append('procurement_id', String(procId1));
+    editForm1.append('remark', afterC1.remark);
+    editForm1.append('counterparties_json', JSON.stringify(afterC1.counterparties));
+    const editRes1 = await fetch(`${baseUrl}/api/contracts/${contractId1}`, { method: 'PUT', body: editForm1 }).then(r => r.json());
+    assert.strictEqual(editRes1.success, true);
+
+    const afterEditC1 = (await fetch(`${baseUrl}/api/contracts/${contractId1}`).then(r => r.json())).data;
+    assert.strictEqual(afterEditC1.seq_no, '2026-002', '编辑保存后应保持手动排序后的 2026-002 序号不变');
+    assert.strictEqual(afterEditC1.status, '履行中', '到期日延后至未来日期后应自动恢复为【履行中】');
+    console.log('✅ [10/18 通过] 手动调序持久化记忆（编辑不打乱顺序）及到期日延后状态自动恢复验证成功');
 
     // ==================== 测试 11：多维筛选查询过滤验证 ====================
     const filterByNo = await fetch(`${baseUrl}/api/contracts?no=202603003`).then(r => r.json());
@@ -326,7 +330,7 @@ const { startServer } = require('./server');
     const filterProc = await fetch(`${baseUrl}/api/procurements?dept=运营管理部`).then(r => r.json());
     assert.strictEqual(filterProc.data.length, 1);
     assert.strictEqual(filterProc.data[0].id, procId1);
-    console.log('✅ [11/15 通过] 合同与采购多条件筛选查询验证成功');
+    console.log('✅ [11/18 通过] 合同与采购多条件筛选查询验证成功');
 
     // ==================== 测试 12 & 13：三大 Excel 导出、文件夹超链接与单元格合并验证 ====================
     const expContract = await fetch(`${baseUrl}/api/export/excel?mode=all`);
@@ -341,8 +345,6 @@ const { startServer } = require('./server');
     const wsContract = combWb.Sheets['合同台账'];
     const wsProc = combWb.Sheets['采购项目台账'];
 
-    // 第 3 行是 2026-001 (contractId2，1个乙方，占第3行)
-    // 第 4~5 行是 2026-002 (contractId1，2个乙方，占第4、5行合并)
     assert.strictEqual(wsContract['A3'].v, '2026-001');
     assert.strictEqual(wsContract['A4'].v, '2026-002');
     // AE4: 主合同扫描件超链接 -> 指向单个 PDF 文件
@@ -361,7 +363,6 @@ const { startServer } = require('./server');
       `合同表其他相关资料必须链接到文件夹: ${wsContract['AG4'].f}`
     );
 
-    // 采购表第 4 行是 2026-002 (procId1)
     assert.strictEqual(wsProc['A4'].v, '2026-002');
     // P4: 关联合同编号 -> 指向主合同扫描件 PDF
     assert.ok(
@@ -373,7 +374,7 @@ const { startServer } = require('./server');
       wsProc['R4'].f.includes('HYPERLINK("uploads/procurement/2026-002_LX20260318001_ABC公司年度物流配送服务采购项目_立项资料"'),
       `采购表立项相关资料必须链接到文件夹: ${wsProc['R4'].f}`
     );
-    console.log('✅ [12 & 13/15 通过] 三大 Excel 导出、多乙方合并、扫描件链向文件 & 多份资料链向对应文件夹验证成功');
+    console.log('✅ [12 & 13/18 通过] 三大 Excel 导出、多乙方合并、扫描件链向文件 & 多份资料链向对应文件夹验证成功');
 
     // ==================== 测试 14：合同与采购双向一键解绑验证 ====================
     const unbindRes = await fetch(`${baseUrl}/api/procurements/${procId1}/unbind-contract`, { method: 'POST' }).then(r => r.json());
@@ -384,16 +385,36 @@ const { startServer } = require('./server');
     assert.strictEqual(cAfterUnbind.procurement_id, null);
     assert.strictEqual(pAfterUnbind.contract_id, null);
     assert.strictEqual(pAfterUnbind.has_contract, '否');
-    console.log('✅ [14/15 通过] 合同与采购立项一键双向解绑验证成功');
+    console.log('✅ [14/18 通过] 合同与采购立项一键双向解绑验证成功');
 
-    // ==================== 测试 15：前端代码静态防退化检查（Enter 失焦、点击序号调序、纯净界面） ====================
+    // ==================== 测试 15：删除条目后全表序号自动顺延重排与硬盘文件同步 ====================
+    const delC2Res = await fetch(`${baseUrl}/api/contracts/${contractId2}`, { method: 'DELETE' }).then(r => r.json());
+    assert.strictEqual(delC2Res.success, true);
+
+    const c1AfterDelC2 = (await fetch(`${baseUrl}/api/contracts/${contractId1}`).then(r => r.json())).data;
+    assert.strictEqual(c1AfterDelC2.seq_no, '2026-001', '删除排在 001 的合同后，原 002 合同应自动递补重排为 2026-001');
+    assert.strictEqual(
+      c1AfterDelC2.attachment_path,
+      '2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同.pdf',
+      '递补为 001 后扫描件文件名应自动同步回 2026-001_...'
+    );
+    console.log('✅ [15/18 通过] 删除条目后剩余记录序号自动递补重排与磁盘文件名同步验证成功');
+
+    // ==================== 测试 16 & 17 & 18：前端 HTML/CSS/JS 与主进程代码静态防退化检查 ====================
     const appJsCode = fs.readFileSync(path.join(__dirname, 'public', 'app.js'), 'utf8');
+    const indexHtmlCode = fs.readFileSync(path.join(__dirname, 'public', 'index.html'), 'utf8');
+    const styleCssCode = fs.readFileSync(path.join(__dirname, 'public', 'style.css'), 'utf8');
+    const mainJsCode = fs.readFileSync(path.join(__dirname, 'main.js'), 'utf8');
+
     assert.ok(appJsCode.includes('function bindEnterToBlurOnForms()'), '前端 app.js 必须包含 bindEnterToBlurOnForms 回车失焦函数');
     assert.ok(appJsCode.includes('e.target.blur()'), '前端 app.js 必须在按下 Enter 时触发 e.target.blur()');
     assert.ok(appJsCode.includes('function promptReorderSeq('), '前端 app.js 必须包含 promptReorderSeq 点击序号调序函数');
-    console.log('✅ [15/15 通过] 前端交互源码防退化静态检查（Enter 结束当前输入焦点、点击序号调序）验证成功');
+    assert.ok(indexHtmlCode.includes('id="contract_form"') && indexHtmlCode.includes('id="procurement_form"'), 'index.html 必须包含双台账表单结构');
+    assert.ok(styleCssCode.includes('.seq-badge') && styleCssCode.includes('.ledger-table'), 'style.css 必须包含台账表格与序号标签样式');
+    assert.ok(mainJsCode.includes('startServer(0,'), 'main.js 必须使用动态端口启动后台服务');
+    console.log('✅ [16-18/18 通过] 前端 HTML/CSS/JS 与 Electron 主进程源码完整性防退化检查全部通过');
 
-    console.log('🎉 全部 15 大模块回归测试 100% 通过！');
+    console.log('🎉 全部 18 大模块回归测试 100% 通过！');
   } catch (err) {
     console.error('❌ 回归测试未通过:', err);
     exitCode = 1;
