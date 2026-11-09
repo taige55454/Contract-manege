@@ -182,6 +182,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS contracts (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     seq_no TEXT DEFAULT '2026-001',
+    manual_order INTEGER DEFAULT 0,
     contract_no TEXT NOT NULL UNIQUE,
     contract_name TEXT NOT NULL,
     contract_type TEXT DEFAULT '采购',
@@ -231,6 +232,7 @@ db.exec(`
   CREATE TABLE IF NOT EXISTS procurement_projects (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     seq_no TEXT DEFAULT '2026-001',
+    manual_order INTEGER DEFAULT 0,
     procurement_no TEXT NOT NULL UNIQUE,
     project_name TEXT NOT NULL,
     project_type TEXT DEFAULT '服务类项目',
@@ -263,17 +265,23 @@ db.exec(`
   );
 `);
 
-const existingCols = db.prepare(`PRAGMA table_info(contracts)`).all().map(c => c.name);
-const alterCols = [
+const existingContractCols = db.prepare(`PRAGMA table_info(contracts)`).all().map(c => c.name);
+const alterContractCols = [
   ['seq_no', "TEXT DEFAULT '2026-001'"],
+  ['manual_order', 'INTEGER DEFAULT 0'],
   ['counterparties_json', "TEXT DEFAULT '[]'"],
   ['procurement_id', 'INTEGER DEFAULT NULL'],
   ['remark', "TEXT DEFAULT ''"]
 ];
-for (const [col, def] of alterCols) {
-  if (!existingCols.includes(col)) {
+for (const [col, def] of alterContractCols) {
+  if (!existingContractCols.includes(col)) {
     db.exec(`ALTER TABLE contracts ADD COLUMN ${col} ${def}`);
   }
+}
+
+const existingProcCols = db.prepare(`PRAGMA table_info(procurement_projects)`).all().map(c => c.name);
+if (!existingProcCols.includes('manual_order')) {
+  db.exec(`ALTER TABLE procurement_projects ADD COLUMN manual_order INTEGER DEFAULT 0`);
 }
 
 db.exec(`
@@ -407,9 +415,6 @@ function getLanIPv4Addresses() {
 
 let activeServer = null;
 
-/**
- * 动态获取当前真实监听端口（解决 Electron 随机端口启动时前端显示 3000 的问题）
- */
 function getActualListeningPort(req) {
   if (activeServer && typeof activeServer.address === 'function') {
     const addr = activeServer.address();
@@ -484,7 +489,7 @@ function lanAuthGuard(req, res, next) {
 app.use(express.static(path.join(__dirname, 'public')));
 app.use('/api', lanAuthGuard);
 
-// ==================== 5. 智能日期解析、年份序号重排与规范化文件/文件夹同步引擎 ====================
+// ==================== 5. 智能日期解析、年份序号重排与手动插队调序引擎 ====================
 function normalizeSmartDateStr(raw) {
   const str = String(raw || '').trim();
   if (!str) return '';
@@ -537,7 +542,6 @@ function autoRefreshExpiredContractsInDB() {
 
 /**
  * 将主合同扫描件自动规范化重命名为：uploads/序号_合同编号_合同名称.ext
- * 例如：uploads/2026-001_HT-ABC-202603003_ABC公司年度物流配送服务合同.pdf
  */
 function syncContractMainScanOnDisk(contractId) {
   const c = db.prepare(`SELECT id, seq_no, contract_no, contract_name, attachment_path FROM contracts WHERE id = ?`).get(contractId);
@@ -662,18 +666,32 @@ function syncProcurementFolderOnDisk(procId) {
 }
 
 /**
- * 合同台账序号重排（统一为 YYYY-001）并同步所有主合同扫描件名称与关联资料文件夹名称
+ * 合同台账序号重排（统一为 YYYY-001）：
+ * - 已手动排过序的条目（manual_order > 0）严格保持用户调整后的先后顺序；
+ * - 新录入条目（manual_order = 0）排在同年份末尾，随后统一固化 manual_order = 1, 2, 3...
  */
 function recalculateAllSeqNos() {
-  const all = db.prepare(`SELECT id, sign_date, contract_no FROM contracts ORDER BY sign_date ASC, contract_no ASC, id ASC`).all();
+  const all = db.prepare(`
+    SELECT id, sign_date, contract_no, manual_order
+    FROM contracts
+    ORDER BY
+      substr(sign_date, 1, 4) ASC,
+      CASE WHEN manual_order > 0 THEN 0 ELSE 1 END ASC,
+      manual_order ASC,
+      sign_date ASC,
+      contract_no ASC,
+      id ASC
+  `).all();
+
   const yearCounter = {};
-  const updateStmt = db.prepare(`UPDATE contracts SET seq_no = ? WHERE id = ?`);
+  const updateStmt = db.prepare(`UPDATE contracts SET seq_no = ?, manual_order = ? WHERE id = ?`);
   const tx = db.transaction(() => {
     for (const row of all) {
       const year = (row.sign_date && row.sign_date.slice(0, 4)) || String(new Date().getFullYear());
       yearCounter[year] = (yearCounter[year] || 0) + 1;
-      const formattedSeq = `${year}-${String(yearCounter[year]).padStart(3, '0')}`;
-      updateStmt.run(formattedSeq, row.id);
+      const idx = yearCounter[year];
+      const formattedSeq = `${year}-${String(idx).padStart(3, '0')}`;
+      updateStmt.run(formattedSeq, idx, row.id);
     }
   });
   tx();
@@ -684,24 +702,143 @@ function recalculateAllSeqNos() {
 }
 
 /**
- * 采购立项台账序号重排（统一为 YYYY-001）并同步所有立项资料文件夹名称
+ * 采购立项台账序号重排（统一为 YYYY-001）：
+ * - 同样支持 manual_order 永久记忆用户手动调整后的顺序
  */
 function recalculateAllProcurementSeqNos() {
-  const all = db.prepare(`SELECT id, approval_date, procurement_no FROM procurement_projects ORDER BY approval_date ASC, procurement_no ASC, id ASC`).all();
+  const all = db.prepare(`
+    SELECT id, approval_date, procurement_no, manual_order
+    FROM procurement_projects
+    ORDER BY
+      substr(approval_date, 1, 4) ASC,
+      CASE WHEN manual_order > 0 THEN 0 ELSE 1 END ASC,
+      manual_order ASC,
+      approval_date ASC,
+      procurement_no ASC,
+      id ASC
+  `).all();
+
   const yearCounter = {};
-  const updateStmt = db.prepare(`UPDATE procurement_projects SET seq_no = ? WHERE id = ?`);
+  const updateStmt = db.prepare(`UPDATE procurement_projects SET seq_no = ?, manual_order = ? WHERE id = ?`);
   const tx = db.transaction(() => {
     for (const row of all) {
       const year = (row.approval_date && row.approval_date.slice(0, 4)) || String(new Date().getFullYear());
       yearCounter[year] = (yearCounter[year] || 0) + 1;
-      const formattedSeq = `${year}-${String(yearCounter[year]).padStart(3, '0')}`;
-      updateStmt.run(formattedSeq, row.id);
+      const idx = yearCounter[year];
+      const formattedSeq = `${year}-${String(idx).padStart(3, '0')}`;
+      updateStmt.run(formattedSeq, idx, row.id);
     }
   });
   tx();
   for (const row of all) {
     syncProcurementFolderOnDisk(row.id);
   }
+}
+
+/**
+ * 解析用户输入的序号（支持输入 "1"、"001" 或 "2026-001"）
+ */
+function parseTargetSeqPosition(rawInput) {
+  const str = String(rawInput || '').trim();
+  if (!str) return null;
+  const m = str.match(/^(?:\d{4}[-_/])?(\d+)$/);
+  if (m) {
+    return parseInt(m[1], 10);
+  }
+  const num = parseInt(str, 10);
+  return isNaN(num) ? null : num;
+}
+
+/**
+ * 手动将指定合同调整到同年份的目标序号位置（其余条目自动顺延，并同步硬盘文件名）
+ */
+function reorderContractSeqPosition(contractId, rawTargetSeq) {
+  const targetNum = parseTargetSeqPosition(rawTargetSeq);
+  if (!targetNum || targetNum < 1) {
+    throw new Error('请输入有效的正整数序号（例如：1 或 2026-001）');
+  }
+
+  const targetRow = db.prepare(`SELECT id, sign_date, seq_no FROM contracts WHERE id = ?`).get(contractId);
+  if (!targetRow) throw new Error('未找到该合同记录');
+
+  const year = (targetRow.sign_date && targetRow.sign_date.slice(0, 4))
+    || (targetRow.seq_no && targetRow.seq_no.slice(0, 4))
+    || String(new Date().getFullYear());
+
+  const yearRows = db.prepare(`
+    SELECT id FROM contracts
+    WHERE substr(sign_date, 1, 4) = ?
+    ORDER BY
+      CASE WHEN manual_order > 0 THEN 0 ELSE 1 END ASC,
+      manual_order ASC,
+      sign_date ASC,
+      contract_no ASC,
+      id ASC
+  `).all(year);
+
+  const curIdx = yearRows.findIndex(r => r.id === Number(contractId));
+  if (curIdx === -1) throw new Error('未能定位该合同所在年份分组');
+
+  const [moved] = yearRows.splice(curIdx, 1);
+  const boundedIndex = Math.max(0, Math.min(yearRows.length, targetNum - 1));
+  yearRows.splice(boundedIndex, 0, moved);
+
+  const updateOrderStmt = db.prepare(`UPDATE contracts SET manual_order = ? WHERE id = ?`);
+  const tx = db.transaction(() => {
+    yearRows.forEach((r, idx) => {
+      updateOrderStmt.run(idx + 1, r.id);
+    });
+  });
+  tx();
+
+  recalculateAllSeqNos();
+  return db.prepare(`SELECT seq_no FROM contracts WHERE id = ?`).get(contractId)?.seq_no;
+}
+
+/**
+ * 手动将指定采购立项调整到同年份的目标序号位置（其余条目自动顺延，并同步硬盘文件夹名）
+ */
+function reorderProcurementSeqPosition(procId, rawTargetSeq) {
+  const targetNum = parseTargetSeqPosition(rawTargetSeq);
+  if (!targetNum || targetNum < 1) {
+    throw new Error('请输入有效的正整数序号（例如：1 或 2026-001）');
+  }
+
+  const targetRow = db.prepare(`SELECT id, approval_date, seq_no FROM procurement_projects WHERE id = ?`).get(procId);
+  if (!targetRow) throw new Error('未找到该采购立项记录');
+
+  const year = (targetRow.approval_date && targetRow.approval_date.slice(0, 4))
+    || (targetRow.seq_no && targetRow.seq_no.slice(0, 4))
+    || String(new Date().getFullYear());
+
+  const yearRows = db.prepare(`
+    SELECT id FROM procurement_projects
+    WHERE substr(approval_date, 1, 4) = ?
+    ORDER BY
+      CASE WHEN manual_order > 0 THEN 0 ELSE 1 END ASC,
+      manual_order ASC,
+      approval_date ASC,
+      procurement_no ASC,
+      id ASC
+  `).all(year);
+
+  const curIdx = yearRows.findIndex(r => r.id === Number(procId));
+  if (curIdx === -1) throw new Error('未能定位该采购立项所在年份分组');
+
+  const [moved] = yearRows.splice(curIdx, 1);
+  const boundedIndex = Math.max(0, Math.min(yearRows.length, targetNum - 1));
+  yearRows.splice(boundedIndex, 0, moved);
+
+  const updateOrderStmt = db.prepare(`UPDATE procurement_projects SET manual_order = ? WHERE id = ?`);
+  const tx = db.transaction(() => {
+    yearRows.forEach((r, idx) => {
+      updateOrderStmt.run(idx + 1, r.id);
+    });
+  });
+  tx();
+
+  recalculateAllProcurementSeqNos();
+  return db.prepare(`SELECT seq_no FROM procurement_projects WHERE id = ?`).get(procId)?.seq_no;
 }
 
 recalculateAllSeqNos();
@@ -1278,7 +1415,7 @@ function hydrateProcurementRow(row) {
   };
 }
 
-// ==================== 10. 查询过滤函数与 Excel 导出构建器（多文件超链接指向文件夹） ====================
+// ==================== 10. 查询过滤函数与 Excel 导出构建器 ====================
 function queryFilteredContracts(query = {}) {
   autoRefreshExpiredContractsInDB();
 
@@ -1382,9 +1519,6 @@ function buildBorderSpec(isGroupBottom = false) {
   };
 }
 
-/**
- * 提取相对路径所在的文件夹路径（用于多文件资料超链接直接打开对应文件夹）
- */
 function getFolderUrlFromRelFile(fileRelPath, fallbackFolderRelPath) {
   if (fileRelPath) {
     const dir = path.posix.dirname(String(fileRelPath).replace(/\\/g, '/'));
@@ -1395,12 +1529,6 @@ function getFolderUrlFromRelFile(fileRelPath, fallbackFolderRelPath) {
   return `uploads/${fallbackFolderRelPath}`;
 }
 
-/**
- * 合同台账 Excel 构建器：
- * - 第 30 列（主合同扫描件）：单文件，直接超链接到 `uploads/序号_合同编号_合同名称.pdf`
- * - 第 31 列（关联采购立项号）：多文件，超链接直接指向该立项对应的 `_立项资料` 文件夹
- * - 第 32 列（其他相关资料）：多文件，超链接直接指向该合同对应的 `_其他合同附件` 文件夹
- */
 function buildContractWorksheet(rows) {
   const headers = [
     '序号', '合同编号', '合同名称', '合同类型', '我方签约主体',
@@ -1543,19 +1671,16 @@ function buildContractWorksheet(rows) {
 
         if (meta.isFirstInGroup) {
           if (c === 30 && meta.c.attachment_path) {
-            // 主合同扫描件是单个文件，直接链接到该扫描件文件
             const relUrl = escapeExcelFormulaStr(`uploads/${meta.c.attachment_path}`);
             const label = escapeExcelFormulaStr(meta.scanFileName);
             ws[cellRef] = { t: 's', f: `HYPERLINK("${relUrl}","${label}")`, v: meta.scanFileName };
           } else if (c === 31 && meta.procNo && meta.procFiles.length > 0) {
-            // 关联采购立项资料可能是多个文件，超链接指向对应的【_立项资料】文件夹
             const lp = meta.c.linked_procurement;
             const fallbackFolder = `procurement/${buildProcurementFolderName(lp.seq_no, lp.procurement_no, lp.project_name)}`;
             const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(meta.procFiles[0].file_path, fallbackFolder));
             const label = escapeExcelFormulaStr(meta.procNo);
             ws[cellRef] = { t: 's', f: `HYPERLINK("${folderUrl}","${label}")`, v: meta.procNo };
           } else if (c === 32 && meta.relFiles.length > 0) {
-            // 合同其他相关资料可能是多个文件，超链接指向对应的【_其他合同附件】文件夹
             const fallbackFolder = `related/${buildContractRelatedFolderName(meta.c.seq_no, meta.c.contract_no, meta.c.contract_name)}`;
             const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(meta.relFiles[0].file_path, fallbackFolder));
             const dispText = meta.relFiles.length === 1
@@ -1589,11 +1714,6 @@ function buildContractWorksheet(rows) {
   return ws;
 }
 
-/**
- * 采购立项台账 Excel 构建器：
- * - 第 15 列 (P 列：关联合同编号)：单文件扫描件，直接链接到主合同扫描件文件（若未传主扫描件但有其他资料，则链接到其他资料文件夹）
- * - 第 17 列 (R 列：立项相关资料)：多文件，超链接直接指向对应的【_立项资料】文件夹
- */
 function buildProcurementWorksheet(rows) {
   const headers = [
     '序号', '项目立项编号', '项目名称', '立项类型', '费用承担部门',
@@ -1689,7 +1809,6 @@ function buildProcurementWorksheet(rows) {
             ws[cellRef] = { t: 's', f: `HYPERLINK("${folderUrl}","${label}")`, v: lc.contract_no };
           }
         } else if (c === 17 && pItem.files && pItem.files.length > 0) {
-          // 立项相关资料可能是多个文件，超链接直接指向对应的【_立项资料】文件夹
           const fallbackFolder = `procurement/${buildProcurementFolderName(pItem.seq_no, pItem.procurement_no, pItem.project_name)}`;
           const folderUrl = escapeExcelFormulaStr(getFolderUrlFromRelFile(pItem.files[0].file_path, fallbackFolder));
           const dispText = pItem.files.length === 1
@@ -1773,7 +1892,7 @@ app.get('/api/export/combined', (req, res) => {
   }
 });
 
-// ==================== 12. 合同管理 CRUD 与解绑 API ====================
+// ==================== 12. 合同管理 CRUD、手动调序与解绑 API ====================
 app.get('/api/contracts', (req, res) => {
   try {
     const rows = queryFilteredContracts(req.query);
@@ -1787,6 +1906,16 @@ app.get('/api/contracts/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM contracts WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该合同' });
   res.json({ success: true, data: hydrateContractRow(row) });
+});
+
+app.post('/api/contracts/:id/reorder', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const newSeq = reorderContractSeqPosition(id, req.body?.target_seq);
+    res.json({ success: true, seq_no: newSeq });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
 });
 
 app.post('/api/contracts/:id/unbind-procurement', (req, res) => {
@@ -1904,7 +2033,6 @@ app.post('/api/contracts', contractUploadFields, (req, res) => {
       }
 
       syncContractProcurementLink(newId, finalContractNo, b.procurement_id, true);
-      // recalculateAllSeqNos 会自动计算出正式 seq_no，并将主合同扫描件与关联资料文件夹重命名为【序号_编号_名称】格式
       recalculateAllSeqNos();
     });
 
@@ -1939,6 +2067,11 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
     const startDate = normalizeSmartDateStr(b.start_date);
     const expiryDate = normalizeSmartDateStr(b.expiry_date);
     const autoStatus = computeAutoContractStatus(b.status, expiryDate);
+
+    // 若签订年份发生跨年变更，则将该条目的 manual_order 重置为 0，使其排入新年份末尾
+    const oldYear = (old.sign_date && old.sign_date.slice(0, 4)) || '';
+    const newYear = (signDate && signDate.slice(0, 4)) || '';
+    const nextManualOrder = oldYear === newYear ? (old.manual_order || 0) : 0;
 
     const updateTx = db.transaction(() => {
       let attachment_path = old.attachment_path;
@@ -1983,6 +2116,7 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
           attachment_original_name = @attachment_original_name,
           procurement_id = @procurement_id,
           remark = @remark,
+          manual_order = @manual_order,
           updated_at = datetime('now', 'localtime')
         WHERE id = @id
       `).run({
@@ -2018,7 +2152,8 @@ app.put('/api/contracts/:id', contractUploadFields, (req, res) => {
         attachment_path,
         attachment_original_name,
         procurement_id: b.procurement_id ? Number(b.procurement_id) : null,
-        remark: (b.remark || '').trim()
+        remark: (b.remark || '').trim(),
+        manual_order: nextManualOrder
       });
 
       const relStmt = db.prepare(`
@@ -2124,7 +2259,7 @@ app.delete('/api/contracts/:id', (req, res) => {
   res.json({ success: true });
 });
 
-// ==================== 13. 采购项目立项台账 CRUD 与解绑 API ====================
+// ==================== 13. 采购项目立项台账 CRUD、手动调序与解绑 API ====================
 app.get('/api/procurements', (req, res) => {
   try {
     const rows = queryFilteredProcurements(req.query);
@@ -2138,6 +2273,16 @@ app.get('/api/procurements/:id', (req, res) => {
   const row = db.prepare(`SELECT * FROM procurement_projects WHERE id = ?`).get(req.params.id);
   if (!row) return res.status(404).json({ success: false, message: '未找到该采购立项' });
   res.json({ success: true, data: hydrateProcurementRow(row) });
+});
+
+app.post('/api/procurements/:id/reorder', (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const newSeq = reorderProcurementSeqPosition(id, req.body?.target_seq);
+    res.json({ success: true, seq_no: newSeq });
+  } catch (err) {
+    res.status(400).json({ success: false, message: err.message });
+  }
 });
 
 app.post('/api/procurements/:id/unbind-contract', (req, res) => {
@@ -2259,6 +2404,10 @@ app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, re
     const decisionDate = normalizeSmartDateStr(b.decision_date);
     const completionDate = normalizeSmartDateStr(b.completion_date);
 
+    const oldYear = (old.approval_date && old.approval_date.slice(0, 4)) || '';
+    const newYear = (approvalDate && approvalDate.slice(0, 4)) || '';
+    const nextManualOrder = oldYear === newYear ? (old.manual_order || 0) : 0;
+
     const updateProcTx = db.transaction(() => {
       db.prepare(`UPDATE contracts SET procurement_id = NULL WHERE procurement_id = ?`).run(id);
       if (old.contract_id) {
@@ -2299,6 +2448,7 @@ app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, re
           contract_id = @contract_id,
           contract_no_manual = @contract_no_manual,
           remark = @remark,
+          manual_order = @manual_order,
           updated_at = datetime('now', 'localtime')
         WHERE id = @id
       `).run({
@@ -2319,7 +2469,8 @@ app.put('/api/procurements/:id', upload.array('procurement_files', 30), (req, re
         has_contract: targetContractId ? '是' : (b.has_contract || '否'),
         contract_id: targetContractId,
         contract_no_manual: manualContractNo,
-        remark: (b.remark || '').trim()
+        remark: (b.remark || '').trim(),
+        manual_order: nextManualOrder
       });
 
       if (targetContractId) {
