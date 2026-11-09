@@ -14,21 +14,52 @@ jobs:
       - name: 1. 检出源码 (Checkout)
         uses: actions/checkout@v4
 
-      - name: 2. 配置 Node.js 20 环境 (无需 package-lock.json)
+      - name: 2. 配置 Node.js 20 环境
         uses: actions/setup-node@v4
         with:
           node-version: '20'
 
-      - name: 3. 安装依赖并针对 Electron 内核编译 SQLite 原生模块
-        run: npm install --no-audit --no-fund
+      - name: 3. 安装依赖并拉取 Electron 与 SQLite 预编译二进制 (带 504 超时自动重试与镜像兜底)
+        shell: pwsh
+        run: |
+          npm config set fetch-retries 5
+          npm config set fetch-retry-mintimeout 20000
+          npm config set fetch-retry-maxtimeout 120000
 
-      - name: 4. 使用 Electron 内核执行冒烟测试 (统一 ABI 版本，验证编号生成、多方合并与资源释放)
+          $installed = $false
+          for ($i = 1; $i -le 3; $i++) {
+            Write-Host ">>> [尝试 $i/3] 正在安装依赖..."
+            if ($i -ge 2) {
+              Write-Host ">>> 检测到网关超时，自动启用备用高速镜像源拉取 Electron 二进制包..."
+              $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+              $env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
+            }
+            npm install --no-audit --no-fund
+            if ($LASTEXITCODE -eq 0) {
+              $installed = $true
+              break
+            }
+            Start-Sleep -Seconds 5
+          }
+          if (-not $installed) {
+            throw "依赖安装失败，请检查网络状态"
+          }
+
+      - name: 4. 使用 Electron 内核执行全量 18 项回归冒烟测试
         env:
           ELECTRON_RUN_AS_NODE: 1
         run: npm test
 
       - name: 5. 打包生成 Windows .exe (免安装便携版 Portable + 安装版 Setup)
-        run: npm run dist:win
+        shell: pwsh
+        run: |
+          npm run dist:win
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host ">>> 打包下载依赖超时，切换备用镜像源重试打包..."
+            $env:ELECTRON_MIRROR = "https://npmmirror.com/mirrors/electron/"
+            $env:ELECTRON_BUILDER_BINARIES_MIRROR = "https://npmmirror.com/mirrors/electron-builder-binaries/"
+            npm run dist:win
+          }
 
       - name: 6. 上传编译好的 .exe 到 GitHub Actions Artifacts
         uses: actions/upload-artifact@v4
